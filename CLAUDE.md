@@ -19,3 +19,4 @@
 - `src/providers/` — провайдеры генерации за общим интерфейсом `ImageProvider` (`types.ts`): `laozhang-gemini.ts` (Nano Banana 2 и Pro), `mock.ts` для тестов.
 - `src/core/` — пайплайн правки области: `frame.ts` (рамка куска и пропорции модели), `mask.ts` (bbox, растушёвка, подсветка), `edit-region.ts` (весь цикл), `ledger.ts` (журнал генераций).
 - `src/cli/edit-region.ts` — CLI шага 1. `scripts/recon.ts` — разведка шага 0.
+- `docs/recon.md` — итоги разведки: время и размеры ответов, почему по умолчанию Nano Banana 2 + подсветка `pair` и `auto` не выше 2K.
