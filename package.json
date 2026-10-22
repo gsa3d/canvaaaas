@@ -8,8 +8,8 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "edit-region": "node src/cli/edit-region.ts",
-    "recon": "node scripts/recon.ts",
+    "edit-region": "node --disable-warning=ExperimentalWarning src/cli/edit-region.ts",
+    "recon": "node --disable-warning=ExperimentalWarning scripts/recon.ts",
     "typecheck": "tsc",
     "test": "vitest run"
   },
