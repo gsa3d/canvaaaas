@@ -50,3 +50,11 @@ export function subscribe(onChange: () => void): () => void {
     events?.close();
   };
 }
+
+export function uploadReference(file: Blob): Promise<{ id: string }> {
+  return fetch('/api/refs', {
+    method: 'POST',
+    headers: { [API_HEADER]: '1', 'Content-Type': 'application/octet-stream' },
+    body: file,
+  }).then((r) => handle<{ id: string }>(r));
+}

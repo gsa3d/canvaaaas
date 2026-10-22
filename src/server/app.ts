@@ -103,6 +103,15 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     json(res, { ok: true });
   });
 
+  route('POST', '/api/refs', async (req, res) => {
+    const body = await readBody(req, 500 * 1024 * 1024);
+    if (!body.length) throw new HttpError(400, 'Пустой файл');
+    json(res, { id: await session.addReference(body) });
+  });
+  route('GET', '/api/refs/:id/thumb.jpg', (_req, res, [id]) => {
+    send(res, 200, session.referenceThumb(id!), 'image/jpeg', IMMUTABLE);
+  });
+
   route('POST', '/api/doc/new', async (req, res) => {
     const { width, height, color } = await readJson<{ width: number; height: number; color?: string }>(req);
     const hex = /^#?([0-9a-f]{6})$/i.exec(color ?? '#ffffff')?.[1] ?? 'ffffff';

@@ -1,7 +1,17 @@
 import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { JobDto, MaskShape, ModelChoice, PatchDto, SizeChoice, StateDto } from '../shared/api.ts';
-import { getState, post, subscribe, upload } from './api.ts';
+import {
+  COMMAND_EVENT,
+  MAX_REFERENCES,
+  type AppCommand,
+  type JobDto,
+  type MaskShape,
+  type ModelChoice,
+  type PatchDto,
+  type SizeChoice,
+  type StateDto,
+} from '../shared/api.ts';
+import { getState, post, subscribe, upload, uploadReference } from './api.ts';
 import { CanvasView, type Tool } from './viewer.ts';
 
 function plural(n: number, one: string, few: string, many: string): string {
@@ -61,11 +71,14 @@ export function App() {
   const [toast, setToast] = useState<{ text: string; error: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [styleDraft, setStyleDraft] = useState('');
-  const [keyDialog, setKeyDialog] = useState(false);
+  const [dialog, setDialog] = useState<'settings' | 'new' | null>(null);
+  const [zoomMenu, setZoomMenu] = useState(false);
+  const [refs, setRefs] = useState<string[]>([]);
   const [, setTick] = useState(0);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const refRef = useRef<HTMLInputElement>(null);
   const viewRef = useRef<CanvasView | null>(null);
   const numbers = useRef(new Map<string, number>());
   const nextNumber = useRef(1);
@@ -139,11 +152,11 @@ export function App() {
   const generate = async () => {
     if (!canGenerate) return;
     if (!state?.hasKey) {
-      setKeyDialog(true);
+      setDialog('settings');
       return;
     }
     try {
-      const { id } = await post<{ id: string }>('/api/jobs', { shapes: selection, prompt, variants, model, size });
+      const { id } = await post<{ id: string }>('/api/jobs', { shapes: selection, prompt, variants, model, size, refs });
       setSelection([]);
       setFocusJob(id);
     } catch (err) {
@@ -159,6 +172,99 @@ export function App() {
   const redo = () => {
     if (state?.canRedo) post('/api/history/redo').catch(fail);
   };
+
+  const exportPng = () => {
+    if (!doc) return;
+    const a = document.createElement('a');
+    a.href = '/api/doc/export.png';
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const addReferences = async (files: Iterable<File>) => {
+    const images = [...files].filter((f) => f.type.startsWith('image/'));
+    if (!images.length) return;
+    const room = MAX_REFERENCES - refs.length;
+    if (room <= 0) {
+      notify(`Не больше ${MAX_REFERENCES} референсов на правку`);
+      return;
+    }
+    if (images.length > room) notify(`Добавлю только ${room}: не больше ${MAX_REFERENCES} референсов на правку`);
+    try {
+      for (const file of images.slice(0, room)) {
+        const { id } = await uploadReference(file);
+        setRefs((r) => [...r, id]);
+      }
+    } catch (err) {
+      fail(err);
+    }
+  };
+
+  // Команды из меню приложения и те же действия с клавиатуры
+  const run = (command: AppCommand) => {
+    const view = viewRef.current;
+    const editing = document.activeElement instanceof HTMLTextAreaElement || document.activeElement instanceof HTMLInputElement;
+    switch (command) {
+      case 'settings':
+        setDialog('settings');
+        break;
+      case 'open':
+        fileRef.current?.click();
+        break;
+      case 'new':
+        setDialog('new');
+        break;
+      case 'export':
+        exportPng();
+        break;
+      case 'undo':
+        if (editing) document.execCommand('undo');
+        else undo();
+        break;
+      case 'redo':
+        if (editing) document.execCommand('redo');
+        else redo();
+        break;
+      case 'zoom-fit':
+        view?.fit();
+        break;
+      case 'zoom-100':
+        view?.zoomTo(100);
+        break;
+      case 'zoom-50':
+        view?.zoomTo(50);
+        break;
+      case 'zoom-in':
+        view?.zoomBy(2);
+        break;
+      case 'zoom-out':
+        view?.zoomBy(0.5);
+        break;
+    }
+  };
+  const commands = useRef(run);
+  commands.current = run;
+  useEffect(() => {
+    const onCommand = (e: Event) => commands.current((e as CustomEvent<AppCommand>).detail);
+    window.addEventListener(COMMAND_EVENT, onCommand);
+    return () => window.removeEventListener(COMMAND_EVENT, onCommand);
+  }, []);
+
+  // Картинка из буфера обмена (⌘V) становится референсом
+  const onPaste = useRef<(e: ClipboardEvent) => void>(() => undefined);
+  onPaste.current = (e) => {
+    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+    if (!files.length || !doc) return;
+    e.preventDefault();
+    void addReferences(files);
+  };
+  useEffect(() => {
+    const paste = (e: ClipboardEvent) => onPaste.current(e);
+    window.addEventListener('paste', paste);
+    return () => window.removeEventListener('paste', paste);
+  }, []);
 
   const switchVariant = (job: JobDto, dir: number) => {
     const done = job.variants.filter((v) => v.status === 'done').map((v) => v.n);
@@ -184,27 +290,39 @@ export function App() {
       return;
     }
     if (e.key === 'Escape') {
-      if (keyDialog) setKeyDialog(false);
+      if (zoomMenu) setZoomMenu(false);
+      else if (dialog) setDialog(null);
       else if (maskJob) setMaskJob(null);
       else setSelection([]);
       (document.activeElement as HTMLElement | null)?.blur();
       return;
     }
-    if (typing) return;
+    // Те же сочетания, что показаны в меню; работают и когда фокус в поле ввода
+    if (mod) {
+      const key = e.key.toLowerCase();
+      const byKey: Record<string, AppCommand> = {
+        ',': 'settings',
+        o: 'open',
+        n: 'new',
+        '0': 'zoom-fit',
+        '1': 'zoom-100',
+        '2': 'zoom-50',
+        '=': 'zoom-in',
+        '+': 'zoom-in',
+        '-': 'zoom-out',
+      };
+      const command = e.shiftKey && key === 'e' ? 'export' : e.shiftKey || e.altKey ? undefined : byKey[key];
+      if (command) {
+        e.preventDefault();
+        run(command);
+        return;
+      }
+    }
+    if (typing || dialog) return;
     if (mod && e.key.toLowerCase() === 'z') {
       e.preventDefault();
       if (e.shiftKey) redo();
       else undo();
-      return;
-    }
-    if (mod && e.key === '0') {
-      e.preventDefault();
-      viewRef.current?.fit();
-      return;
-    }
-    if (mod && e.key === '1') {
-      e.preventDefault();
-      viewRef.current?.zoomTo(100);
       return;
     }
     if (mod) return;
@@ -280,12 +398,40 @@ export function App() {
                 Повторить
               </button>
               <span class="sep" />
-              <button class="ghost zoom" title="Вписать в окно (⌘0)" onClick={() => viewRef.current?.fit()}>
-                {zoom}%
-              </button>
-              <a class="button ghost" href="/api/doc/export.png" download>
+              <div class="zoom-control">
+                <button class="ghost icon" title="Уменьшить (⌘−)" aria-label="Уменьшить" onClick={() => run('zoom-out')}>
+                  −
+                </button>
+                <button
+                  class="ghost zoom"
+                  title="Масштаб"
+                  aria-haspopup="menu"
+                  aria-expanded={zoomMenu}
+                  onClick={() => setZoomMenu((v) => !v)}
+                >
+                  {zoom}%
+                </button>
+                <button class="ghost icon" title="Увеличить (⌘=)" aria-label="Увеличить" onClick={() => run('zoom-in')}>
+                  +
+                </button>
+                {zoomMenu && (
+                  <ul class="zoom-menu" role="menu" onClick={() => setZoomMenu(false)}>
+                    <li role="menuitem" onClick={() => run('zoom-fit')}>
+                      Вписать в окно <kbd>⌘0</kbd>
+                    </li>
+                    {[25, 50, 100, 200, 400].map((p) => (
+                      <li role="menuitem" onClick={() => viewRef.current?.zoomTo(p)}>
+                        {p}% {p === 100 && <kbd>⌘1</kbd>}
+                        {p === 50 && <kbd>⌘2</kbd>}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <span class="sep" />
+              <button class="ghost" title="Сохранить PNG в полном разрешении (⇧⌘E)" onClick={exportPng}>
                 Сохранить PNG
-              </a>
+              </button>
             </>
           )}
         </div>
@@ -293,12 +439,6 @@ export function App() {
           {state?.provider === 'mock' && <span class="badge">подставная модель</span>}
           Генераций: {state?.generations.session ?? 0} за сеанс, {state?.generations.today ?? 0} сегодня
         </div>
-        {state?.provider === 'laozhang' && (
-          <button class="ghost key-button" title="Ключ laozhang.ai" onClick={() => setKeyDialog(true)}>
-            <span class={state.hasKey ? 'key-dot ok' : 'key-dot'} />
-            Ключ
-          </button>
-        )}
       </header>
 
       <nav class="rail" aria-label="Инструменты">
@@ -340,9 +480,9 @@ export function App() {
         {state && !state.hasKey && (
           <section class="panel notice">
             <h2>Нужен ключ laozhang.ai</h2>
-            <p class="hint">Без него генерация не работает. Ключ вводится один раз и хранится на этом компьютере.</p>
-            <button class="primary" onClick={() => setKeyDialog(true)}>
-              Добавить ключ
+            <p class="hint">Без него генерация не работает. Ключ вводится один раз в настройках (⌘,) и хранится на этом компьютере.</p>
+            <button class="primary" onClick={() => setDialog('settings')}>
+              Открыть настройки
             </button>
           </section>
         )}
@@ -361,7 +501,16 @@ export function App() {
               />
             </section>
 
-            <section class="panel">
+            <section
+              class="panel"
+              onDragOver={(e) => {
+                if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                void addReferences(e.dataTransfer?.files ?? []);
+              }}
+            >
               <h2>Новая правка</h2>
               <p class={hasSelection ? 'hint ok' : 'hint'}>
                 {hasSelection
@@ -370,10 +519,25 @@ export function App() {
               </p>
               <textarea
                 rows={3}
-                placeholder="Что сделать с областью"
+                placeholder="Опишите, что должно получиться: «рельсы на мосту продолжают колею слева, без разрыва»"
                 value={prompt}
                 onInput={(e) => setPrompt(e.currentTarget.value)}
               />
+              <div class="refs">
+                {refs.map((id) => (
+                  <figure class="ref">
+                    <img src={`/api/refs/${id}/thumb.jpg`} alt="Референс" />
+                    <button class="ref-remove" aria-label="Убрать референс" onClick={() => setRefs((r) => r.filter((x) => x !== id))}>
+                      ×
+                    </button>
+                  </figure>
+                ))}
+                {refs.length < MAX_REFERENCES && (
+                  <button class="ref-add" title="Или перетащите картинку сюда, или вставьте её через ⌘V" onClick={() => refRef.current?.click()}>
+                    + Референс
+                  </button>
+                )}
+              </div>
               <div class="options">
                 <label>
                   Модель
@@ -460,17 +624,49 @@ export function App() {
         )}
       </aside>
 
-      {keyDialog && state && (
-        <KeyDialog
+      {dialog === 'settings' && state && (
+        <SettingsDialog
           hasKey={state.hasKey}
-          onClose={() => setKeyDialog(false)}
+          onClose={() => setDialog(null)}
           onSaved={(text) => {
-            setKeyDialog(false);
+            setDialog(null);
             notify(text, false);
           }}
           onError={fail}
         />
       )}
+      {dialog === 'new' && (
+        <div class="modal-backdrop" onClick={() => setDialog(null)}>
+          <div class="modal" role="dialog" aria-modal="true" aria-labelledby="new-title" onClick={(e) => e.stopPropagation()}>
+            <h2 id="new-title">Новый холст</h2>
+            {doc && <p class="hint">Текущий документ закроется вместе с непринятыми правками.</p>}
+            <NewCanvasForm
+              primary
+              onError={fail}
+              onCreated={() => setDialog(null)}
+              extra={
+                <button type="button" onClick={() => setDialog(null)}>
+                  Отмена
+                </button>
+              }
+            />
+          </div>
+        </div>
+      )}
+      {zoomMenu && <div class="click-catcher" onClick={() => setZoomMenu(false)} />}
+
+      <input
+        ref={refRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        multiple
+        hidden
+        onChange={(e) => {
+          const files = [...(e.currentTarget.files ?? [])];
+          e.currentTarget.value = '';
+          void addReferences(files);
+        }}
+      />
 
       <input
         ref={fileRef}
@@ -517,7 +713,8 @@ function JobCard(props: {
         {job.status === 'running' && `, готово ${done.length} из ${job.variants.length}`}
         {busy && `, ${clock(Date.now() - Date.parse(job.createdAt))}`}
         {job.status === 'done' && running > 0 && `, ещё ${running} в работе`}
-        {job.modelSize && <span class="dim">, {job.imageSize} {job.model === 'pro' ? 'Pro' : ''}</span>}
+        {job.modelSize && <span class="dim">, {[job.imageSize, job.model === 'pro' ? 'Pro' : ''].filter(Boolean).join(' ')}</span>}
+        {job.refs > 0 && <span class="dim">, референсов: {job.refs}</span>}
       </p>
       {job.error && <p class="job-error">{job.error}</p>}
       {job.warnings.map((w) => (
@@ -538,6 +735,12 @@ function JobCard(props: {
               ›
             </button>
           </div>
+          {selected?.insideChangedPct !== undefined && selected.insideChangedPct < 2 && (
+            <p class="job-warning">
+              В этом варианте модель почти ничего не изменила. Опишите, что должно получиться, а не что исправить, или выделите
+              область поменьше.
+            </p>
+          )}
           <div class="row">
             <button class="primary" onClick={() => props.onAction('accept')}>
               Принять
@@ -591,7 +794,7 @@ function HistoryItem(props: { patch: PatchDto; onToggle: () => void; onShow: () 
   );
 }
 
-function KeyDialog(props: { hasKey: boolean; onClose: () => void; onSaved: (text: string) => void; onError: (err: unknown) => void }) {
+function SettingsDialog(props: { hasKey: boolean; onClose: () => void; onSaved: (text: string) => void; onError: (err: unknown) => void }) {
   const [value, setValue] = useState('');
   const [saving, setSaving] = useState(false);
   const mac = navigator.userAgent.includes('Mac');
@@ -609,8 +812,9 @@ function KeyDialog(props: { hasKey: boolean; onClose: () => void; onSaved: (text
   };
   return (
     <div class="modal-backdrop" onClick={props.onClose}>
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="key-title" onClick={(e) => e.stopPropagation()}>
-        <h2 id="key-title">Ключ laozhang.ai</h2>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onClick={(e) => e.stopPropagation()}>
+        <h2 id="settings-title">Настройки</h2>
+        <h3>Ключ laozhang.ai</h3>
         <p>
           {props.hasKey
             ? 'Ключ сохранён. Чтобы заменить его, вставьте новый.'
@@ -659,10 +863,41 @@ function KeyDialog(props: { hasKey: boolean; onClose: () => void; onSaved: (text
   );
 }
 
-function EmptyState(props: { onOpen: () => void; onError: (err: unknown) => void }) {
+function NewCanvasForm(props: { onError: (err: unknown) => void; onCreated?: () => void; extra?: ComponentChildren; primary?: boolean }) {
   const [width, setWidth] = useState(4096);
   const [height, setHeight] = useState(3072);
   const [color, setColor] = useState('#ffffff');
+  return (
+    <form
+      class="new-canvas"
+      onSubmit={(e) => {
+        e.preventDefault();
+        post('/api/doc/new', { width, height, color })
+          .then(() => props.onCreated?.())
+          .catch(props.onError);
+      }}
+    >
+      <label>
+        Ширина
+        <input type="number" min={16} max={30000} value={width} onInput={(e) => setWidth(Number(e.currentTarget.value))} />
+      </label>
+      <label>
+        Высота
+        <input type="number" min={16} max={30000} value={height} onInput={(e) => setHeight(Number(e.currentTarget.value))} />
+      </label>
+      <label>
+        Фон
+        <input type="color" value={color} onInput={(e) => setColor(e.currentTarget.value)} />
+      </label>
+      <button type="submit" class={props.primary ? 'primary' : ''}>
+        Создать холст
+      </button>
+      {props.extra}
+    </form>
+  );
+}
+
+function EmptyState(props: { onOpen: () => void; onError: (err: unknown) => void }) {
   return (
     <div class="empty">
       <h1>Откройте картинку или начните с пустого холста</h1>
@@ -670,27 +905,7 @@ function EmptyState(props: { onOpen: () => void; onError: (err: unknown) => void
       <button class="primary" onClick={props.onOpen}>
         Открыть картинку…
       </button>
-      <form
-        class="new-canvas"
-        onSubmit={(e) => {
-          e.preventDefault();
-          post('/api/doc/new', { width, height, color }).catch(props.onError);
-        }}
-      >
-        <label>
-          Ширина
-          <input type="number" min={16} max={30000} value={width} onInput={(e) => setWidth(Number(e.currentTarget.value))} />
-        </label>
-        <label>
-          Высота
-          <input type="number" min={16} max={30000} value={height} onInput={(e) => setHeight(Number(e.currentTarget.value))} />
-        </label>
-        <label>
-          Фон
-          <input type="color" value={color} onInput={(e) => setColor(e.currentTarget.value)} />
-        </label>
-        <button type="submit">Создать холст</button>
-      </form>
+      <NewCanvasForm onError={props.onError} />
     </div>
   );
 }

@@ -119,7 +119,7 @@ async function main(): Promise<void> {
     const s = o.stats;
     console.log(
       `Вариант ${o.index + 1} → ${name}: ответ ${s.modelOutput.width}×${s.modelOutput.height} за ${(o.generated.elapsedMs / 1000).toFixed(1)} с; ` +
-        `вне маски модель изменила ${s.outsideChangedPct.toFixed(1)}% пикселей (MAE ${s.outsideMae.toFixed(1)}, PSNR ${s.outsidePsnr.toFixed(1)} дБ), ` +
+        `внутри маски изменено ${s.insideChangedPct.toFixed(1)}%, вне маски ${s.outsideChangedPct.toFixed(1)}% пикселей (MAE ${s.outsideMae.toFixed(1)}, PSNR ${s.outsidePsnr.toFixed(1)} дБ), ` +
         `сдвиг ${s.shift.dx}, ${s.shift.dy} px`,
     );
     summary.push({ variant: o.index + 1, file: name, elapsedMs: o.generated.elapsedMs, text: o.generated.text, patchRect: o.patchRect, ...s });

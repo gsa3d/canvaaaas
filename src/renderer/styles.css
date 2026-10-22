@@ -71,7 +71,8 @@ textarea {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  min-width: 0;
+  flex: none;
+  max-width: 320px;
   white-space: nowrap;
   overflow: hidden;
 }
@@ -98,11 +99,19 @@ textarea {
 
 .counter {
   margin-left: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   display: flex;
   align-items: center;
   gap: 8px;
   color: var(--muted);
   white-space: nowrap;
+}
+
+.topbar-actions {
+  flex: none;
 }
 
 .badge {
@@ -619,21 +628,94 @@ input[type='color'] {
   text-decoration: line-through;
 }
 
-/* ——— Ключ ——— */
+/* ——— Масштаб ——— */
 
-.key-button {
-  flex: none;
+.zoom-control {
+  position: relative;
+  display: flex;
+  align-items: center;
 }
 
-.key-dot {
-  width: 8px;
-  height: 8px;
+.zoom-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  min-width: 190px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper-2);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+}
+
+.zoom-menu li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.zoom-menu li:hover {
+  background: var(--accent-soft);
+}
+
+kbd {
+  font: inherit;
+  color: var(--muted);
+}
+
+.click-catcher {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+}
+
+/* ——— Референсы ——— */
+
+.refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ref {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  margin: 0;
+}
+
+.ref img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+}
+
+.ref-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-height: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
   border-radius: 50%;
-  background: var(--danger);
+  font-size: 13px;
+  line-height: 1;
 }
 
-.key-dot.ok {
-  background: #2e9e5b;
+.ref-add {
+  height: 56px;
+  border-style: dashed;
+  color: var(--muted);
 }
 
 .panel.notice {
@@ -673,6 +755,23 @@ button.danger {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
+}
+
+.modal h3 {
+  margin: 6px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.modal .new-canvas {
+  margin-top: 0;
+  padding: 0;
+  background: none;
+  flex-wrap: wrap;
+}
+
+.modal .new-canvas label {
+  color: var(--muted);
 }
 
 .modal p {

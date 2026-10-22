@@ -304,6 +304,11 @@ export class CanvasView {
     this.viewer.viewport.fitBounds(this.base.imageToViewportRectangle(r));
   }
 
+  zoomBy(factor: number): void {
+    this.viewer.viewport.zoomBy(factor);
+    this.viewer.viewport.applyConstraints();
+  }
+
   zoomTo(percent: number): void {
     if (!this.base) return;
     this.viewer.viewport.zoomTo(this.base.imageToViewportZoom(percent / 100));

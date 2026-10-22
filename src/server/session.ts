@@ -13,12 +13,20 @@ import { applyShapes } from '../core/mask-shapes.ts';
 import type { KeyStore } from '../core/secrets.ts';
 import { laozhangGemini } from '../providers/laozhang-gemini.ts';
 import { mockProvider } from '../providers/mock.ts';
-import type { ImageProvider } from '../providers/types.ts';
-import { shapesBBox, type CreateJobRequest, type JobDto, type MaskShape, type ModelChoice, type RectDto, type SizeChoice, type StateDto } from '../shared/api.ts';
+import type { ImageProvider, InputImage } from '../providers/types.ts';
+import { MAX_REFERENCES, shapesBBox, type CreateJobRequest, type JobDto, type MaskShape, type ModelChoice, type RectDto, type SizeChoice, type StateDto } from '../shared/api.ts';
 
 const MAX_RUNNING_JOBS = 2;
 const MAX_VARIANTS_PER_JOB = 8;
 const MASK_UNDO_LIMIT = 30;
+const REFERENCES_KEPT = 30;
+/** Референс уменьшается до этого размера по большей стороне: модели больше не нужно */
+const REFERENCE_SIZE = 1536;
+
+interface Reference {
+  image: InputImage;
+  thumb: Buffer;
+}
 
 interface Variant {
   n: number;
@@ -28,6 +36,7 @@ interface Variant {
   /** Ответ модели в размере рамки куска, RGB */
   gen?: Buffer;
   outsideChangedPct?: number;
+  insideChangedPct?: number;
 }
 
 interface Job {
@@ -44,6 +53,7 @@ interface Job {
   /** Границы выделения — известны сразу, ещё до подготовки куска */
   area: RectDto;
   variantsRequested: number;
+  references: InputImage[];
   prep?: PreparedEdit;
   /** Текущая маска части куска внутри холста — её можно править после генерации */
   mask?: Uint8Array;
@@ -73,6 +83,7 @@ export class Session {
   private generations = 0;
   private todayAtStart = 0;
   private readonly listeners = new Set<() => void>();
+  private readonly references = new Map<string, Reference>();
   private emitTimer: NodeJS.Timeout | undefined;
 
   constructor(providerKind: 'laozhang' | 'mock', keys: KeyStore) {
@@ -152,6 +163,7 @@ export class Session {
         status: j.status,
         error: j.error,
         createdAt: j.createdAt,
+        refs: j.references.length,
         bbox: j.prep?.bbox ?? j.area,
         inside: j.prep?.frame.inside,
         imageSize: j.prep?.imageSize,
@@ -163,6 +175,7 @@ export class Session {
           error: v.error,
           elapsedMs: v.elapsedMs,
           outsideChangedPct: v.outsideChangedPct,
+          insideChangedPct: v.insideChangedPct,
         })),
         selected: j.selected,
         rev: j.rev,
@@ -227,6 +240,29 @@ export class Session {
     this.jobs = [];
   }
 
+  // ——— Референсы ———
+
+  /** Картинка-референс: приводится к sRGB JPEG не больше REFERENCE_SIZE, хранится до конца сеанса */
+  async addReference(data: Buffer): Promise<string> {
+    const jpeg = await sharp(data, { limitInputPixels: false, autoOrient: true })
+      .flatten({ background: '#ffffff' })
+      .toColourspace('srgb')
+      .resize(REFERENCE_SIZE, REFERENCE_SIZE, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 90 })
+      .toBuffer();
+    const thumb = await sharp(jpeg).resize(160, 160, { fit: 'cover' }).jpeg({ quality: 80 }).toBuffer();
+    const id = randomUUID();
+    this.references.set(id, { image: { data: jpeg, mimeType: 'image/jpeg' }, thumb });
+    while (this.references.size > REFERENCES_KEPT) this.references.delete(this.references.keys().next().value!);
+    return id;
+  }
+
+  referenceThumb(id: string): Buffer {
+    const ref = this.references.get(id);
+    if (!ref) throw new Error('Нет такого референса');
+    return ref.thumb;
+  }
+
   // ——— Задачи ———
 
   createJob(req: CreateJobRequest): string {
@@ -235,6 +271,13 @@ export class Session {
     const area = shapesBBox(req.shapes);
     if (!area) throw new Error('Нет выделения');
     const variants = Math.min(Math.max(Math.round(req.variants), 1), 4);
+    const refIds = req.refs ?? [];
+    if (refIds.length > MAX_REFERENCES) throw new Error(`Не больше ${MAX_REFERENCES} референсов на правку`);
+    const references = refIds.map((id) => {
+      const ref = this.references.get(id);
+      if (!ref) throw new Error('Референс не найден — добавьте картинку заново');
+      return ref.image;
+    });
     const job: Job = {
       id: randomUUID(),
       docId: doc.id,
@@ -247,6 +290,7 @@ export class Session {
       shapes: req.shapes,
       area,
       variantsRequested: variants,
+      references,
       maskUndo: [],
       variants: [],
       selected: 0,
@@ -297,6 +341,7 @@ export class Session {
         style: job.style,
         provider: this.provider(job.model),
         imageSize: job.size,
+        references: job.references,
       });
       job.prep = prep;
       job.mask = prep.insideMask;
@@ -350,6 +395,7 @@ export class Session {
           v.gen = gen;
           v.elapsedMs = res.elapsedMs;
           v.outsideChangedPct = stats.outsideChangedPct;
+          v.insideChangedPct = stats.insideChangedPct;
           v.status = 'done';
           if (job.variants[job.selected]?.status !== 'done') job.selected = v.n;
         } catch (err) {

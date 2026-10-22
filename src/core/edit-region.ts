@@ -50,6 +50,8 @@ export interface EditRegionOptions {
   /** Потолок для auto: 4K у Nano Banana идёт 4–5 минут, его надо просить явно */
   maxAutoSize?: string;
   guide?: Guide;
+  /** Картинки-референсы (персонаж, стиль): уходят модели после куска */
+  references?: InputImage[];
 }
 
 export interface PreparedEdit {
@@ -84,6 +86,8 @@ export interface VariantStats {
   outsideChangedPct: number;
   /** Сдвиг содержимого ответа относительно куска, в пикселях куска */
   shift: { dx: number; dy: number; maeAtShift: number };
+  /** Доля пикселей внутри маски, которые модель заметно изменила: около нуля — правка не случилась */
+  insideChangedPct: number;
   modelOutput: Size;
 }
 
@@ -100,31 +104,34 @@ const DEFAULTS = { context: 0.3, contextMin: 128, feather: 24, imageSize: 'auto'
 /** Насколько кусок может быть больше ответа модели, прежде чем предупреждать о потере детализации */
 const SCALE_WARN = 1.15;
 
-export function buildPrompt(guide: Guide, request: string, style?: string): string {
-  const keep =
-    'Outside that region keep everything exactly as in the original: same framing and scale, composition, colors, lighting, perspective, line work and level of detail. ' +
-    'The new content must blend seamlessly into its surroundings and match the existing style. ' +
-    'Everything new must fit completely inside the region: nothing may extend past its edge.';
-  const intro: Record<Guide, string> = {
-    pair:
-      'You are retouching one region of a larger illustration.\n' +
-      'Image 1 is the current crop. Image 2 is the same crop with the region to change tinted magenta and outlined in magenta.\n' +
-      `Return image 1 with ONLY that region redrawn according to the request below. ${keep}\n` +
-      'Do not draw any magenta tint, outline, border, text or watermark.',
+export function buildPrompt(guide: Guide, request: string, style?: string, references = 0): string {
+  // Задача — первой и как обязательная: с осторожной формулировкой («верни картинку 1, всё сохрани»)
+  // модель на расплывчатых запросах возвращала кусок почти без изменений. Сохранность всего вне маски
+  // обеспечивает вклейка, поэтому модели можно смело перерисовывать область целиком.
+  const where: Record<Guide, string> = {
+    pair: 'Image 1 is a crop of a larger illustration. Image 2 is the same crop with the area to edit tinted magenta and outlined. Apply the task to that area of image 1 and return the edited crop.',
     overlay:
-      'You are retouching one region of a larger illustration.\n' +
-      'The image is a crop in which the region to change is tinted magenta and outlined in magenta.\n' +
-      `Return the same crop with ONLY that region redrawn according to the request below and with the magenta tint and outline completely removed. ${keep}\n` +
-      'Do not draw any border, text or watermark.',
-    blank:
-      'You are retouching one region of a larger illustration.\n' +
-      'The image is a crop in which the region to change is painted flat gray.\n' +
-      `Return the same crop with the gray region filled according to the request below, so that no gray patch remains. ${keep}\n` +
-      'Do not draw any border, text or watermark.',
+      'The image is a crop of a larger illustration; the area to edit is tinted magenta and outlined. Apply the task to that area and return the edited crop with the magenta tint and outline completely gone.',
+    blank: 'The image is a crop of a larger illustration; the area to edit is painted flat gray. Apply the task there and return the crop with the gray area fully painted, no gray patch left.',
   };
-  let text = `${intro[guide]}\n\nRequest: ${request}`;
-  if (style?.trim()) text += `\nOverall style of the illustration: ${style.trim()}`;
-  return text;
+  const lines = [
+    'Edit this illustration. Carry out the task clearly and completely.',
+    '',
+    `TASK: ${request.trim()}`,
+    '',
+    where[guide],
+    '- Inside the area: make the change fully and visibly; redraw whatever is needed there.',
+    '- Outside the area: keep the picture as it is, with the same framing and scale, so the edit lines up with its surroundings.',
+    '- Match the existing style, line work, lighting and perspective so the edit blends in seamlessly.',
+    `- Do not draw ${guide === 'blank' ? 'any' : 'the magenta tint, the outline or any'} borders, text or watermarks.`,
+  ];
+  if (references > 0) {
+    const first = guide === 'pair' ? 3 : 2;
+    const range = references === 1 ? `Image ${first} is a reference image` : `Images ${first}–${first + references - 1} are reference images`;
+    lines.push(`- ${range} from the artist: use them as visual reference for what the task mentions (characters, objects, style); do not copy their framing or paste them in whole.`);
+  }
+  if (style?.trim()) lines.push('', `Style of the whole illustration: ${style.trim()}`);
+  return lines.join('\n');
 }
 
 function chooseImageSize(provider: ImageProvider, aspectRatio: string, frame: Size, requested: string, maxAuto: string): string {
@@ -300,8 +307,8 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
     scale,
     feather,
     warnings,
-    prompt: buildPrompt(guide, opts.prompt, opts.style),
-    images,
+    prompt: buildPrompt(guide, opts.prompt, opts.style, opts.references?.length ?? 0),
+    images: [...images, ...(opts.references ?? [])],
     frameRgb,
     insideMask,
     alpha,
@@ -344,6 +351,22 @@ export async function measure(prep: PreparedEdit, gen: Buffer, modelOutput: Size
   }
   const mse = count ? sumSq / (count * 3) : 0;
 
+  let insideTotal = 0;
+  let insideChanged = 0;
+  for (let y = 0; y < inside.height; y++) {
+    for (let x = 0; x < inside.width; x++) {
+      if (prep.insideMask[y * inside.width + x]! < 128) continue;
+      const i = ((y + oy) * rect.width + x + ox) * 3;
+      insideTotal++;
+      for (let c = 0; c < 3; c++) {
+        if (Math.abs(gen[i + c]! - prep.frameRgb[i + c]!) > 24) {
+          insideChanged++;
+          break;
+        }
+      }
+    }
+  }
+
   // Сдвиг ищем на уменьшенной копии: перебор смещений в пределах ±6 px
   const small = Math.min(1, 384 / Math.max(rect.width, rect.height));
   const sw = Math.max(1, Math.round(rect.width * small));
@@ -380,6 +403,7 @@ export async function measure(prep: PreparedEdit, gen: Buffer, modelOutput: Size
     outsidePsnr: mse > 0 ? 10 * Math.log10((255 * 255) / mse) : Infinity,
     outsideChangedPct: count ? (100 * changed) / count : 0,
     shift: { dx: Math.round(best.dx / small), dy: Math.round(best.dy / small), maeAtShift: best.mae },
+    insideChangedPct: insideTotal ? (100 * insideChanged) / insideTotal : 0,
     modelOutput,
   };
 }

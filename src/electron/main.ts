@@ -3,14 +3,29 @@
 import { join } from 'node:path';
 import { app, BrowserWindow, Menu, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
 import { encryptedFileStore, keychainStore, withEnv } from '../core/secrets.ts';
+import { COMMAND_EVENT, type AppCommand } from '../shared/api.ts';
 import { startServer } from '../server/app.ts';
 import { Session } from '../server/session.ts';
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
-// Меню по-русски; Правка нужна, чтобы в полях работали копирование и вставка
-function buildMenu(): void {
+// Меню по-русски. Пункты шлют команду в окно; их сочетания клавиш только показываются
+// (registerAccelerator: false), а нажатия обрабатывает интерфейс — так нигде нет двойного срабатывания.
+// «Отменить» и «Повторить» зарегистрированы по-настоящему: на macOS без них не работает отмена в полях ввода,
+// а холст, когда фокус не в поле, перехватывает эти клавиши раньше меню.
+function buildMenu(win: BrowserWindow): void {
   const mac = process.platform === 'darwin';
+  const send = (command: AppCommand) =>
+    void win.webContents.executeJavaScript(
+      `window.dispatchEvent(new CustomEvent(${JSON.stringify(COMMAND_EVENT)}, { detail: ${JSON.stringify(command)} }))`,
+    );
+  const item = (label: string, command: AppCommand, accelerator?: string): MenuItemConstructorOptions => ({
+    label,
+    accelerator,
+    registerAccelerator: false,
+    click: () => send(command),
+  });
+  const settings = item('Настройки…', 'settings', 'CmdOrCtrl+,');
   const template: MenuItemConstructorOptions[] = [
     ...(mac
       ? [
@@ -18,6 +33,8 @@ function buildMenu(): void {
             label: 'canvaaaas',
             submenu: [
               { role: 'about', label: 'О canvaaaas' },
+              { type: 'separator' },
+              settings,
               { type: 'separator' },
               { role: 'hide', label: 'Скрыть canvaaaas' },
               { role: 'hideOthers', label: 'Скрыть остальные' },
@@ -29,10 +46,20 @@ function buildMenu(): void {
         ]
       : []),
     {
+      label: 'Файл',
+      submenu: [
+        item('Открыть картинку…', 'open', 'CmdOrCtrl+O'),
+        item('Новый холст…', 'new', 'CmdOrCtrl+N'),
+        { type: 'separator' },
+        item('Сохранить PNG…', 'export', 'CmdOrCtrl+Shift+E'),
+        ...(mac ? [] : [{ type: 'separator' } as const, settings, { type: 'separator' } as const, { role: 'quit', label: 'Выход' } as const]),
+      ],
+    },
+    {
       label: 'Правка',
       submenu: [
-        { role: 'undo', label: 'Отменить' },
-        { role: 'redo', label: 'Повторить' },
+        { label: 'Отменить', accelerator: 'CmdOrCtrl+Z', click: () => send('undo') },
+        { label: 'Повторить', accelerator: 'Shift+CmdOrCtrl+Z', click: () => send('redo') },
         { type: 'separator' },
         { role: 'cut', label: 'Вырезать' },
         { role: 'copy', label: 'Копировать' },
@@ -43,9 +70,14 @@ function buildMenu(): void {
     {
       label: 'Вид',
       submenu: [
-        { role: 'reload', label: 'Перезагрузить окно' },
-        { role: 'togglefullscreen', label: 'Во весь экран' },
+        item('Вписать в окно', 'zoom-fit', 'CmdOrCtrl+0'),
+        item('Масштаб 100%', 'zoom-100', 'CmdOrCtrl+1'),
+        item('Масштаб 50%', 'zoom-50', 'CmdOrCtrl+2'),
+        item('Увеличить', 'zoom-in', 'CmdOrCtrl+='),
+        item('Уменьшить', 'zoom-out', 'CmdOrCtrl+-'),
         { type: 'separator' },
+        { role: 'togglefullscreen', label: 'Во весь экран' },
+        { role: 'reload', label: 'Перезагрузить окно' },
         { role: 'toggleDevTools', label: 'Инструменты разработчика' },
       ],
     },
@@ -54,7 +86,6 @@ function buildMenu(): void {
       submenu: [
         { role: 'minimize', label: 'Свернуть' },
         { role: 'zoom', label: 'Изменить размер' },
-        ...(mac ? [] : [{ role: 'quit', label: 'Выйти' } satisfies MenuItemConstructorOptions]),
       ],
     },
   ];
@@ -62,7 +93,6 @@ function buildMenu(): void {
 }
 
 app.whenReady().then(async () => {
-  buildMenu();
   // Ключ: на macOS — Связка ключей, на Windows — файл, зашифрованный системой для текущего пользователя
   const keys = withEnv(
     process.platform === 'darwin'
@@ -86,6 +116,7 @@ app.whenReady().then(async () => {
     backgroundColor: '#505255',
     webPreferences: { contextIsolation: true, sandbox: true },
   });
+  buildMenu(win);
   // Окно живёт только на своём сервере; внешние ссылки — в браузере
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);

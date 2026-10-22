@@ -36,6 +36,8 @@ export interface VariantDto {
   elapsedMs?: number;
   /** Доля пикселей вне маски, которые модель заметно изменила */
   outsideChangedPct?: number;
+  /** Доля пикселей внутри маски, которые модель заметно изменила: около нуля — правка не случилась */
+  insideChangedPct?: number;
 }
 
 export interface JobDto {
@@ -45,6 +47,8 @@ export interface JobDto {
   status: 'queued' | 'preparing' | 'running' | 'done' | 'error';
   error?: string;
   createdAt: string;
+  /** Сколько референсов ушло с правкой */
+  refs: number;
   bbox?: RectDto;
   /** Часть куска внутри холста: здесь лежат слой правки и маска */
   inside?: RectDto;
@@ -84,7 +88,11 @@ export interface CreateJobRequest {
   variants: number;
   model: ModelChoice;
   size: SizeChoice;
+  /** Картинки-референсы, загруженные через /api/refs (не больше MAX_REFERENCES) */
+  refs?: string[];
 }
+
+export const MAX_REFERENCES = 3;
 
 /** Заголовок, без которого сервер не примет изменяющий запрос (защита от чужих страниц) */
 export const API_HEADER = 'x-canvaaaas';
@@ -117,3 +125,19 @@ export function shapesBBox(shapes: MaskShape[]): RectDto | null {
   if (x1 < x0) return null;
   return { x: Math.floor(x0), y: Math.floor(y0), width: Math.ceil(x1 - x0), height: Math.ceil(y1 - y0) };
 }
+
+/** Команды из меню приложения: Electron шлёт их в окно событием COMMAND_EVENT */
+export type AppCommand =
+  | 'settings'
+  | 'open'
+  | 'new'
+  | 'export'
+  | 'undo'
+  | 'redo'
+  | 'zoom-fit'
+  | 'zoom-100'
+  | 'zoom-50'
+  | 'zoom-in'
+  | 'zoom-out';
+
+export const COMMAND_EVENT = 'canvaaaas-command';
