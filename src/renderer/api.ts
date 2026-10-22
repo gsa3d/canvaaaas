@@ -27,9 +27,26 @@ export function upload(file: File): Promise<unknown> {
   }).then((r) => handle(r));
 }
 
-/** Сервер сообщает об изменениях; после каждого сообщения интерфейс перечитывает состояние */
+/**
+ * Сервер сообщает об изменениях; после каждого сообщения интерфейс перечитывает состояние.
+ * Если сервер ещё не поднялся или перезапускается, EventSource сам не переподключится — делаем это вручную.
+ */
 export function subscribe(onChange: () => void): () => void {
-  const events = new EventSource('/api/events');
-  events.onmessage = () => onChange();
-  return () => events.close();
+  let events: EventSource | null = null;
+  let timer = 0;
+  let stopped = false;
+  const connect = () => {
+    events = new EventSource('/api/events');
+    events.onmessage = () => onChange();
+    events.onerror = () => {
+      if (events?.readyState !== EventSource.CLOSED || stopped) return;
+      timer = window.setTimeout(connect, 1500);
+    };
+  };
+  connect();
+  return () => {
+    stopped = true;
+    window.clearTimeout(timer);
+    events?.close();
+  };
 }
