@@ -133,6 +133,17 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     });
   });
 
+  // Ключ приходит из окна приложения и уходит в хранилище; обратно его не отдаёт ни один запрос
+  route('POST', '/api/settings/key', async (req, res) => {
+    const { key } = await readJson<{ key: string }>(req);
+    await session.setKey(String(key ?? ''));
+    json(res, { ok: true });
+  });
+  route('POST', '/api/settings/key/clear', async (_req, res) => {
+    await session.clearKey();
+    json(res, { ok: true });
+  });
+
   route('POST', '/api/history/undo', (_req, res) => {
     session.undo();
     json(res, { ok: true });

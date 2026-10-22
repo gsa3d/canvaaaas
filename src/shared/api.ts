@@ -68,6 +68,8 @@ export interface PatchDto {
 
 export interface StateDto {
   provider: 'laozhang' | 'mock';
+  /** Есть ли ключ laozhang.ai (само значение интерфейс никогда не получает) */
+  hasKey: boolean;
   doc: DocDto | null;
   jobs: JobDto[];
   history: PatchDto[];

@@ -61,6 +61,7 @@ export function App() {
   const [toast, setToast] = useState<{ text: string; error: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [styleDraft, setStyleDraft] = useState('');
+  const [keyDialog, setKeyDialog] = useState(false);
   const [, setTick] = useState(0);
 
   const stageRef = useRef<HTMLDivElement>(null);
@@ -137,6 +138,10 @@ export function App() {
 
   const generate = async () => {
     if (!canGenerate) return;
+    if (!state?.hasKey) {
+      setKeyDialog(true);
+      return;
+    }
     try {
       const { id } = await post<{ id: string }>('/api/jobs', { shapes: selection, prompt, variants, model, size });
       setSelection([]);
@@ -179,7 +184,8 @@ export function App() {
       return;
     }
     if (e.key === 'Escape') {
-      if (maskJob) setMaskJob(null);
+      if (keyDialog) setKeyDialog(false);
+      else if (maskJob) setMaskJob(null);
       else setSelection([]);
       (document.activeElement as HTMLElement | null)?.blur();
       return;
@@ -287,6 +293,12 @@ export function App() {
           {state?.provider === 'mock' && <span class="badge">подставная модель</span>}
           Генераций: {state?.generations.session ?? 0} за сеанс, {state?.generations.today ?? 0} сегодня
         </div>
+        {state?.provider === 'laozhang' && (
+          <button class="ghost key-button" title="Ключ laozhang.ai" onClick={() => setKeyDialog(true)}>
+            <span class={state.hasKey ? 'key-dot ok' : 'key-dot'} />
+            Ключ
+          </button>
+        )}
       </header>
 
       <nav class="rail" aria-label="Инструменты">
@@ -325,6 +337,15 @@ export function App() {
       </main>
 
       <aside class="side">
+        {state && !state.hasKey && (
+          <section class="panel notice">
+            <h2>Нужен ключ laozhang.ai</h2>
+            <p class="hint">Без него генерация не работает. Ключ вводится один раз и хранится на этом компьютере.</p>
+            <button class="primary" onClick={() => setKeyDialog(true)}>
+              Добавить ключ
+            </button>
+          </section>
+        )}
         {doc && (
           <>
             <section class="panel">
@@ -438,6 +459,18 @@ export function App() {
           </>
         )}
       </aside>
+
+      {keyDialog && state && (
+        <KeyDialog
+          hasKey={state.hasKey}
+          onClose={() => setKeyDialog(false)}
+          onSaved={(text) => {
+            setKeyDialog(false);
+            notify(text, false);
+          }}
+          onError={fail}
+        />
+      )}
 
       <input
         ref={fileRef}
@@ -555,6 +588,74 @@ function HistoryItem(props: { patch: PatchDto; onToggle: () => void; onShow: () 
         {patch.active ? 'Выключить' : 'Включить'}
       </button>
     </li>
+  );
+}
+
+function KeyDialog(props: { hasKey: boolean; onClose: () => void; onSaved: (text: string) => void; onError: (err: unknown) => void }) {
+  const [value, setValue] = useState('');
+  const [saving, setSaving] = useState(false);
+  const mac = navigator.userAgent.includes('Mac');
+  const run = async (action: () => Promise<unknown>, text: string) => {
+    setSaving(true);
+    try {
+      await action();
+      setValue('');
+      props.onSaved(text);
+    } catch (err) {
+      props.onError(err);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div class="modal-backdrop" onClick={props.onClose}>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="key-title" onClick={(e) => e.stopPropagation()}>
+        <h2 id="key-title">Ключ laozhang.ai</h2>
+        <p>
+          {props.hasKey
+            ? 'Ключ сохранён. Чтобы заменить его, вставьте новый.'
+            : 'Без ключа генерация не работает. Вставьте ключ из личного кабинета laozhang.ai.'}
+        </p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void run(() => post('/api/settings/key', { key: value }), 'Ключ сохранён');
+          }}
+        >
+          <input
+            type="password"
+            autoFocus
+            autoComplete="off"
+            spellcheck={false}
+            placeholder={props.hasKey ? 'Новый ключ' : 'Ключ'}
+            value={value}
+            onInput={(e) => setValue(e.currentTarget.value)}
+          />
+          <p class="hint">
+            {mac ? 'Хранится в Связке ключей macOS.' : 'Хранится на этом компьютере в зашифрованном виде.'} Обратно в окно
+            приложения ключ не попадает и отправляется только в laozhang.ai.
+          </p>
+          <div class="row">
+            <button class="primary" type="submit" disabled={!value.trim() || saving}>
+              Сохранить ключ
+            </button>
+            <button type="button" onClick={props.onClose}>
+              Закрыть
+            </button>
+            {props.hasKey && (
+              <button
+                type="button"
+                class="danger"
+                disabled={saving}
+                onClick={() => void run(() => post('/api/settings/key/clear'), 'Ключ удалён')}
+              >
+                Удалить ключ
+              </button>
+            )}
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 

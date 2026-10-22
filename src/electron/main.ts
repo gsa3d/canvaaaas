@@ -1,14 +1,79 @@
 // Оболочка Electron: поднимает сервер приложения на 127.0.0.1 (порт любой свободный)
 // и открывает окно с интерфейсом. Вся работа с картинками — в сервере, окно только показывает.
 import { join } from 'node:path';
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, Menu, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
+import { encryptedFileStore, keychainStore, withEnv } from '../core/secrets.ts';
 import { startServer } from '../server/app.ts';
 import { Session } from '../server/session.ts';
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
+// Меню по-русски; Правка нужна, чтобы в полях работали копирование и вставка
+function buildMenu(): void {
+  const mac = process.platform === 'darwin';
+  const template: MenuItemConstructorOptions[] = [
+    ...(mac
+      ? [
+          {
+            label: 'canvaaaas',
+            submenu: [
+              { role: 'about', label: 'О canvaaaas' },
+              { type: 'separator' },
+              { role: 'hide', label: 'Скрыть canvaaaas' },
+              { role: 'hideOthers', label: 'Скрыть остальные' },
+              { role: 'unhide', label: 'Показать все' },
+              { type: 'separator' },
+              { role: 'quit', label: 'Завершить canvaaaas' },
+            ],
+          } satisfies MenuItemConstructorOptions,
+        ]
+      : []),
+    {
+      label: 'Правка',
+      submenu: [
+        { role: 'undo', label: 'Отменить' },
+        { role: 'redo', label: 'Повторить' },
+        { type: 'separator' },
+        { role: 'cut', label: 'Вырезать' },
+        { role: 'copy', label: 'Копировать' },
+        { role: 'paste', label: 'Вставить' },
+        { role: 'selectAll', label: 'Выбрать всё' },
+      ],
+    },
+    {
+      label: 'Вид',
+      submenu: [
+        { role: 'reload', label: 'Перезагрузить окно' },
+        { role: 'togglefullscreen', label: 'Во весь экран' },
+        { type: 'separator' },
+        { role: 'toggleDevTools', label: 'Инструменты разработчика' },
+      ],
+    },
+    {
+      label: 'Окно',
+      submenu: [
+        { role: 'minimize', label: 'Свернуть' },
+        { role: 'zoom', label: 'Изменить размер' },
+        ...(mac ? [] : [{ role: 'quit', label: 'Выйти' } satisfies MenuItemConstructorOptions]),
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 app.whenReady().then(async () => {
-  const session = new Session(process.env.CANVAAAAS_PROVIDER === 'mock' ? 'mock' : 'laozhang');
+  buildMenu();
+  // Ключ: на macOS — Связка ключей, на Windows — файл, зашифрованный системой для текущего пользователя
+  const keys = withEnv(
+    process.platform === 'darwin'
+      ? keychainStore()
+      : encryptedFileStore(join(app.getPath('userData'), 'laozhang-key.bin'), {
+          available: () => safeStorage.isEncryptionAvailable(),
+          encrypt: (text) => safeStorage.encryptString(text),
+          decrypt: (data) => safeStorage.decryptString(data),
+        }),
+  );
+  const session = new Session(process.env.CANVAAAAS_PROVIDER === 'mock' ? 'mock' : 'laozhang', keys);
   await session.init();
   const server = await startServer({ session, port: 0, staticDir: join(app.getAppPath(), 'dist', 'renderer') });
 
@@ -34,9 +99,12 @@ app.whenReady().then(async () => {
   if (process.argv.includes('--smoke')) {
     // Проверка сборки: интерфейс отрисовался и достучался до сервера
     const check = await win.webContents.executeJavaScript(
-      `new Promise((r) => setTimeout(async () => r({ ui: !!document.querySelector('.app'), api: (await fetch('/api/state')).ok }), 1500))`,
+      `new Promise((r) => setTimeout(async () => {
+        const res = await fetch('/api/state');
+        r({ ui: !!document.querySelector('.app'), api: res.ok, key: (await res.json()).hasKey });
+      }, 1500))`,
     );
-    console.log(`SMOKE ${check.ui && check.api ? 'OK' : 'FAIL'}: ${server.url}, интерфейс ${check.ui}, API ${check.api}`);
+    console.log(`SMOKE ${check.ui && check.api ? 'OK' : 'FAIL'}: ${server.url}, интерфейс ${check.ui}, API ${check.api}, ключ ${check.key ? 'есть' : 'нет'}`);
     app.exit(check.ui && check.api ? 0 : 1);
   }
 

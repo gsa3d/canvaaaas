@@ -14,22 +14,65 @@
     "edit-region": "node --disable-warning=ExperimentalWarning src/cli/edit-region.ts",
     "recon": "node --disable-warning=ExperimentalWarning scripts/recon.ts",
     "typecheck": "tsc && tsc -p src/renderer",
-    "test": "vitest run"
+    "test": "vitest run",
+    "app:mac": "npm run build && electron-builder --mac",
+    "app:win": "npm run build && electron-builder --win",
+    "install:mac": "npm run app:mac && node --disable-warning=ExperimentalWarning scripts/install-mac.ts"
   },
   "dependencies": {
-    "@fontsource-variable/golos-text": "^5.3.0",
-    "openseadragon": "^6.1.1",
-    "preact": "^10.29.8",
     "sharp": "^0.35.5",
     "undici": "^8.12.3"
   },
   "devDependencies": {
+    "@fontsource-variable/golos-text": "^5.3.0",
     "@types/node": "^26.6.5",
     "electron": "^45.0.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
+    "openseadragon": "^6.1.1",
+    "preact": "^10.29.8",
     "typescript": "^7.0.2",
     "vite": "^8.3.5",
     "vitest": "^5.0.5"
   },
-  "main": "dist/electron/main.mjs"
+  "main": "dist/electron/main.mjs",
+  "author": "gsa3d",
+  "build": {
+    "appId": "com.gsa3d.canvaaaas",
+    "productName": "canvaaaas",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/sharp/**",
+      "node_modules/@img/**"
+    ],
+    "mac": {
+      "target": [
+        "dir"
+      ],
+      "category": "public.app-category.graphics-design",
+      "icon": "build/icon.png"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "shortcutName": "canvaaaas"
+    },
+    "electronLanguages": [
+      "ru",
+      "en"
+    ]
+  }
 }

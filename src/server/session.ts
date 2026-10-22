@@ -10,7 +10,7 @@ import { expandMaskByDiff } from '../core/expand.ts';
 import { readLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha } from '../core/mask.ts';
 import { applyShapes } from '../core/mask-shapes.ts';
-import { getLaozhangKey } from '../core/secrets.ts';
+import type { KeyStore } from '../core/secrets.ts';
 import { laozhangGemini } from '../providers/laozhang-gemini.ts';
 import { mockProvider } from '../providers/mock.ts';
 import type { ImageProvider } from '../providers/types.ts';
@@ -65,6 +65,8 @@ function message(err: unknown): string {
 
 export class Session {
   readonly providerKind: 'laozhang' | 'mock';
+  private readonly keys: KeyStore;
+  private hasKey = false;
   doc: CanvasDocument | null = null;
   private jobs: Job[] = [];
   private readonly providers = new Map<ModelChoice, ImageProvider>();
@@ -73,11 +75,13 @@ export class Session {
   private readonly listeners = new Set<() => void>();
   private emitTimer: NodeJS.Timeout | undefined;
 
-  constructor(providerKind: 'laozhang' | 'mock') {
+  constructor(providerKind: 'laozhang' | 'mock', keys: KeyStore) {
     this.providerKind = providerKind;
+    this.keys = keys;
   }
 
   async init(): Promise<void> {
+    this.hasKey = (await this.keys.get()) !== null;
     if (this.providerKind !== 'laozhang') return;
     const today = new Date().toISOString().slice(0, 10);
     this.todayAtStart = (await readLedger()).filter((e) => e.at.startsWith(today)).length;
@@ -102,16 +106,35 @@ export class Session {
       p =
         this.providerKind === 'mock'
           ? mockProvider({ mode: 'blob', delayMs: 1500 })
-          : withLedger(laozhangGemini({ model, apiKey: getLaozhangKey }), 'ui');
+          : withLedger(laozhangGemini({ model, apiKey: () => this.apiKey() }), 'ui');
       this.providers.set(model, p);
     }
     return p;
+  }
+
+  private async apiKey(): Promise<string> {
+    const key = await this.keys.get();
+    if (!key) throw new Error('Нет ключа laozhang.ai: добавьте его кнопкой «Ключ» вверху окна');
+    return key;
+  }
+
+  async setKey(key: string): Promise<void> {
+    await this.keys.set(key);
+    this.hasKey = (await this.keys.get()) !== null;
+    this.changed();
+  }
+
+  async clearKey(): Promise<void> {
+    await this.keys.clear();
+    this.hasKey = (await this.keys.get()) !== null;
+    this.changed();
   }
 
   state(): StateDto {
     const doc = this.doc;
     return {
       provider: this.providerKind,
+      hasKey: this.hasKey || this.providerKind === 'mock',
       doc: doc && {
         id: doc.id,
         name: doc.name,
