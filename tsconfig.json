@@ -13,5 +13,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src", "scripts", "test"]
+  "include": ["src", "scripts", "test", "vite.config.ts", "vitest.config.ts"],
+  "exclude": ["src/renderer"]
 }

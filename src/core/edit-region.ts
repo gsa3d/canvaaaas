@@ -2,7 +2,7 @@
 // к размеру куска и вклеиваем по маске с растушёвкой. Где маска = 0, пиксели не меняются.
 import sharp from 'sharp';
 import type { GenerateResult, ImageProvider, InputImage, Size } from '../providers/types.ts';
-import { computeFrame, type Frame, type Rect } from './frame.ts';
+import { computeFrame, intersect, type Frame, type Rect } from './frame.ts';
 import { blankOut, featherAlpha, highlight, insideDistance, maskBBox } from './mask.ts';
 
 /**
@@ -12,9 +12,32 @@ import { blankOut, featherAlpha, highlight, insideDistance, maskBBox } from './m
  */
 export type Guide = 'pair' | 'overlay' | 'blank';
 
+/** Уже раскодированные пиксели: так сервер передаёт холст, не кодируя его в PNG на каждую правку */
+export interface RawImage {
+  data: Buffer;
+  width: number;
+  height: number;
+  channels: 1 | 2 | 3 | 4;
+}
+
+/** Пиксели прямоугольника холста rect, построчно */
+export interface RawRegion {
+  data: Buffer;
+  rect: Rect;
+  channels: number;
+}
+
+function isRaw(v: string | Buffer | RawImage): v is RawImage {
+  return typeof v === 'object' && !Buffer.isBuffer(v);
+}
+
 export interface EditRegionOptions {
-  image: string | Buffer;
-  mask: string | Buffer;
+  image: string | Buffer | RawImage;
+  /**
+   * Маска: файл, PNG или один канал 0..255. Канал может покрывать только участок холста
+   * с левым верхним углом в (x, y) — вне участка маска считается нулевой.
+   */
+  mask: string | Buffer | (RawImage & { x?: number; y?: number });
   prompt: string;
   /** Общий стиль документа, добавляется к каждому запросу */
   style?: string;
@@ -145,27 +168,44 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
   const guide = opts.guide ?? DEFAULTS.guide;
 
   // 8 бит sRGB: так вклейка и сравнение работают с теми же байтами, что окажутся в PNG
-  const { data: baseRaw, info } = await sharp(opts.image, { limitInputPixels: false, autoOrient: true })
-    .toColourspace('srgb')
-    .raw({ depth: 'uchar' })
-    .toBuffer({ resolveWithObject: true });
+  const { data: baseRaw, info } = isRaw(opts.image)
+    ? { data: opts.image.data, info: opts.image }
+    : await sharp(opts.image, { limitInputPixels: false, autoOrient: true })
+        .toColourspace('srgb')
+        .raw({ depth: 'uchar' })
+        .toBuffer({ resolveWithObject: true });
   const canvas = { width: info.width, height: info.height };
   const channels = info.channels;
 
-  const { data: maskRaw, info: maskInfo } = await sharp(opts.mask, { limitInputPixels: false })
-    .flatten({ background: '#000000' })
-    .greyscale()
-    .extractChannel(0)
-    .raw({ depth: 'uchar' })
-    .toBuffer({ resolveWithObject: true });
-  if (maskInfo.width !== canvas.width || maskInfo.height !== canvas.height) {
+  const { data: maskRaw, info: maskInfo } = isRaw(opts.mask)
+    ? { data: opts.mask.data, info: opts.mask }
+    : await sharp(opts.mask, { limitInputPixels: false })
+        .flatten({ background: '#000000' })
+        .greyscale()
+        .extractChannel(0)
+        .raw({ depth: 'uchar' })
+        .toBuffer({ resolveWithObject: true });
+  if (maskInfo.channels !== 1) throw new Error('Маска должна быть одним каналом');
+  const maskRect: Rect = {
+    x: isRaw(opts.mask) ? (opts.mask.x ?? 0) : 0,
+    y: isRaw(opts.mask) ? (opts.mask.y ?? 0) : 0,
+    width: maskInfo.width,
+    height: maskInfo.height,
+  };
+  const partial = maskRect.x !== 0 || maskRect.y !== 0 || maskRect.width !== canvas.width || maskRect.height !== canvas.height;
+  if (partial && isRaw(opts.mask) && opts.mask.x !== undefined) {
+    if (maskRect.x < 0 || maskRect.y < 0 || maskRect.x + maskRect.width > canvas.width || maskRect.y + maskRect.height > canvas.height) {
+      throw new Error('Участок маски выходит за холст');
+    }
+  } else if (partial) {
     throw new Error(
       `Маска ${maskInfo.width}×${maskInfo.height} не совпадает по размеру с картинкой ${canvas.width}×${canvas.height}`,
     );
   }
   const mask = new Uint8Array(maskRaw.buffer, maskRaw.byteOffset, maskRaw.length);
-  const bbox = maskBBox(mask, canvas.width, canvas.height);
-  if (!bbox) throw new Error('Маска пустая: нечего перерисовывать');
+  const localBox = maskBBox(mask, maskRect.width, maskRect.height);
+  if (!localBox) throw new Error('Маска пустая: нечего перерисовывать');
+  const bbox = { ...localBox, x: localBox.x + maskRect.x, y: localBox.y + maskRect.y };
 
   const frame = computeFrame(bbox, canvas, { context, contextMin, aspectRatios: provider.aspectRatios });
   const { rect, inside } = frame;
@@ -212,7 +252,13 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
   if (channels === 4) frameImg = frameImg.flatten({ background: '#ffffff' });
   const frameRgb = await frameImg.removeAlpha().raw().toBuffer();
 
-  const insideMask = new Uint8Array(copyRect(maskRaw, canvas.width, inside, 1));
+  // Маска части рамки внутри холста; вне участка маски — нули
+  const insideMask = new Uint8Array(inside.width * inside.height);
+  const overlap = intersect(inside, maskRect);
+  for (let row = 0; row < overlap.height; row++) {
+    const from = (overlap.y - maskRect.y + row) * maskRect.width + overlap.x - maskRect.x;
+    insideMask.set(mask.subarray(from, from + overlap.width), (overlap.y - inside.y + row) * inside.width + overlap.x - inside.x);
+  }
   const frameMask = Buffer.alloc(rect.width * rect.height);
   pasteRect(frameMask, rect.width, { ...inside, x: inside.x - rect.x, y: inside.y - rect.y }, 1, Buffer.from(insideMask));
   const alpha = featherAlpha(insideMask, inside.width, inside.height, feather);
@@ -265,7 +311,7 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
 }
 
 // Насколько ответ модели отличается от исходного куска там, где менять было нельзя
-async function measure(prep: PreparedEdit, gen: Buffer, modelOutput: Size): Promise<VariantStats> {
+export async function measure(prep: PreparedEdit, gen: Buffer, modelOutput: Size): Promise<VariantStats> {
   const { rect, inside } = prep.frame;
   const ox = inside.x - rect.x;
   const oy = inside.y - rect.y;
@@ -338,10 +384,9 @@ async function measure(prep: PreparedEdit, gen: Buffer, modelOutput: Size): Prom
   };
 }
 
-/** Вклеить ответ модели: вернуть к размеру куска, смешать по растушёванной маске */
-export async function compositeVariant(prep: PreparedEdit, generated: Buffer): Promise<CompositedVariant> {
-  const { rect, inside } = prep.frame;
-  const { canvas, channels, alpha } = prep;
+/** Ответ модели, возвращённый к размеру рамки куска: RGB, Lanczos */
+export async function fitGenerated(prep: PreparedEdit, generated: Buffer): Promise<{ gen: Buffer; modelOutput: Size }> {
+  const { rect } = prep.frame;
   const meta = await sharp(generated).metadata();
   const gen = await sharp(generated)
     .flatten({ background: '#ffffff' })
@@ -350,31 +395,65 @@ export async function compositeVariant(prep: PreparedEdit, generated: Buffer): P
     .removeAlpha()
     .raw({ depth: 'uchar' })
     .toBuffer();
-  const stats = await measure(prep, gen, { width: meta.width ?? 0, height: meta.height ?? 0 });
+  return { gen, modelOutput: { width: meta.width ?? 0, height: meta.height ?? 0 } };
+}
 
-  const original = copyRect(prep.baseRaw, canvas.width, inside, channels);
-  const blended = Buffer.from(original);
+/** Часть RGB-буфера размером с рамку, которая лежит внутри холста */
+export function insideOf(prep: PreparedEdit, frameBuf: Buffer): Buffer {
+  const { rect, inside } = prep.frame;
+  return copyRect(frameBuf, rect.width, { ...inside, x: inside.x - rect.x, y: inside.y - rect.y }, 3);
+}
+
+/** Слой правки: RGBA размером с часть рамки внутри холста, альфа — растушёванная маска */
+export function buildLayer(prep: PreparedEdit, gen: Buffer, alpha: Float32Array): Buffer {
+  const rgb = insideOf(prep, gen);
+  const { inside } = prep.frame;
   const layer = Buffer.alloc(inside.width * inside.height * 4);
-  const ox = inside.x - rect.x;
-  const oy = inside.y - rect.y;
-  for (let y = 0; y < inside.height; y++) {
-    for (let x = 0; x < inside.width; x++) {
-      const i = y * inside.width + x;
-      const g = ((y + oy) * rect.width + x + ox) * 3;
-      const a = alpha[i]!;
-      for (let c = 0; c < 3; c++) layer[i * 4 + c] = gen[g + c]!;
-      layer[i * 4 + 3] = Math.round(a * 255);
+  for (let i = 0; i < inside.width * inside.height; i++) {
+    layer[i * 4] = rgb[i * 3]!;
+    layer[i * 4 + 1] = rgb[i * 3 + 1]!;
+    layer[i * 4 + 2] = rgb[i * 3 + 2]!;
+    layer[i * 4 + 3] = Math.round(alpha[i]! * 255);
+  }
+  return layer;
+}
+
+/**
+ * Наложить слой правки (RGBA, прямоугольник layerRect) на пиксели dst — только в их пересечении.
+ * Где альфа слоя 0, байты dst не трогаются; альфа-канал dst, если есть, не меняется.
+ */
+export function applyLayer(dst: RawRegion, layerRect: Rect, layer: Buffer): void {
+  const x0 = Math.max(dst.rect.x, layerRect.x);
+  const y0 = Math.max(dst.rect.y, layerRect.y);
+  const x1 = Math.min(dst.rect.x + dst.rect.width, layerRect.x + layerRect.width);
+  const y1 = Math.min(dst.rect.y + dst.rect.height, layerRect.y + layerRect.height);
+  const ch = dst.channels;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const l = ((y - layerRect.y) * layerRect.width + x - layerRect.x) * 4;
+      const a = layer[l + 3]!;
       if (a === 0) continue;
+      const d = ((y - dst.rect.y) * dst.rect.width + x - dst.rect.x) * ch;
       for (let c = 0; c < 3; c++) {
-        const o = i * channels + c;
-        blended[o] = Math.round(original[o]! + (gen[g + c]! - original[o]!) * a);
+        const o = dst.data[d + c]!;
+        dst.data[d + c] = Math.round(o + ((layer[l + c]! - o) * a) / 255);
       }
     }
   }
+}
+
+/** Вклеить ответ модели в полное изображение (для CLI): вернуть к размеру куска, смешать по маске */
+export async function compositeVariant(prep: PreparedEdit, generated: Buffer): Promise<CompositedVariant> {
+  const { inside } = prep.frame;
+  const { canvas, channels } = prep;
+  const { gen, modelOutput } = await fitGenerated(prep, generated);
+  const stats = await measure(prep, gen, modelOutput);
+  const layer = buildLayer(prep, gen, prep.alpha);
 
   // Полный холст общий для всех вариантов: вклеиваем, кодируем и возвращаем исходные байты по очереди
   const encode = async () => {
-    pasteRect(prep.baseRaw, canvas.width, inside, channels, blended);
+    const original = copyRect(prep.baseRaw, canvas.width, inside, channels);
+    applyLayer({ data: prep.baseRaw, rect: { x: 0, y: 0, ...canvas }, channels }, inside, layer);
     try {
       return await sharp(prep.baseRaw, { raw: { ...canvas, channels }, limitInputPixels: false }).png().toBuffer();
     } finally {

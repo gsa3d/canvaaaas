@@ -8,18 +8,28 @@
     "node": ">=22.18"
   },
   "scripts": {
+    "dev": "node --disable-warning=ExperimentalWarning scripts/dev.ts",
+    "build": "vite build && node --disable-warning=ExperimentalWarning scripts/build-electron.ts",
+    "start": "npm run build && electron .",
     "edit-region": "node --disable-warning=ExperimentalWarning src/cli/edit-region.ts",
     "recon": "node --disable-warning=ExperimentalWarning scripts/recon.ts",
-    "typecheck": "tsc",
+    "typecheck": "tsc && tsc -p src/renderer",
     "test": "vitest run"
   },
   "dependencies": {
+    "@fontsource-variable/golos-text": "^5.3.0",
+    "openseadragon": "^6.1.1",
+    "preact": "^10.29.8",
     "sharp": "^0.35.5",
     "undici": "^8.12.3"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
+    "electron": "^45.0.0",
+    "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
+    "vite": "^8.3.5",
     "vitest": "^5.0.5"
-  }
+  },
+  "main": "dist/electron/main.mjs"
 }

@@ -1,12 +1,9 @@
 // Маска из векторных фигур в координатах холста: прямоугольник, эллипс, лассо, мазки кисти и ластика.
 // Так её будет присылать интерфейс; растеризуется здесь, в полном разрешении, через SVG.
 import sharp from 'sharp';
+import type { MaskShape } from '../shared/api.ts';
 
-export type MaskShape =
-  | { kind: 'rect'; x: number; y: number; width: number; height: number; erase?: boolean }
-  | { kind: 'ellipse'; cx: number; cy: number; rx: number; ry: number; erase?: boolean }
-  | { kind: 'polygon'; points: [number, number][]; erase?: boolean }
-  | { kind: 'stroke'; points: [number, number][]; size: number; erase?: boolean };
+export type { MaskShape };
 
 function shapeSvg(shape: MaskShape): string {
   const fill = shape.erase ? 'black' : 'white';
@@ -26,4 +23,25 @@ function shapeSvg(shape: MaskShape): string {
 export async function renderMask(width: number, height: number, shapes: MaskShape[]): Promise<Buffer> {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="${width}" height="${height}" fill="black"/>${shapes.map(shapeSvg).join('')}</svg>`;
   return sharp(Buffer.from(svg), { limitInputPixels: false }).greyscale().png().toBuffer();
+}
+
+/**
+ * Наложить фигуры на уже готовую маску участка rect: белые фигуры добавляют, ластик стирает.
+ * Координаты фигур — холста; всё, что за пределами rect, отсекается.
+ */
+export async function applyShapes(
+  mask: Uint8Array,
+  rect: { x: number; y: number; width: number; height: number },
+  shapes: MaskShape[],
+): Promise<Uint8Array> {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${rect.width}" height="${rect.height}"><g transform="translate(${-rect.x} ${-rect.y})">${shapes.map(shapeSvg).join('')}</g></svg>`;
+  const layer = await sharp(Buffer.from(svg), { limitInputPixels: false }).ensureAlpha().raw().toBuffer();
+  const out = new Uint8Array(mask);
+  for (let i = 0; i < out.length; i++) {
+    const a = layer[i * 4 + 3]!;
+    if (a === 0) continue;
+    const v = layer[i * 4]!;
+    out[i] = Math.round(out[i]! + ((v - out[i]!) * a) / 255);
+  }
+  return out;
 }

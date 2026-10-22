@@ -1,0 +1,627 @@
+/* Рабочий стол иллюстратора: нейтральный серый вокруг картинки (не врёт о цвете),
+   светлые «бумажные» панели и один акцент — ультрамарин маскировочной жидкости,
+   которым отмечено всё, что связано с выделением и областями правок. */
+:root {
+  --stage: #505255;
+  --paper: #ecebe7;
+  --paper-2: #f7f6f3;
+  --ink: #23262b;
+  --muted: #6b6e75;
+  --line: #d3d0c9;
+  --accent: #2f5bea;
+  --accent-soft: #e3e9fd;
+  --danger: #c8431a;
+  --warn: #8a5a00;
+  --radius: 6px;
+  font-family: 'Golos Text Variable', system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--stage);
+}
+
+button,
+.button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 48px 1fr 360px;
+  grid-template-rows: 44px 1fr;
+  height: 100%;
+}
+
+/* ——— Верхняя полоса ——— */
+
+.topbar {
+  grid-column: 1 / 3;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 12px;
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+
+.doc-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.doc-title strong {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sep {
+  width: 1px;
+  height: 20px;
+  margin: 0 6px;
+  background: var(--line);
+}
+
+.counter {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #fff3d6;
+  color: var(--warn);
+  font-weight: 500;
+}
+
+.dim {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* ——— Кнопки и поля ——— */
+
+button,
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+button:hover:not(:disabled),
+.button:hover {
+  border-color: #b9b5ac;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 500;
+}
+
+button.primary:hover:not(:disabled) {
+  background: #2449c9;
+  border-color: #2449c9;
+}
+
+button.ghost,
+.button.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+button.ghost:hover:not(:disabled),
+.button.ghost:hover {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: transparent;
+}
+
+button.zoom {
+  min-width: 56px;
+}
+
+button.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+button.icon {
+  min-width: 28px;
+  padding: 3px 6px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+button.small {
+  min-height: 22px;
+  padding: 1px 8px;
+  font-size: 12px;
+}
+
+button.link {
+  border: none;
+  background: none;
+  padding: 0;
+  min-height: 0;
+  text-align: left;
+  white-space: normal;
+  justify-content: flex-start;
+}
+
+button.link:hover {
+  color: var(--accent);
+}
+
+textarea,
+input,
+select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+  padding: 6px 8px;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 34px;
+}
+
+textarea:focus,
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+input[type='color'] {
+  padding: 2px;
+  height: 30px;
+}
+
+/* ——— Инструменты ——— */
+
+.rail {
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+  background: var(--paper);
+  border-right: 1px solid var(--line);
+}
+
+.tool {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink);
+}
+
+.tool.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.brush-size {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.brush-size input {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 20px;
+  height: 120px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+/* ——— Холст ——— */
+
+.stage {
+  grid-row: 2;
+  grid-column: 2;
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.osd {
+  position: absolute;
+  inset: 0;
+}
+
+.stage-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.osd[data-tool='hand'],
+.osd[data-tool='hand'] * {
+  cursor: grab !important;
+}
+
+.osd[data-tool='rect'] *,
+.osd[data-tool='lasso'] * {
+  cursor: crosshair !important;
+}
+
+.osd[data-tool='brush'] *,
+.osd[data-tool='eraser'] * {
+  cursor: none !important;
+}
+
+.stage-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 6px 6px 14px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  white-space: nowrap;
+}
+
+.stage-banner button {
+  border-radius: 999px;
+  border-color: transparent;
+  background: #fff;
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.busy,
+.toast {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+
+.busy {
+  top: 45%;
+  background: var(--paper);
+}
+
+.toast {
+  bottom: 18px;
+  max-width: min(640px, 90%);
+  background: var(--ink);
+  color: #fff;
+}
+
+.toast.error {
+  background: var(--danger);
+}
+
+.empty {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  color: #f2f1ee;
+  text-align: center;
+}
+
+.empty h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.empty p {
+  margin: 0;
+  max-width: 52ch;
+  color: #d4d3cf;
+}
+
+.new-canvas {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.new-canvas label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  text-align: left;
+  color: #d4d3cf;
+}
+
+.new-canvas input[type='number'] {
+  width: 96px;
+}
+
+.new-canvas input[type='color'] {
+  width: 52px;
+}
+
+/* ——— Правая панель ——— */
+
+.side {
+  grid-row: 1 / 3;
+  grid-column: 3;
+  overflow-y: auto;
+  background: var(--paper);
+  border-left: 1px solid var(--line);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.panel h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.hint {
+  margin: 0;
+  color: var(--muted);
+}
+
+.hint.ok {
+  color: var(--accent);
+}
+
+.options {
+  display: grid;
+  grid-template-columns: 1.3fr 1.1fr 0.8fr;
+  gap: 6px;
+}
+
+.options label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.options select {
+  padding: 4px 6px;
+  color: var(--ink);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ——— Карточки задач ——— */
+
+.job {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper-2);
+  cursor: pointer;
+}
+
+.job.focused {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.job header {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.job-number {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.job.error .job-number {
+  background: var(--danger);
+}
+
+.job-prompt {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.job-status {
+  margin: 0;
+  font-weight: 500;
+}
+
+.job.running .job-status,
+.job.preparing .job-status {
+  color: var(--accent);
+}
+
+.job-error {
+  margin: 0;
+  color: var(--danger);
+  word-break: break-word;
+}
+
+.job-warning {
+  margin: 0;
+  color: var(--warn);
+  font-size: 12px;
+}
+
+.job-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: default;
+}
+
+.variants {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px;
+  border-radius: var(--radius);
+  background: var(--paper);
+}
+
+.mask-row {
+  flex-wrap: nowrap;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+
+.job .row button {
+  padding: 3px 8px;
+}
+
+.mask-row button.icon {
+  margin-left: auto;
+}
+
+/* ——— История ——— */
+
+.history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.history li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.history li:last-child {
+  border-bottom: none;
+}
+
+.history li .link {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+.history li.off .link {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

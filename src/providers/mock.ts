@@ -1,5 +1,6 @@
-// Провайдер для тестов: без сети, отдаёт первую входную картинку в размере ответа модели
-// с инвертированными цветами — так правка видна везде, в том числе вне маски.
+// Провайдер без сети — для тестов и проверки интерфейса.
+// negate: первая входная картинка с инвертированными цветами (правка видна везде, в том числе вне маски);
+// blob: поверх куска рисуется «объект» крупнее выделения, как это любит делать настоящая модель.
 import sharp from 'sharp';
 import type { GenerateRequest, GenerateResult, ImageProvider, Size } from './types.ts';
 
@@ -7,7 +8,12 @@ export interface MockProvider extends ImageProvider {
   readonly calls: GenerateRequest[];
 }
 
-export function mockProvider(): MockProvider {
+export interface MockOptions {
+  mode?: 'negate' | 'blob';
+  delayMs?: number;
+}
+
+export function mockProvider(opts: MockOptions = {}): MockProvider {
   const calls: GenerateRequest[] = [];
   const sizes: Record<string, Size> = {
     '1:1': { width: 1024, height: 1024 },
@@ -36,11 +42,30 @@ export function mockProvider(): MockProvider {
 
     async generate(req: GenerateRequest): Promise<GenerateResult> {
       calls.push(req);
+      const started = Date.now();
       const input = req.images[0];
       if (!input) throw new Error('mock: нет входной картинки');
       const { width, height } = this.outputSize(req.aspectRatio, req.imageSize);
-      const image = await sharp(input.data).resize(width, height, { fit: 'fill' }).negate({ alpha: false }).png().toBuffer();
-      return { image, mimeType: 'image/png', model: 'mock', elapsedMs: 0 };
+      if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
+      if (req.signal?.aborted) throw new Error('Генерация отменена');
+
+      let image: Buffer;
+      if (opts.mode === 'blob') {
+        const hue = (calls.length * 67) % 360;
+        const svg =
+          `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
+          `<ellipse cx="${width / 2}" cy="${height / 2}" rx="${width * 0.36}" ry="${height * 0.22}" fill="hsl(${hue},70%,50%)" stroke="#222" stroke-width="${width / 120}"/>` +
+          `<line x1="${width * 0.5}" y1="${height * 0.5}" x2="${width * 0.5}" y2="${height * 0.08}" stroke="#222" stroke-width="${width / 80}"/>` +
+          `</svg>`;
+        image = await sharp(input.data)
+          .resize(width, height, { fit: 'fill' })
+          .composite([{ input: Buffer.from(svg) }])
+          .png()
+          .toBuffer();
+      } else {
+        image = await sharp(input.data).resize(width, height, { fit: 'fill' }).negate({ alpha: false }).png().toBuffer();
+      }
+      return { image, mimeType: 'image/png', model: 'mock', elapsedMs: Date.now() - started };
     },
   };
 }

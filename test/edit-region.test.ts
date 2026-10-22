@@ -3,7 +3,7 @@
 import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
 import { compositeVariant, prepareEdit } from '../src/core/edit-region.ts';
-import { renderMask, type MaskShape } from '../src/core/mask-shapes.ts';
+import { applyShapes, renderMask, type MaskShape } from '../src/core/mask-shapes.ts';
 import { mockProvider } from '../src/providers/mock.ts';
 
 async function makeBase(width: number, height: number): Promise<Buffer> {
@@ -78,4 +78,22 @@ describe('edit-region', () => {
     expect(changedOutside).toBe(0);
     expect(changedInside).toBeGreaterThan(500_000);
   }, 180_000);
+
+  it('маска участка со смещением даёт тот же кусок и ту же маску, что маска во весь холст', async () => {
+    const base = await makeBase(1600, 1000);
+    const shapes: MaskShape[] = [{ kind: 'ellipse', cx: 900, cy: 500, rx: 150, ry: 90 }];
+    const provider = mockProvider();
+    const full = await prepareEdit({ image: base, mask: await renderMask(1600, 1000, shapes), prompt: 't', provider });
+    const area = { x: 740, y: 400, width: 320, height: 200 };
+    const region = await applyShapes(new Uint8Array(area.width * area.height), area, shapes);
+    const part = await prepareEdit({
+      image: base,
+      mask: { data: Buffer.from(region), channels: 1, ...area },
+      prompt: 't',
+      provider,
+    });
+    expect(part.bbox).toEqual(full.bbox);
+    expect(part.frame).toEqual(full.frame);
+    expect(Buffer.from(part.insideMask).equals(Buffer.from(full.insideMask))).toBe(true);
+  });
 });

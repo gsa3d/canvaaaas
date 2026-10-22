@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "canvaaaas-mock",
+      "runtimeExecutable": "/usr/bin/env",
+      "runtimeArgs": ["CANVAAAAS_PROVIDER=mock", "CANVAAAAS_OPEN=work/step1/big.png", "npm", "run", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "canvaaaas-real",
+      "runtimeExecutable": "/usr/bin/env",
+      "runtimeArgs": ["CANVAAAAS_OPEN=work/step1/big.png", "npm", "run", "dev"],
+      "port": 5173
+    }
+  ]
+}
