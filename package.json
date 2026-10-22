@@ -14,7 +14,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "sharp": "^0.35.5"
+    "sharp": "^0.35.5",
+    "undici": "^8.12.3"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

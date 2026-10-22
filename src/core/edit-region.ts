@@ -24,6 +24,8 @@ export interface EditRegionOptions {
   feather?: number;
   /** Разрешение ответа модели или auto */
   imageSize?: string;
+  /** Потолок для auto: 4K у Nano Banana идёт 4–5 минут, его надо просить явно */
+  maxAutoSize?: string;
   guide?: Guide;
 }
 
@@ -71,14 +73,15 @@ export interface CompositedVariant {
   stats: VariantStats;
 }
 
-const DEFAULTS = { context: 0.3, contextMin: 128, feather: 24, imageSize: 'auto', guide: 'pair' as Guide };
+const DEFAULTS = { context: 0.3, contextMin: 128, feather: 24, imageSize: 'auto', maxAutoSize: '2K', guide: 'pair' as Guide };
 /** Насколько кусок может быть больше ответа модели, прежде чем предупреждать о потере детализации */
 const SCALE_WARN = 1.15;
 
 export function buildPrompt(guide: Guide, request: string, style?: string): string {
   const keep =
     'Outside that region keep everything exactly as in the original: same framing and scale, composition, colors, lighting, perspective, line work and level of detail. ' +
-    'The new content must blend seamlessly into its surroundings and match the existing style.';
+    'The new content must blend seamlessly into its surroundings and match the existing style. ' +
+    'Everything new must fit completely inside the region: nothing may extend past its edge.';
   const intro: Record<Guide, string> = {
     pair:
       'You are retouching one region of a larger illustration.\n' +
@@ -101,18 +104,20 @@ export function buildPrompt(guide: Guide, request: string, style?: string): stri
   return text;
 }
 
-function chooseImageSize(provider: ImageProvider, aspectRatio: string, frame: Size, requested: string): string {
+function chooseImageSize(provider: ImageProvider, aspectRatio: string, frame: Size, requested: string, maxAuto: string): string {
   if (requested !== 'auto') {
     if (!provider.imageSizes.includes(requested)) {
       throw new Error(`Разрешение ${requested} не поддерживается, есть: ${provider.imageSizes.join(', ')}`);
     }
     return requested;
   }
-  for (const size of provider.imageSizes) {
+  const cap = provider.imageSizes.indexOf(maxAuto);
+  const sizes = cap >= 0 ? provider.imageSizes.slice(0, cap + 1) : provider.imageSizes;
+  for (const size of sizes) {
     const out = provider.outputSize(aspectRatio, size);
     if (out.width >= frame.width * 0.95 && out.height >= frame.height * 0.95) return size;
   }
-  return provider.imageSizes[provider.imageSizes.length - 1]!;
+  return sizes[sizes.length - 1]!;
 }
 
 function copyRect(src: Buffer, srcWidth: number, rect: Rect, channels: number): Buffer {
@@ -164,7 +169,13 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
 
   const frame = computeFrame(bbox, canvas, { context, contextMin, aspectRatios: provider.aspectRatios });
   const { rect, inside } = frame;
-  const imageSize = chooseImageSize(provider, frame.aspectRatio, rect, opts.imageSize ?? DEFAULTS.imageSize);
+  const imageSize = chooseImageSize(
+    provider,
+    frame.aspectRatio,
+    rect,
+    opts.imageSize ?? DEFAULTS.imageSize,
+    opts.maxAutoSize ?? DEFAULTS.maxAutoSize,
+  );
   const modelSize = provider.outputSize(frame.aspectRatio, imageSize);
   const scale = Math.max(rect.width / modelSize.width, rect.height / modelSize.height);
 

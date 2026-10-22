@@ -1,5 +1,6 @@
 // Nano Banana (Gemini image) через прокси laozhang.ai — тот же запрос, что делает портал
 // (imagegen/ajax.php): Google-формат generateContent, ключ в Authorization: Bearer.
+import { Agent, fetch } from 'undici';
 import { ProviderError, type GenerateRequest, type GenerateResult, type ImageProvider, type Size } from './types.ts';
 
 export const GEMINI_MODELS = {
@@ -48,6 +49,8 @@ export function laozhangGemini(opts: LaozhangGeminiOptions): ImageProvider {
   const model = GEMINI_MODELS[opts.model ?? 'flash'];
   const baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
   const timeoutMs = opts.timeoutMs ?? 600_000;
+  // 4K генерируется 4–5 минут, а встроенный fetch Node рвёт запрос через 300 с ожидания заголовков
+  const dispatcher = new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs, connectTimeout: 15_000 });
 
   return {
     id: 'laozhang-gemini',
@@ -85,7 +88,7 @@ export function laozhangGemini(opts: LaozhangGeminiOptions): ImageProvider {
       if (req.signal) signals.push(req.signal);
       const started = Date.now();
 
-      let res: Response;
+      let res: Awaited<ReturnType<typeof fetch>>;
       try {
         res = await fetch(`${baseUrl}/${model}:generateContent`, {
           method: 'POST',
@@ -95,9 +98,14 @@ export function laozhangGemini(opts: LaozhangGeminiOptions): ImageProvider {
           },
           body: JSON.stringify(body),
           signal: AbortSignal.any(signals),
+          dispatcher,
         });
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
+        if (req.signal?.aborted) throw new ProviderError('Генерация отменена');
+        // fetch прячет настоящую причину (сброс соединения, DNS, таймаут) в err.cause
+        const cause = err instanceof Error && err.cause instanceof Error ? err.cause : undefined;
+        const code = cause && 'code' in cause ? ` ${String(cause.code)}` : '';
+        const reason = cause ? `${cause.message}${code}` : err instanceof Error ? err.message : String(err);
         throw new ProviderError(`Нет связи с laozhang.ai: ${reason}`, { retryable: true });
       }
 
