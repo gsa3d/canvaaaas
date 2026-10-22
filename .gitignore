@@ -1,0 +1,8 @@
+node_modules/
+dist/
+out/
+# Рабочие картинки разведки и прогонов: большие, в git и Dropbox не нужны
+work/
+*.log
+.env*
+.DS_Store

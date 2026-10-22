@@ -1,0 +1,24 @@
+{
+  "name": "canvaaaas",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Локальный редактор больших иллюстраций: перерисовка выделенных областей через Nano Banana",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "edit-region": "node src/cli/edit-region.ts",
+    "recon": "node scripts/recon.ts",
+    "typecheck": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
