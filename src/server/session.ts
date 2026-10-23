@@ -115,12 +115,16 @@ export class Session {
   private file: ImageFile | null = null;
   /** Разрешение для печати: из исходника или из пресета нового холста */
   private density: number | undefined;
-  /** Версия холста на момент последнего сохранения */
-  private savedRev = 0;
+  /** Содержимое холста на момент последнего сохранения (contentKey документа) */
+  private savedKey = '';
   /** Что сервер сейчас делает с файлом: «Открываю…», «Сохраняю…» */
   private activity: string | null = null;
   /** Открытый вопрос «Сохранить изменения?»: второй ⌘Q не должен открыть второй */
   private asking: Promise<boolean> | null = null;
+  /** Правки масок слоёв, отмена и повтор идут строго по очереди: ⌘Z сразу после мазка отменяет этот мазок */
+  private docChain: Promise<unknown> = Promise.resolve();
+  /** Последняя показанная маска слоя: её PNG перезапрашивается после каждого мазка */
+  private patchMaskCache: { key: string; png: Buffer } | null = null;
 
   constructor(providerKind: 'laozhang' | 'mock', keys: KeyStore, opts: SessionOptions = {}) {
     this.providerKind = providerKind;
@@ -228,6 +232,7 @@ export class Session {
         rect: p.rect,
         active: p.active,
         createdAt: p.createdAt,
+        maskRev: p.maskVersion,
       })),
       canUndo: doc?.canUndo ?? false,
       canRedo: doc?.canRedo ?? false,
@@ -259,7 +264,7 @@ export class Session {
 
   /** Есть несохранённые изменения холста */
   get dirty(): boolean {
-    return !!this.doc && this.doc.rev !== this.savedRev;
+    return !!this.doc && this.doc.contentKey !== this.savedKey;
   }
 
   /** При закрытии документа есть что потерять: несохранённые правки или задачи в очереди */
@@ -326,7 +331,7 @@ export class Session {
     this.doc = doc;
     this.file = file;
     this.density = density;
-    this.savedRev = doc.rev;
+    this.savedKey = doc.contentKey;
     this.changed();
   }
 
@@ -409,12 +414,12 @@ export class Session {
     const doc = this.requireDoc();
     this.setActivity(`Сохраняю ${basename(path)}…`);
     try {
-      const rev = doc.rev;
+      const key = doc.contentKey;
       const data = await encodeImage(doc.snapshot(), format, { density: this.density, chromaSubsampling });
       await writeFileAtomic(path, data);
       const info = await stat(path);
       this.file = { path, format, density: this.density, chromaSubsampling, size: info.size, mtimeMs: info.mtimeMs };
-      this.savedRev = rev;
+      this.savedKey = key;
       await this.remember(doc, path);
     } finally {
       this.setActivity(null);
@@ -446,19 +451,53 @@ export class Session {
     this.changed();
   }
 
-  undo(): void {
-    this.requireDoc().undo();
-    this.changed();
+  private serialDoc<T>(fn: (doc: CanvasDocument) => Promise<T> | T): Promise<T> {
+    const next = this.docChain.then(() => fn(this.requireDoc()));
+    this.docChain = next.catch(() => undefined);
+    return next;
   }
 
-  redo(): void {
-    this.requireDoc().redo();
-    this.changed();
+  undo(): Promise<void> {
+    return this.serialDoc((doc) => {
+      doc.undo();
+      this.changed();
+    });
   }
 
-  togglePatch(patchId: string): void {
-    this.requireDoc().togglePatch(patchId);
-    this.changed();
+  redo(): Promise<void> {
+    return this.serialDoc((doc) => {
+      doc.redo();
+      this.changed();
+    });
+  }
+
+  togglePatch(patchId: string): Promise<void> {
+    return this.serialDoc((doc) => {
+      doc.togglePatch(patchId);
+      this.changed();
+    });
+  }
+
+  /** Дорисовать или стереть маску принятого слоя: кисть возвращает его пиксели, ластик открывает холст под ним */
+  editPatchMask(patchId: string, shapes: MaskShape[]): Promise<void> {
+    return this.serialDoc(async (doc) => {
+      const patch = doc.patch(patchId);
+      const mask = await applyShapes(patch.mask, patch.rect, shapes);
+      if (this.doc !== doc) return;
+      doc.setPatchMask(patchId, mask);
+      this.changed();
+    });
+  }
+
+  /** Маска слоя для показа поверх холста — так же, как маска задачи; version — какое состояние маски в картинке */
+  async patchMaskPng(patchId: string): Promise<{ png: Buffer; version: number }> {
+    const patch = this.requireDoc().patch(patchId);
+    const version = patch.maskVersion;
+    const key = `${patchId}:${version}`;
+    if (this.patchMaskCache?.key !== key) {
+      this.patchMaskCache = { key, png: await maskOverlay(patch.mask, patch.rect.width, patch.rect.height) };
+    }
+    return { png: this.patchMaskCache.png, version };
   }
 
   private requireDoc(): CanvasDocument {
@@ -693,6 +732,8 @@ export class Session {
       id: randomUUID(),
       rect: job.prep.frame.inside,
       layer: buildLayer(job.prep, v.gen, job.alpha),
+      mask: job.mask,
+      feather: job.prep.feather,
       prompt: job.prompt,
       jobId: job.id,
       variant: v.n,
@@ -777,20 +818,22 @@ export class Session {
     return png;
   }
 
-  /** Маска задачи для показа поверх холста: полупрозрачная голубая заливка */
+  /** Маска задачи для показа поверх холста */
   async maskPng(jobId: string): Promise<Buffer> {
     const job = this.readyJob(jobId);
-    if (job.maskPng) return job.maskPng;
     const { inside } = job.prep.frame;
-    const rgba = Buffer.alloc(inside.width * inside.height * 4);
-    for (let i = 0; i < job.mask.length; i++) {
-      const m = job.mask[i]!;
-      if (m === 0) continue;
-      rgba.set([40, 140, 255, Math.round(m * 0.45)], i * 4);
-    }
-    job.maskPng = await sharp(rgba, { raw: { width: inside.width, height: inside.height, channels: 4 } })
-      .png({ compressionLevel: 2 })
-      .toBuffer();
+    job.maskPng ??= await maskOverlay(job.mask, inside.width, inside.height);
     return job.maskPng;
   }
+}
+
+/** Маска для показа поверх холста: полупрозрачная голубая заливка */
+function maskOverlay(mask: Uint8Array, width: number, height: number): Promise<Buffer> {
+  const rgba = Buffer.alloc(width * height * 4);
+  for (let i = 0; i < mask.length; i++) {
+    const m = mask[i]!;
+    if (m === 0) continue;
+    rgba.set([40, 140, 255, Math.round(m * 0.45)], i * 4);
+  }
+  return sharp(rgba, { raw: { width, height, channels: 4 } }).png({ compressionLevel: 2 }).toBuffer();
 }

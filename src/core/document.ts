@@ -1,22 +1,31 @@
 // Документ: исходная картинка, принятые правки отдельными слоями и итоговый холст.
 // Правки недеструктивные: любой участок можно пересобрать из исходника и включённых слоёв,
-// поэтому откат правки — это просто её выключение. Для просмотра держим пирамиду уменьшенных
+// поэтому откат правки — это просто её выключение, а маску слоя можно править и после принятия. Для просмотра держим пирамиду уменьшенных
 // копий и режем из неё тайлы по запросу.
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { applyLayer, type RawImage } from './edit-region.ts';
 import { intersect, type Rect } from './frame.ts';
 import { encodeImage } from './image-file.ts';
+import { featherAlpha } from './mask.ts';
 
 export const TILE_SIZE = 512;
 const TILE_CACHE_LIMIT = 600;
+/** Сколько шагов помнит отмена: шаг правки маски держит маску размером со слой */
+const HISTORY_LIMIT = 100;
 
 export interface Patch {
   id: string;
   /** Где слой лежит на холсте */
   rect: Rect;
-  /** RGBA размером с rect: цвет правки и её растушёванная маска в альфе */
+  /** RGBA размером с rect: цвет ответа модели на весь rect и растушёванная маска в альфе */
   layer: Buffer;
+  /** Маска слоя до растушёвки, один канал размером с rect: 0 — слоя не видно */
+  mask: Uint8Array;
+  /** Растушёвка внутрь маски, пиксели холста */
+  feather: number;
+  /** Номер состояния маски: входит в contentKey, отмена возвращает прежний */
+  maskVersion: number;
   prompt: string;
   jobId: string;
   variant: number;
@@ -30,7 +39,18 @@ interface Level {
   data: Buffer;
 }
 
-type HistoryOp = { kind: 'add'; patch: Patch; index: number } | { kind: 'toggle'; patchId: string };
+/** Маска без feather и maskVersion выводится из альфы слоя — так принимают правки тесты */
+export type NewPatch = Omit<Patch, 'active' | 'mask' | 'feather' | 'maskVersion'> & { mask?: Uint8Array; feather?: number };
+
+interface MaskState {
+  mask: Uint8Array;
+  version: number;
+}
+
+type HistoryOp =
+  | { kind: 'add'; patch: Patch; index: number }
+  | { kind: 'toggle'; patchId: string }
+  | { kind: 'mask'; patchId: string; before: MaskState; after: MaskState };
 
 // Уменьшение вдвое средним по 2×2 для участка уровня dst (на краях нечётных размеров пиксель повторяется)
 function downsample(src: Level, dst: Level, rect: Rect): void {
@@ -70,6 +90,7 @@ export class CanvasDocument {
   private readonly tiles = new Map<string, Buffer>();
   private undoStack: HistoryOp[] = [];
   private redoStack: HistoryOp[] = [];
+  private maskVersions = 0;
 
   private constructor(name: string, width: number, height: number, base: Buffer) {
     this.name = name;
@@ -131,6 +152,14 @@ export class CanvasDocument {
     return this.levels.length;
   }
 
+  /** Холст однозначно задан исходником и включёнными правками с их масками по порядку: одинаковый ключ — одинаковые пиксели */
+  get contentKey(): string {
+    return this.patches
+      .filter((p) => p.active)
+      .map((p) => `${p.id}:${p.maskVersion}`)
+      .join(',');
+  }
+
   get canUndo(): boolean {
     return this.undoStack.length > 0;
   }
@@ -140,21 +169,41 @@ export class CanvasDocument {
   }
 
   /** Принять правку: слой ложится поверх текущего холста */
-  addPatch(patch: Omit<Patch, 'active'>): Patch {
-    const full: Patch = { ...patch, active: true };
+  addPatch(patch: NewPatch): Patch {
+    const { width, height } = patch.rect;
+    let mask = patch.mask;
+    if (!mask) {
+      mask = new Uint8Array(width * height);
+      for (let i = 0; i < mask.length; i++) mask[i] = patch.layer[i * 4 + 3]!;
+    }
+    const full: Patch = { ...patch, mask, feather: patch.mask ? (patch.feather ?? 0) : 0, maskVersion: 0, active: true };
     this.patches.push(full);
     applyLayer({ data: this.composite, rect: this.bounds(), channels: 3 }, full.rect, full.layer);
     this.refresh(full.rect);
-    this.undoStack.push({ kind: 'add', patch: full, index: this.patches.length - 1 });
-    this.redoStack = [];
+    this.record({ kind: 'add', patch: full, index: this.patches.length - 1 });
     return full;
   }
 
   /** Выключить или снова включить правку из истории */
   togglePatch(patchId: string): void {
     this.flip(patchId);
-    this.undoStack.push({ kind: 'toggle', patchId });
-    this.redoStack = [];
+    this.record({ kind: 'toggle', patchId });
+  }
+
+  patch(patchId: string): Patch {
+    const patch = this.patches.find((p) => p.id === patchId);
+    if (!patch) throw new Error('Нет такого слоя');
+    return patch;
+  }
+
+  /** Новая маска слоя (до растушёвки) размером с его rect: где 0, сквозь слой виден холст под ним */
+  setPatchMask(patchId: string, mask: Uint8Array): void {
+    const patch = this.patch(patchId);
+    if (mask.length !== patch.rect.width * patch.rect.height) throw new Error('Маска не того размера');
+    const before = { mask: patch.mask, version: patch.maskVersion };
+    const after = { mask, version: ++this.maskVersions };
+    this.applyMask(patch, after);
+    this.record({ kind: 'mask', patchId, before, after });
   }
 
   undo(): void {
@@ -163,6 +212,8 @@ export class CanvasDocument {
     if (op.kind === 'add') {
       this.patches.splice(op.index, 1);
       this.recompute(op.patch.rect);
+    } else if (op.kind === 'mask') {
+      this.applyMask(this.patch(op.patchId), op.before);
     } else {
       this.flip(op.patchId);
     }
@@ -175,10 +226,18 @@ export class CanvasDocument {
     if (op.kind === 'add') {
       this.patches.splice(op.index, 0, op.patch);
       this.recompute(op.patch.rect);
+    } else if (op.kind === 'mask') {
+      this.applyMask(this.patch(op.patchId), op.after);
     } else {
       this.flip(op.patchId);
     }
     this.undoStack.push(op);
+  }
+
+  private record(op: HistoryOp): void {
+    this.undoStack.push(op);
+    if (this.undoStack.length > HISTORY_LIMIT) this.undoStack.shift();
+    this.redoStack = [];
   }
 
   /** Тайл уровня k (0 — полное разрешение), JPEG */
@@ -218,10 +277,19 @@ export class CanvasDocument {
   }
 
   private flip(patchId: string): void {
-    const patch = this.patches.find((p) => p.id === patchId);
-    if (!patch) throw new Error('Нет такой правки');
+    const patch = this.patch(patchId);
     patch.active = !patch.active;
     this.recompute(patch.rect);
+  }
+
+  /** Поставить маску слою: альфа слоя пересчитывается с растушёвкой, участок пересобирается */
+  private applyMask(patch: Patch, state: MaskState): void {
+    const { width, height } = patch.rect;
+    const alpha = featherAlpha(state.mask, width, height, patch.feather);
+    for (let i = 0; i < alpha.length; i++) patch.layer[i * 4 + 3] = Math.round(alpha[i]! * 255);
+    patch.mask = state.mask;
+    patch.maskVersion = state.version;
+    if (patch.active) this.recompute(patch.rect);
   }
 
   /** Пересобрать участок из исходника и включённых правок по порядку */

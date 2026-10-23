@@ -34,6 +34,10 @@ function folder(path: string): string {
   return (parts.length > 2 ? '…/' : '') + parts.slice(-2).join('/');
 }
 
+function short(text: string, max = 32): string {
+  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+}
+
 function clock(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -51,6 +55,21 @@ const ICONS: Record<Tool, ComponentChildren> = {
     </>
   ),
 };
+
+const EYE_OPEN = (
+  <>
+    <path d="M1.75 10S4.75 4.75 10 4.75 18.25 10 18.25 10 15.25 15.25 10 15.25 1.75 10 1.75 10Z" />
+    <circle cx="10" cy="10" r="2.5" />
+  </>
+);
+const EYE_CLOSED = <path d="M2.5 8.5C4.5 11 7 12.5 10 12.5s5.5-1.5 7.5-4M5.2 11.3l-1.4 2M10 12.5V15M14.8 11.3l1.4 2" />;
+// Маска слоя — как в графических редакторах: прямоугольник с кругом
+const MASK_ICON = (
+  <>
+    <rect x="2.75" y="4.25" width="14.5" height="11.5" rx="1.5" />
+    <circle cx="10" cy="10" r="3.25" fill="currentColor" stroke="none" />
+  </>
+);
 
 const TOOLS: { id: Tool; label: string; key: string }[] = [
   { id: 'rect', label: 'Прямоугольник', key: 'R' },
@@ -79,6 +98,8 @@ export function App() {
   const [variants, setVariants] = useState(2);
   const [focusJob, setFocusJob] = useState<string | null>(null);
   const [maskJob, setMaskJob] = useState<string | null>(null);
+  /** Слой, маску которого сейчас правят */
+  const [maskLayer, setMaskLayer] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0);
   const [toast, setToast] = useState<{ text: string; error: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -101,6 +122,8 @@ export function App() {
 
   const doc = state?.doc ?? null;
   const jobs = state?.jobs ?? [];
+  const layers = state?.history ?? [];
+  const editedLayer = layers.find((p) => p.id === maskLayer && p.active) ?? null;
 
   const notify = (text: string, error = true) => {
     setToast({ text, error });
@@ -140,11 +163,24 @@ export function App() {
     setStyleDraft(doc?.style ?? '');
     setSelection([]);
     setMaskJob(null);
+    setMaskLayer(null);
   }, [doc?.id]);
   useEffect(() => {
     if (maskJob && !jobs.some((j) => j.id === maskJob && j.status === 'done')) setMaskJob(null);
     viewRef.current?.setJobs(jobs, numbers.current, focusJob, maskJob);
   }, [state?.jobs, focusJob, maskJob]);
+  // Скрытый или отменённый слой маску больше не правит
+  useEffect(() => {
+    if (maskLayer && !editedLayer) setMaskLayer(null);
+    viewRef.current?.setLayerMask(
+      editedLayer && {
+        id: editedLayer.id,
+        key: `${editedLayer.id}:${editedLayer.maskRev}`,
+        url: `/api/history/${editedLayer.id}/mask.png?v=${editedLayer.maskRev}`,
+        rect: editedLayer.rect,
+      },
+    );
+  }, [maskLayer, editedLayer?.id, editedLayer?.maskRev]);
   useEffect(() => viewRef.current?.setSelection(selection), [selection]);
   useEffect(() => viewRef.current?.setTool(tool), [tool]);
   useEffect(() => viewRef.current?.setBrush(brush), [brush]);
@@ -156,13 +192,18 @@ export function App() {
     return () => window.clearInterval(t);
   }, [anyRunning]);
 
+  const maskFail = (err: unknown) => {
+    viewRef.current?.clearPending();
+    fail(err);
+  };
   onShape.current = (shape) => {
-    if (maskJob) post(`/api/jobs/${maskJob}/mask`, { shapes: [shape] }).catch(fail);
+    if (maskJob) post(`/api/jobs/${maskJob}/mask`, { shapes: [shape] }).catch(maskFail);
+    else if (maskLayer) post(`/api/history/${maskLayer}/mask`, { shapes: [shape] }).catch(maskFail);
     else setSelection((s) => [...s, shape]);
   };
 
   const hasSelection = selection.some((s) => !s.erase);
-  const canGenerate = !!doc && hasSelection && prompt.trim().length > 0 && !maskJob;
+  const canGenerate = !!doc && hasSelection && prompt.trim().length > 0 && !maskJob && !maskLayer;
 
   const generate = async () => {
     if (!canGenerate) return;
@@ -179,9 +220,10 @@ export function App() {
     }
   };
 
+  // Правки маски слоя — обычные шаги истории документа, поэтому в режиме маски слоя ⌘Z отменяет их
   const undo = () => {
     if (maskJob) post(`/api/jobs/${maskJob}/mask/undo`).catch(fail);
-    else if (selection.length) setSelection((s) => s.slice(0, -1));
+    else if (selection.length && !maskLayer) setSelection((s) => s.slice(0, -1));
     else if (state?.canUndo) post('/api/history/undo').catch(fail);
   };
   const redo = () => {
@@ -334,6 +376,7 @@ export function App() {
       if (zoomMenu) setZoomMenu(false);
       else if (dialog) setDialog(null);
       else if (maskJob) setMaskJob(null);
+      else if (maskLayer) setMaskLayer(null);
       else setSelection([]);
       (document.activeElement as HTMLElement | null)?.blur();
       return;
@@ -404,6 +447,18 @@ export function App() {
     styleTimer.current = window.setTimeout(() => post('/api/doc/style', { style: value }).catch(fail), 600);
   };
 
+  // Маску слоя правят прежде всего, чтобы скрыть кусок, поэтому сразу ластик
+  const editLayerMask = (patch: PatchDto) => {
+    if (maskLayer === patch.id) {
+      setMaskLayer(null);
+      return;
+    }
+    setMaskLayer(patch.id);
+    setMaskJob(null);
+    setTool('eraser');
+    viewRef.current?.reveal(patch.rect);
+  };
+
   const focus = (job: JobDto) => {
     setFocusJob(job.id);
     const r = job.inside ?? job.bbox;
@@ -419,7 +474,11 @@ export function App() {
           {doc ? (
             <>
               <strong>{doc.name}</strong>
-              {doc.dirty && <span class="dirty" title="Есть несохранённые изменения" aria-label="Есть несохранённые изменения" />}
+              {doc.dirty && (
+                <span class="unsaved" title="Принятые правки ещё не записаны в файл (⌘S)">
+                  не сохранено
+                </span>
+              )}
               <span class="dim">
                 {doc.width}×{doc.height}
               </span>
@@ -429,9 +488,6 @@ export function App() {
           )}
         </div>
         <div class="topbar-actions">
-          <button class="ghost" title="Открыть картинку (⌘O)" onClick={openDialog}>
-            Открыть…
-          </button>
           {doc && (
             <>
               <span class="sep" />
@@ -474,7 +530,7 @@ export function App() {
               </div>
               <span class="sep" />
               <button
-                class="ghost"
+                class={doc.dirty ? 'ghost save-pending' : 'ghost'}
                 title={doc.path && !doc.saveBlocker ? `Записать в ${fileName(doc.path)} (⌘S)` : 'Сохранить в файл (⌘S)'}
                 onClick={() => void save(false)}
               >
@@ -511,12 +567,18 @@ export function App() {
         )}
       </nav>
 
-      <main class={maskJob ? 'stage mask-mode' : 'stage'}>
+      <main class={maskJob || maskLayer ? 'stage mask-mode' : 'stage'}>
         <div ref={stageRef} class="osd" />
         {maskJob && (
           <div class="stage-banner">
             Правка маски задачи #{numbers.current.get(maskJob)}: кисть и фигуры добавляют, ластик и Alt стирают.
             <button onClick={() => setMaskJob(null)}>Готово</button>
+          </div>
+        )}
+        {editedLayer && (
+          <div class="stage-banner">
+            Маска слоя «{short(editedLayer.prompt)}»: ластик и Alt скрывают, кисть и фигуры возвращают.
+            <button onClick={() => setMaskLayer(null)}>Готово</button>
           </div>
         )}
         {!doc && state && <StartScreen recent={state.recent} onOpen={openDialog} onOpenRecent={openRecent} onError={fail} />}
@@ -633,6 +695,7 @@ export function App() {
                   onSwitch={(dir) => switchVariant(job, dir)}
                   onMaskMode={() => {
                     setMaskJob(maskJob === job.id ? null : job.id);
+                    setMaskLayer(null);
                     setFocusJob(job.id);
                     if (tool === 'hand') setTool('brush');
                   }}
@@ -660,11 +723,20 @@ export function App() {
             </section>
 
             <section class="panel">
-              <h2>История</h2>
-              {!state?.history.length && <p class="hint">Принятые правки. Любую можно выключить и включить обратно.</p>}
-              <ol class="history">
-                {[...(state?.history ?? [])].reverse().map((p) => (
-                  <HistoryItem key={p.id} patch={p} onToggle={() => post(`/api/history/${p.id}/toggle`).catch(fail)} onShow={() => viewRef.current?.showRect(p.rect)} />
+              <h2>Слои</h2>
+              {!layers.length && (
+                <p class="hint">Принятые правки ложатся слоями поверх исходника. Глаз скрывает слой, маска стирает его часть или возвращает обратно.</p>
+              )}
+              <ol class="layers">
+                {[...layers].reverse().map((p) => (
+                  <LayerItem
+                    key={p.id}
+                    patch={p}
+                    maskMode={p.id === maskLayer}
+                    onToggle={() => post(`/api/history/${p.id}/toggle`).catch(fail)}
+                    onShow={() => viewRef.current?.showRect(p.rect)}
+                    onMask={() => editLayerMask(p)}
+                  />
                 ))}
               </ol>
             </section>
@@ -824,17 +896,37 @@ function JobCard(props: {
   );
 }
 
-function HistoryItem(props: { patch: PatchDto; onToggle: () => void; onShow: () => void }) {
+function LayerItem(props: { patch: PatchDto; maskMode: boolean; onToggle: () => void; onShow: () => void; onMask: () => void }) {
   const { patch } = props;
   const time = new Date(patch.createdAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
   return (
-    <li class={patch.active ? '' : 'off'}>
+    <li class={[patch.active ? '' : 'off', props.maskMode ? 'editing' : ''].filter(Boolean).join(' ')}>
+      <button
+        class="layer-icon"
+        title={patch.active ? 'Скрыть слой' : 'Показать слой'}
+        aria-label="Показывать слой"
+        aria-pressed={patch.active}
+        onClick={props.onToggle}
+      >
+        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          {patch.active ? EYE_OPEN : EYE_CLOSED}
+        </svg>
+      </button>
       <button class="link" onClick={props.onShow} title="Показать на холсте">
         {patch.prompt}
       </button>
       <span class="dim">{time}</span>
-      <button class="small" onClick={props.onToggle}>
-        {patch.active ? 'Выключить' : 'Включить'}
+      <button
+        class={props.maskMode ? 'layer-icon active' : 'layer-icon'}
+        title={!patch.active ? 'Слой скрыт: сначала покажите его' : props.maskMode ? 'Закончить с маской (Esc)' : 'Править маску: скрыть часть слоя или вернуть'}
+        aria-label="Править маску слоя"
+        aria-pressed={props.maskMode}
+        disabled={!patch.active}
+        onClick={props.onMask}
+      >
+        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          {MASK_ICON}
+        </svg>
       </button>
     </li>
   );

@@ -113,6 +113,24 @@ describe('Сохранить', () => {
     expect(s.state().recent[0]?.path).toBe(path);
   });
 
+  it('«изменён» — по содержимому: отмена до сохранённого состояния снимает метку, выключенная правка ставит', async () => {
+    const path = join(dir, 'undo.png');
+    await png(path);
+    const s = await session(fakeHost().host);
+    await s.openPath(path);
+    addPatch(s);
+    s.doc!.undo();
+    expect(s.dirty).toBe(false);
+    s.doc!.redo();
+    expect(s.dirty).toBe(true);
+
+    await s.save();
+    s.doc!.togglePatch('p300');
+    expect(s.dirty).toBe(true);
+    s.doc!.togglePatch('p300');
+    expect(s.dirty).toBe(false);
+  });
+
   it('файл, который не перезаписать без потерь, сохраняет под другим именем и не трогает исходник', async () => {
     const path = join(dir, 'transparent.png');
     const holes = await sharp(pattern(W, H), { raw: { width: W, height: H, channels: 3 } }).ensureAlpha().raw().toBuffer();

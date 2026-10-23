@@ -83,6 +83,8 @@ export interface PatchDto {
   rect: RectDto;
   active: boolean;
   createdAt: string;
+  /** Меняется при каждой правке маски слоя: по нему браузер перезапрашивает её картинку */
+  maskRev: number;
 }
 
 export interface StateDto {

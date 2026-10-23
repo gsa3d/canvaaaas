@@ -9,6 +9,15 @@ export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser';
 const ACCENT = '#2F5BEA';
 const ERROR = '#C8431A';
 
+/** Маска принятого слоя, которую сейчас правят */
+export interface LayerMaskView {
+  id: string;
+  /** Меняется вместе с маской: по нему перезапрашивается картинка */
+  key: string;
+  url: string;
+  rect: RectDto;
+}
+
 export interface ViewerHooks {
   onShape(shape: MaskShape): void;
   onZoom(percent: number): void;
@@ -77,6 +86,9 @@ export class CanvasView {
   private numbers = new Map<string, number>();
   private focused: string | null = null;
   private maskJob: string | null = null;
+  private layerMask: LayerMaskView | null = null;
+  /** Фигуры, ушедшие в маску: видны, пока не пришла обновлённая маска */
+  private pending: MaskShape[] = [];
   private draft: Draft | null = null;
   private cursor: { x: number; y: number } | null = null;
   private frame = 0;
@@ -119,6 +131,24 @@ export class CanvasView {
       this.reportZoom();
       this.redraw();
     });
+
+    // Прокрутка двумя пальцами (и колесо мыши) двигает картинку, как в графических редакторах.
+    // Щипок приходит колесом с ctrlKey, ⌘ + колесо — с metaKey: их пропускаем к OpenSeadragon, он масштабирует
+    container.addEventListener(
+      'wheel',
+      (e) => {
+        if (e.ctrlKey || e.metaKey) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? container.clientHeight : 1;
+        // Shift + колесо мыши — по горизонтали (на macOS система делает это сама)
+        const [dx, dy] = e.shiftKey && !e.deltaX ? [e.deltaY, 0] : [e.deltaX, e.deltaY];
+        const viewport = this.viewer.viewport;
+        viewport.panBy(viewport.deltaPointsFromPixels(new OpenSeadragon.Point(dx * unit, dy * unit)), true);
+        viewport.applyConstraints(true);
+      },
+      { capture: true, passive: false },
+    );
 
     container.addEventListener('pointermove', (e) => {
       const r = container.getBoundingClientRect();
@@ -205,7 +235,9 @@ export class CanvasView {
       tileOverlap: 0,
       maxLevel,
       minLevel: maxLevel - (doc.levels - 1),
-      getTileUrl: (level: number, x: number, y: number) => `/api/doc/tile/${maxLevel - level}/${x}/${y}.jpg?rev=${doc.rev}`,
+      // Тайлы кэшируются навсегда, а rev у каждого документа начинается с 1: без id документа
+      // второй открытый файл (или перезапущенный сервер) получал бы из кэша тайлы прежнего
+      getTileUrl: (level: number, x: number, y: number) => `/api/doc/tile/${maxLevel - level}/${x}/${y}.jpg?doc=${doc.id}&rev=${doc.rev}`,
     };
   }
 
@@ -213,7 +245,31 @@ export class CanvasView {
     this.jobs = jobs;
     this.numbers = numbers;
     this.focused = focused;
+    if (maskJob !== this.maskJob) this.pending = [];
     this.maskJob = maskJob;
+    this.syncLayers();
+  }
+
+  setLayerMask(mask: LayerMaskView | null): void {
+    if (mask?.id !== this.layerMask?.id) this.pending = [];
+    this.layerMask = mask;
+    this.syncLayers();
+  }
+
+  /** Мазок не дошёл до сервера — больше не показываем его */
+  clearPending(): void {
+    this.pending = [];
+    this.redraw();
+  }
+
+  private maskMode(): boolean {
+    return this.maskJob !== null || this.layerMask !== null;
+  }
+
+  // Слои поверх холста: варианты задач, маска правимой задачи или правимого слоя
+  private syncLayers(): void {
+    const jobs = this.jobs;
+    const maskJob = this.maskJob;
     const swapPending = this.pendingRev !== null;
 
     const wanted = new Map<string, { key: string; url: string; rect: RectDto }>();
@@ -228,6 +284,7 @@ export class CanvasView {
         wanted.set(`${job.id}:mask`, { key: String(job.rev), url: `/api/jobs/${job.id}/mask.png?rev=${job.rev}`, rect: job.inside });
       }
     }
+    if (this.layerMask) wanted.set('layer:mask', this.layerMask);
     for (const [id, layer] of this.layers) {
       if (wanted.has(id)) continue;
       this.layers.delete(id);
@@ -255,7 +312,9 @@ export class CanvasView {
           }
           next.item = item;
           if (layer?.item) this.viewer.world.removeItem(layer.item);
+          if (id.endsWith(':mask')) this.pending = [];
           this.raiseMasks();
+          this.redraw();
         },
       });
     }
@@ -302,6 +361,14 @@ export class CanvasView {
     const pad = Math.max(rect.width, rect.height) * 0.35;
     const r = new OpenSeadragon.Rect(rect.x - pad, rect.y - pad, rect.width + 2 * pad, rect.height + 2 * pad);
     this.viewer.viewport.fitBounds(this.base.imageToViewportRectangle(r));
+  }
+
+  /** Показать область, если её сейчас совсем не видно */
+  reveal(rect: RectDto): void {
+    if (!this.base) return;
+    const view = this.base.viewportToImageRectangle(this.viewer.viewport.getBounds(true));
+    const seen = rect.x < view.x + view.width && rect.x + rect.width > view.x && rect.y < view.y + view.height && rect.y + rect.height > view.y;
+    if (!seen) this.showRect(rect);
   }
 
   zoomBy(factor: number): void {
@@ -386,6 +453,7 @@ export class CanvasView {
       const first = pts[0]!;
       shape = { kind: 'stroke', points: pts.length > 1 ? pts : [first, [first[0] + 0.1, first[1]]], size: draft.size, erase };
     }
+    if (shape && this.maskMode()) this.pending.push(shape);
     this.redraw();
     if (shape) this.hooks.onShape(shape);
   }
@@ -425,9 +493,11 @@ export class CanvasView {
     const s = this.scale();
     const toImage = (c: CanvasRenderingContext2D) => c.setTransform(dpr * s, 0, 0, dpr * s, dpr * o.x, dpr * o.y);
 
-    // Выделение: объединение фигур с вычитанием ластика — на отдельном канвасе, затем заливка и контур
-    // Пока правится маска задачи, новое выделение не показываем, чтобы не путать одно с другим
-    const shapes: (MaskShape | Draft)[] = this.maskJob ? [] : [...this.selection];
+    // Выделение: объединение фигур с вычитанием ластика — на отдельном канвасе, затем заливка и контур.
+    // Пока правится маска, выделение не показываем, чтобы не путать одно с другим: видны только мазки по маске,
+    // и стирающие — красным, иначе ластик на пустом канвасе не оставлял бы следа
+    const maskMode = this.maskMode();
+    const shapes: (MaskShape | Draft)[] = maskMode ? [...this.pending] : [...this.selection];
     if (this.draft) shapes.push(this.draft);
     if (shapes.length) {
       const f = this.fill.getContext('2d')!;
@@ -435,16 +505,17 @@ export class CanvasView {
       f.clearRect(0, 0, this.fill.width, this.fill.height);
       toImage(f);
       for (const shape of shapes) {
-        f.globalCompositeOperation = shape.erase ? 'destination-out' : 'source-over';
+        f.globalCompositeOperation = shape.erase && !maskMode ? 'destination-out' : 'source-over';
+        const color = shape.erase ? ERROR : ACCENT;
         const path = shapePath(shape);
         if (shape.kind === 'stroke') {
           f.lineCap = 'round';
           f.lineJoin = 'round';
           f.lineWidth = shape.size;
-          f.strokeStyle = ACCENT;
+          f.strokeStyle = color;
           f.stroke(path);
         } else {
-          f.fillStyle = ACCENT;
+          f.fillStyle = color;
           f.fill(path);
         }
       }
@@ -458,33 +529,36 @@ export class CanvasView {
       e.globalCompositeOperation = 'destination-out';
       const d = 1.5 * dpr;
       for (const [dx, dy] of [[d, 0], [-d, 0], [0, d], [0, -d]] as const) e.drawImage(this.fill, dx, dy);
-      ctx.globalAlpha = this.maskJob ? 0.25 : 0.32;
+      ctx.globalAlpha = maskMode ? 0.4 : 0.32;
       ctx.drawImage(this.fill, 0, 0);
       ctx.globalAlpha = 1;
       ctx.drawImage(this.edge, 0, 0);
     }
 
-    // Области задач с номерами, как в очереди
+    // Области задач с номерами, как в очереди, и границы правимого слоя: за ними маску не расширить
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.font = '600 12px "Golos Text Variable", system-ui, sans-serif';
-    for (const job of this.jobs) {
-      const r = job.inside ?? job.bbox;
-      if (!r) continue;
+    const frame = (r: RectDto, label: string, color: string, width: number, dash: number[]) => {
       const x = o.x + r.x * s;
       const y = o.y + r.y * s;
-      const color = job.status === 'error' ? ERROR : ACCENT;
       ctx.strokeStyle = color;
-      ctx.lineWidth = job.id === this.focused ? 2 : 1;
-      ctx.setLineDash(job.status === 'done' ? [] : [6, 4]);
+      ctx.lineWidth = width;
+      ctx.setLineDash(dash);
       ctx.strokeRect(Math.round(x) + 0.5, Math.round(y) + 0.5, Math.round(r.width * s), Math.round(r.height * s));
       ctx.setLineDash([]);
-      const label = `#${this.numbers.get(job.id) ?? '?'}`;
       const w = ctx.measureText(label).width + 12;
       ctx.fillStyle = color;
       ctx.fillRect(Math.round(x), Math.round(y) - 20, w, 20);
       ctx.fillStyle = '#fff';
       ctx.fillText(label, Math.round(x) + 6, Math.round(y) - 6);
+    };
+    for (const job of this.jobs) {
+      const r = job.inside ?? job.bbox;
+      if (!r) continue;
+      const color = job.status === 'error' ? ERROR : ACCENT;
+      frame(r, `#${this.numbers.get(job.id) ?? '?'}`, color, job.id === this.focused ? 2 : 1, job.status === 'done' ? [] : [6, 4]);
     }
+    if (this.layerMask) frame(this.layerMask.rect, 'Маска слоя', ACCENT, 2, [6, 4]);
 
     // Курсор кисти
     const tool = this.activeTool();

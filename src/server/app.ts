@@ -174,17 +174,27 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     json(res, { ok: true });
   });
 
-  route('POST', '/api/history/undo', (_req, res) => {
-    session.undo();
+  route('POST', '/api/history/undo', async (_req, res) => {
+    await session.undo();
     json(res, { ok: true });
   });
-  route('POST', '/api/history/redo', (_req, res) => {
-    session.redo();
+  route('POST', '/api/history/redo', async (_req, res) => {
+    await session.redo();
     json(res, { ok: true });
   });
-  route('POST', '/api/history/:id/toggle', (_req, res, [id]) => {
-    session.togglePatch(id!);
+  route('POST', '/api/history/:id/toggle', async (_req, res, [id]) => {
+    await session.togglePatch(id!);
     json(res, { ok: true });
+  });
+  route('POST', '/api/history/:id/mask', async (req, res, [id]) => {
+    const { shapes } = await readJson<{ shapes: MaskShape[] }>(req);
+    await session.editPatchMask(id!, shapes);
+    json(res, { ok: true });
+  });
+  route('GET', '/api/history/:id/mask.png', async (_req, res, [id], url) => {
+    const { png, version } = await session.patchMaskPng(id!);
+    // Запрос мог отстать от мазков: картинку другого состояния маски браузер кэшировать не должен
+    send(res, 200, png, 'image/png', url.searchParams.get('v') === String(version) ? IMMUTABLE : { 'Cache-Control': 'no-store' });
   });
 
   route('POST', '/api/jobs', async (req, res) => {

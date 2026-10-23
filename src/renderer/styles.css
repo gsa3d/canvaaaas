@@ -85,13 +85,29 @@ textarea {
   text-overflow: ellipsis;
 }
 
-.dirty {
+.unsaved {
   flex: none;
   align-self: center;
-  width: 7px;
-  height: 7px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* «Сохранить», когда есть что сохранять: точка и акцентный цвет */
+button.save-pending {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+button.save-pending::before {
+  content: '';
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: var(--accent);
+  background: currentColor;
 }
 
 .topbar-actions {
@@ -763,9 +779,9 @@ button.swap {
   margin-left: auto;
 }
 
-/* ——— История ——— */
+/* ——— Слои ——— */
 
-.history {
+.layers {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -773,29 +789,59 @@ button.swap {
   flex-direction: column;
 }
 
-.history li {
+.layers li {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: auto 1fr auto auto;
   align-items: center;
   gap: 8px;
-  padding: 6px 0;
+  padding: 4px 2px;
   border-bottom: 1px solid var(--line);
 }
 
-.history li:last-child {
+.layers li:last-child {
   border-bottom: none;
 }
 
-.history li .link {
+.layers li.editing {
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+
+.layers li .link {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   display: block;
 }
 
-.history li.off .link {
+.layers li.off .link {
   color: var(--muted);
-  text-decoration: line-through;
+}
+
+/* Глаз и маска — как у слоёв в графических редакторах */
+button.layer-icon {
+  min-width: 0;
+  min-height: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+}
+
+button.layer-icon:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: transparent;
+}
+
+button.layer-icon.active,
+button.layer-icon.active:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+}
+
+.layers li.off button.layer-icon {
+  color: var(--muted);
 }
 
 /* ——— Масштаб ——— */
