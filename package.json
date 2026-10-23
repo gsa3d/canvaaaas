@@ -25,6 +25,7 @@
   },
   "devDependencies": {
     "@fontsource-variable/golos-text": "^5.3.0",
+    "@tabler/icons-preact": "^3.49.0",
     "@types/node": "^26.6.5",
     "electron": "^45.0.0",
     "electron-builder": "^26.15.3",
@@ -51,6 +52,15 @@
     "asarUnpack": [
       "node_modules/sharp/**",
       "node_modules/@img/**"
+    ],
+    "fileAssociations": [
+      {
+        "ext": "caaa",
+        "name": "Проект canvaaaas",
+        "description": "Проект canvaaaas",
+        "role": "Editor",
+        "rank": "Owner"
+      }
     ],
     "mac": {
       "target": [

@@ -3,11 +3,12 @@
 // без новой генерации.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import sharp from 'sharp';
 import { CanvasDocument, TILE_SIZE } from '../core/document.ts';
 import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, type ImageFormat } from '../core/image-file.ts';
+import { encodeProject, isProject, isProjectPath, openProject, PROJECT_EXTENSION } from '../core/project.ts';
 import type { RecentFiles } from '../core/recent.ts';
 import { buildLayer, fitGenerated, insideOf, measure, prepareEdit, type PreparedEdit, type RawImage } from '../core/edit-region.ts';
 import { intersect } from '../core/frame.ts';
@@ -80,10 +81,10 @@ function message(err: unknown): string {
 
 /** Окна выбора файла и вопросы пользователю. Их даёт Electron; у сервера для разработки их нет */
 export interface Host {
-  /** Путь к картинке или null, если пользователь передумал */
+  /** Путь к картинке или проекту или null, если пользователь передумал */
   chooseOpen(): Promise<string | null>;
-  /** message — пояснение над окном сохранения (на macOS) */
-  chooseSave(defaultPath: string, message?: string): Promise<string | null>;
+  /** message — пояснение над окном сохранения (на macOS); project: false — только картинки, без .caaa */
+  chooseSave(defaultPath: string, opts?: { message?: string; project?: boolean }): Promise<string | null>;
   /** Номер нажатой кнопки; последняя кнопка — отмена */
   ask(question: { message: string; detail?: string; buttons: string[] }): Promise<number>;
 }
@@ -92,6 +93,12 @@ export interface SessionOptions {
   host?: Host;
   recent?: RecentFiles;
 }
+
+/** Во что записывается документ: картинка или проект .caaa со слоями */
+type SaveFormat = ImageFormat | typeof PROJECT_EXTENSION;
+
+/** Открытый файл; у проекта .caaa нет ограничений картинки (blocker, прореживание цвета) */
+type OpenFile = Omit<ImageFile, 'format'> & { format: SaveFormat };
 
 function stem(name: string): string {
   return name.slice(0, name.length - extname(name).length) || name;
@@ -112,11 +119,15 @@ export class Session {
   host: Host | null;
   private readonly recent: RecentFiles | null;
   /** Файл, открытый с диска; null — новый холст или картинка, загруженная из браузера */
-  private file: ImageFile | null = null;
+  private file: OpenFile | null = null;
   /** Разрешение для печати: из исходника или из пресета нового холста */
   private density: number | undefined;
   /** Содержимое холста на момент последнего сохранения (contentKey документа) */
   private savedKey = '';
+  /** Стиль на момент сохранения: в проект .caaa он записывается, в картинку — нет */
+  private savedStyle = '';
+  /** Документ со слоями уже записывали картинкой: «Сохранить» больше не спрашивает, сохранить ли слои */
+  private flattened = false;
   /** Что сервер сейчас делает с файлом: «Открываю…», «Сохраняю…» */
   private activity: string | null = null;
   /** Открытый вопрос «Сохранить изменения?»: второй ⌘Q не должен открыть второй */
@@ -198,6 +209,7 @@ export class Session {
         tileSize: TILE_SIZE,
         style: doc.style,
         path: this.file?.path ?? null,
+        project: this.file?.format === PROJECT_EXTENSION,
         dirty: this.dirty,
         saveBlocker: this.file?.blocker,
       },
@@ -262,9 +274,10 @@ export class Session {
     return this.file?.path ?? null;
   }
 
-  /** Есть несохранённые изменения холста */
+  /** Есть несохранённые изменения холста (у проекта .caaa — и стиля) */
   get dirty(): boolean {
-    return !!this.doc && this.doc.contentKey !== this.savedKey;
+    if (!this.doc) return false;
+    return this.doc.contentKey !== this.savedKey || (this.file?.format === PROJECT_EXTENSION && this.doc.style !== this.savedStyle);
   }
 
   /** При закрытии документа есть что потерять: несохранённые правки или задачи в очереди */
@@ -283,9 +296,16 @@ export class Session {
     if (!(await this.confirmClose())) return false;
     this.setActivity(`Открываю ${basename(path)}…`);
     try {
-      const [doc, file] = await Promise.all([CanvasDocument.open(path, basename(path)), inspectImage(path)]);
-      this.replaceDoc(doc, file, file.density);
-      await this.remember(doc, path);
+      if (isProjectPath(path)) {
+        const info = await stat(path);
+        const { doc, density } = await openProject(await readFile(path), basename(path));
+        this.replaceDoc(doc, { path, format: PROJECT_EXTENSION, density, size: info.size, mtimeMs: info.mtimeMs }, density);
+        await this.remember(doc, path);
+      } else {
+        const [doc, file] = await Promise.all([CanvasDocument.open(path, basename(path)), inspectImage(path)]);
+        this.replaceDoc(doc, file, file.density);
+        await this.remember(doc, path);
+      }
     } finally {
       this.setActivity(null);
     }
@@ -313,10 +333,15 @@ export class Session {
     return this.recent.thumbPath(id);
   }
 
-  /** Картинка, загруженная из браузера (сервер для разработки): пути к файлу нет, «Сохранить» её не перезапишет */
+  /** Картинка или проект, загруженные из браузера (сервер для разработки): пути к файлу нет, «Сохранить» их не перезапишет */
   async openDocument(input: Buffer, name: string): Promise<boolean> {
     if (!(await this.confirmClose())) return false;
-    this.replaceDoc(await CanvasDocument.open(input, name), null, undefined);
+    if (isProject(input)) {
+      const { doc, density } = await openProject(input, name);
+      this.replaceDoc(doc, null, density);
+    } else {
+      this.replaceDoc(await CanvasDocument.open(input, name), null, undefined);
+    }
     return true;
   }
 
@@ -326,12 +351,14 @@ export class Session {
     return true;
   }
 
-  private replaceDoc(doc: CanvasDocument, file: ImageFile | null, density: number | undefined): void {
+  private replaceDoc(doc: CanvasDocument, file: OpenFile | null, density: number | undefined): void {
     this.dropAllJobs();
     this.doc = doc;
     this.file = file;
     this.density = density;
     this.savedKey = doc.contentKey;
+    this.savedStyle = doc.style;
+    this.flattened = false;
     this.changed();
   }
 
@@ -354,7 +381,7 @@ export class Session {
     if (this.dirty) {
       const answer = await host.ask({
         message: `Сохранить изменения в «${doc.name}»?`,
-        detail: lost ? `Иначе принятые правки пропадут. ${lost[0]!.toUpperCase()}${lost.slice(1)} пропадут в любом случае.` : 'Иначе принятые правки пропадут.',
+        detail: `Если не сохранить, все изменения после последнего сохранения пропадут насовсем.${lost ? ` ${lost[0]!.toUpperCase()}${lost.slice(1)} пропадут в любом случае.` : ''}`,
         buttons: ['Сохранить', 'Не сохранять', 'Отмена'],
       });
       if (answer === 0) return (await this.save()) !== null;
@@ -369,13 +396,30 @@ export class Session {
   }
 
   /**
-   * «Сохранить»: холст записывается в открытый файл. Новый холст и файл, который без потерь
-   * не перезаписать, идут через «Сохранить как». Возвращает путь или null, если пользователь передумал.
+   * «Сохранить»: документ записывается в открытый файл. Проект .caaa — со слоями; картинка со слоями
+   * сначала спрашивает, не сохранить ли их в .caaa, потому что в картинке они сольются. Новый холст и файл,
+   * который без потерь не перезаписать, идут через «Сохранить как». Возвращает путь или null, если пользователь передумал.
    */
   async save(): Promise<string | null> {
     const doc = this.requireDoc();
     const file = this.file;
-    if (!file || file.blocker) return this.saveAs(file?.blocker);
+    if (file?.format === PROJECT_EXTENSION) return this.overwrite(file);
+    if (doc.patches.length && !this.flattened && this.host) {
+      const answer = await this.host.ask({
+        message: 'Сохранить слои?',
+        detail: 'Слои останутся слоями, только если сохранить документ в формате canvaaaas (.caaa): после повторного открытия их можно будет скрывать и править их маски. В картинке они сольются с холстом.',
+        buttons: ['Сохранить в .caaa…', file && !file.blocker ? `Записать в «${doc.name}»` : 'Сохранить картинкой…', 'Отмена'],
+      });
+      if (answer === 0) return this.saveAs({ kind: 'project' });
+      if (answer !== 1) return null;
+    }
+    if (!file || file.blocker) return this.saveAs({ kind: 'image', reason: file?.blocker });
+    return this.overwrite(file);
+  }
+
+  /** Записать поверх открытого файла; если его изменила другая программа — спросить */
+  private async overwrite(file: OpenFile): Promise<string | null> {
+    const doc = this.requireDoc();
     const now = await stat(file.path).catch(() => null);
     if (now && (now.size !== file.size || now.mtimeMs !== file.mtimeMs)) {
       if (!this.host) throw new Error(`Файл «${doc.name}» изменила другая программа: сохраните под другим именем`);
@@ -391,18 +435,39 @@ export class Session {
     return file.path;
   }
 
-  /** «Сохранить как…»: новый файл, формат — по расширению (PNG, JPEG, WebP, TIFF) */
-  async saveAs(reason?: string): Promise<string | null> {
+  /** Слои документа пойдут в .caaa, а не сольются в картинку */
+  private keepsLayers(): boolean {
+    return this.file?.format === PROJECT_EXTENSION || (this.requireDoc().patches.length > 0 && !this.flattened);
+  }
+
+  /** Папка для окна сохранения: открытого файла или последнего из недавних */
+  private saveDir(): string | undefined {
+    const recent = this.recentFiles()[0];
+    return this.file ? dirname(this.file.path) : recent && dirname(recent.path);
+  }
+
+  /**
+   * «Сохранить как…»: новый файл, формат — по расширению: .caaa со слоями или картинка (PNG, JPEG, WebP, TIFF).
+   * kind — что предложить по умолчанию; без него — проект, если слои есть и их ещё не сливали в картинку.
+   */
+  async saveAs(opts: { kind?: 'project' | 'image'; reason?: string } = {}): Promise<string | null> {
     const doc = this.requireDoc();
     const host = this.requireHost();
-    const name = this.file?.blocker ? `${stem(doc.name)}-canvaaaas.png` : this.file ? doc.name : `${stem(doc.name)}.png`;
-    const dir = this.file ? dirname(this.file.path) : this.recentFiles()[0] && dirname(this.recentFiles()[0]!.path);
-    let path = await host.chooseSave(dir ? join(dir, name) : name, reason);
+    const project = (opts.kind ?? (this.keepsLayers() ? 'project' : 'image')) === 'project';
+    const name = project
+      ? `${stem(doc.name)}.${PROJECT_EXTENSION}`
+      : this.file?.blocker
+        ? `${stem(doc.name)}-canvaaaas.png`
+        : this.file && this.file.format !== PROJECT_EXTENSION
+          ? doc.name
+          : `${stem(doc.name)}.png`;
+    const dir = this.saveDir();
+    let path = await host.chooseSave(dir ? join(dir, name) : name, { message: opts.reason });
     if (!path) return null;
-    let format = formatOf(path);
+    let format: SaveFormat | null = isProjectPath(path) ? PROJECT_EXTENSION : formatOf(path);
     if (!format) {
-      path += '.png';
-      format = 'png';
+      format = project ? PROJECT_EXTENSION : 'png';
+      path += `.${format}`;
     }
     await this.write(path, format, this.file?.path === path ? this.file.chromaSubsampling : undefined);
     doc.name = basename(path);
@@ -410,16 +475,44 @@ export class Session {
     return path;
   }
 
-  private async write(path: string, format: ImageFormat, chromaSubsampling?: string): Promise<void> {
+  /** «Экспортировать картинку…»: холст со слоями в отдельный файл; документ остаётся связан со своим файлом */
+  async exportImage(): Promise<string | null> {
+    const doc = this.requireDoc();
+    const host = this.requireHost();
+    const dir = this.saveDir();
+    const name = `${stem(doc.name)}.png`;
+    let path = await host.chooseSave(dir ? join(dir, name) : name, { project: false });
+    if (!path) return null;
+    let format = formatOf(path);
+    if (!format) {
+      format = 'png';
+      path += '.png';
+    }
+    this.setActivity(`Экспортирую ${basename(path)}…`);
+    try {
+      await writeFileAtomic(path, await encodeImage(doc.snapshot(), format, { density: this.density }));
+    } finally {
+      this.setActivity(null);
+    }
+    return path;
+  }
+
+  private async write(path: string, format: SaveFormat, chromaSubsampling?: string): Promise<void> {
     const doc = this.requireDoc();
     this.setActivity(`Сохраняю ${basename(path)}…`);
     try {
       const key = doc.contentKey;
-      const data = await encodeImage(doc.snapshot(), format, { density: this.density, chromaSubsampling });
+      const style = doc.style;
+      const data =
+        format === PROJECT_EXTENSION
+          ? await encodeProject(doc, this.density)
+          : await encodeImage(doc.snapshot(), format, { density: this.density, chromaSubsampling });
       await writeFileAtomic(path, data);
       const info = await stat(path);
       this.file = { path, format, density: this.density, chromaSubsampling, size: info.size, mtimeMs: info.mtimeMs };
       this.savedKey = key;
+      this.savedStyle = style;
+      if (format !== PROJECT_EXTENSION) this.flattened = true;
       await this.remember(doc, path);
     } finally {
       this.setActivity(null);
@@ -449,6 +542,11 @@ export class Session {
   setStyle(style: string): void {
     this.requireDoc().style = style;
     this.changed();
+  }
+
+  /** Проект .caaa для скачивания (сервер для разработки, где нет окна сохранения) */
+  exportProject(): Promise<Buffer> {
+    return encodeProject(this.requireDoc(), this.density);
   }
 
   private serialDoc<T>(fn: (doc: CanvasDocument) => Promise<T> | T): Promise<T> {

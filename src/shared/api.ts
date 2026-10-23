@@ -13,7 +13,8 @@ export type MaskShape =
   | { kind: 'rect'; x: number; y: number; width: number; height: number; erase?: boolean }
   | { kind: 'ellipse'; cx: number; cy: number; rx: number; ry: number; erase?: boolean }
   | { kind: 'polygon'; points: [number, number][]; erase?: boolean }
-  | { kind: 'stroke'; points: [number, number][]; size: number; erase?: boolean };
+  /** softness — доля радиуса кисти, на которой мазок плавно сходит на нет: 0 — жёсткий край, 1 — затухает от середины */
+  | { kind: 'stroke'; points: [number, number][]; size: number; softness?: number; erase?: boolean };
 
 export type ModelChoice = 'flash' | 'pro';
 export type SizeChoice = 'auto' | '1K' | '2K' | '4K';
@@ -29,6 +30,8 @@ export interface DocDto {
   style: string;
   /** Файл на диске; null — новый холст или картинка, загруженная из браузера */
   path: string | null;
+  /** Файл — проект .caaa: слои сохраняются слоями */
+  project: boolean;
   /** Есть несохранённые изменения */
   dirty: boolean;
   /** Почему «Сохранить» не перезапишет файл, а предложит новый */
@@ -156,6 +159,7 @@ export type AppCommand =
   | 'new'
   | 'save'
   | 'save-as'
+  | 'export'
   | 'undo'
   | 'redo'
   | 'zoom-fit'

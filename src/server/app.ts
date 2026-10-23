@@ -112,6 +112,9 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   route('POST', '/api/doc/save-as', async (_req, res) => {
     json(res, { path: await session.saveAs() });
   });
+  route('POST', '/api/doc/export', async (_req, res) => {
+    json(res, { path: await session.exportImage() });
+  });
 
   route('POST', '/api/recent/:id/open', async (_req, res, [id]) => {
     json(res, { opened: await session.openRecent(id!) });
@@ -158,6 +161,16 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     if (!doc) throw new HttpError(404, 'Документ не открыт');
     const name = `${doc.name.replace(/\.[a-z0-9]+$/i, '')}-canvaaaas.png`;
     send(res, 200, await doc.exportPng(), 'image/png', {
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
+      'Cache-Control': 'no-store',
+    });
+  });
+  // Проект со слоями — скачиванием, когда нет окна сохранения (интерфейс в браузере для разработки)
+  route('GET', '/api/doc/export.caaa', async (_req, res) => {
+    const doc = session.doc;
+    if (!doc) throw new HttpError(404, 'Документ не открыт');
+    const name = `${doc.name.replace(/\.[a-z0-9]+$/i, '')}.caaa`;
+    send(res, 200, await session.exportProject(), 'application/octet-stream', {
       'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
       'Cache-Control': 'no-store',
     });

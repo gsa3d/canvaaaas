@@ -33,8 +33,8 @@ function fakeHost(answers: { save?: string | null; ask?: number[] } = {}) {
   const saveDialogs: { defaultPath: string; message?: string }[] = [];
   const host: Host = {
     chooseOpen: async () => null,
-    chooseSave: async (defaultPath, message) => {
-      saveDialogs.push({ defaultPath, message });
+    chooseSave: async (defaultPath, opts) => {
+      saveDialogs.push({ defaultPath, message: opts?.message });
       return answers.save ?? null;
     },
     ask: async ({ message }) => {
@@ -89,12 +89,15 @@ describe('Сохранить', () => {
   it('перезаписывает открытый PNG: вне правки пиксели побайтно те же, документ больше не «изменён»', async () => {
     const path = join(dir, 'art.png');
     const original = await png(path);
-    const s = await session(fakeHost().host);
+    // На вопрос «Сохранить слои?» — «Записать в art.png»
+    const { host, asked } = fakeHost({ ask: [1] });
+    const s = await session(host);
     await s.openPath(path);
     addPatch(s);
     expect(s.dirty).toBe(true);
 
     expect(await s.save()).toBe(path);
+    expect(asked).toEqual(['Сохранить слои?']);
     expect(s.dirty).toBe(false);
     const saved = await decode(path);
     let outside = 0;
@@ -116,7 +119,7 @@ describe('Сохранить', () => {
   it('«изменён» — по содержимому: отмена до сохранённого состояния снимает метку, выключенная правка ставит', async () => {
     const path = join(dir, 'undo.png');
     await png(path);
-    const s = await session(fakeHost().host);
+    const s = await session(fakeHost({ ask: [1] }).host);
     await s.openPath(path);
     addPatch(s);
     s.doc!.undo();
@@ -138,7 +141,8 @@ describe('Сохранить', () => {
     await sharp(holes, { raw: { width: W, height: H, channels: 4 } }).png().toFile(path);
     const before = await readFile(path);
     const target = join(dir, 'transparent-copy.jpg');
-    const { host, saveDialogs } = fakeHost({ save: target });
+    // «Сохранить слои?» — «Сохранить картинкой…»
+    const { host, saveDialogs } = fakeHost({ save: target, ask: [1] });
     const s = await session(host);
     await s.openPath(path);
     addPatch(s);
@@ -149,7 +153,7 @@ describe('Сохранить', () => {
     expect((await readFile(path)).equals(before)).toBe(true);
     expect((await sharp(target).metadata()).format).toBe('jpeg');
     expect(s.state().doc?.name).toBe('transparent-copy.jpg');
-    // Теперь «Сохранить» пишет в новый файл без вопросов
+    // Теперь «Сохранить» пишет в новый файл без вопросов: слои уже согласились слить в картинку
     addPatch(s, 600);
     expect(await s.save()).toBe(target);
     expect(saveDialogs).toHaveLength(1);
@@ -158,7 +162,7 @@ describe('Сохранить', () => {
   it('спрашивает, если файл изменила другая программа; «Отмена» ничего не пишет', async () => {
     const path = join(dir, 'touched.png');
     await png(path);
-    const { host, asked } = fakeHost({ ask: [2] });
+    const { host, asked } = fakeHost({ ask: [1, 2] });
     const s = await session(host);
     await s.openPath(path);
     addPatch(s);
@@ -167,7 +171,7 @@ describe('Сохранить', () => {
     const before = await readFile(path);
 
     expect(await s.save()).toBeNull();
-    expect(asked[0]).toMatch(/изменила другая программа/);
+    expect(asked[1]).toMatch(/изменила другая программа/);
     expect((await readFile(path)).equals(before)).toBe(true);
     expect(s.dirty).toBe(true);
   });

@@ -1,10 +1,12 @@
 // Оболочка Electron: поднимает сервер приложения на 127.0.0.1 (порт любой свободный)
 // и открывает окно с интерфейсом. Вся работа с картинками — в сервере, окно только показывает.
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, extname, join } from 'node:path';
 import { app, BrowserWindow, dialog, Menu, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
-import { encodeImage, IMAGE_EXTENSIONS } from '../core/image-file.ts';
+import { encodeImage, formatOf, IMAGE_EXTENSIONS } from '../core/image-file.ts';
+import { isProjectPath, PROJECT_EXTENSION } from '../core/project.ts';
 import { RecentFiles } from '../core/recent.ts';
 import { encryptedFileStore, keychainStore, withEnv } from '../core/secrets.ts';
 import { COMMAND_EVENT, type AppCommand } from '../shared/api.ts';
@@ -12,6 +14,21 @@ import { startServer } from '../server/app.ts';
 import { Session, type Host } from '../server/session.ts';
 
 if (!app.requestSingleInstanceLock()) app.quit();
+
+// Файл, который система просит открыть: двойной щелчок по .caaa в Finder, перетаскивание на значок в Dock.
+// На macOS событие приходит и до запуска окна — тогда файл ждёт, пока окно не будет готово
+let openFile: ((path: string) => void) | null = null;
+const waitingFiles: string[] = [];
+app.on('open-file', (event, path) => {
+  event.preventDefault();
+  if (openFile) openFile(path);
+  else waitingFiles.push(path);
+});
+
+/** На Windows файл приходит в аргументах запуска */
+function fileArg(argv: string[]): string | undefined {
+  return argv.slice(1).find((a) => !a.startsWith('-') && (isProjectPath(a) || formatOf(a)) && existsSync(a));
+}
 
 // Меню по-русски. Пункты шлют команду в окно; их сочетания клавиш только показываются
 // (registerAccelerator: false), а нажатия обрабатывает интерфейс — так нигде нет двойного срабатывания.
@@ -75,6 +92,7 @@ function buildMenu(win: BrowserWindow, session: Session): void {
         { type: 'separator' },
         { ...item('Сохранить', 'save', 'CmdOrCtrl+S'), enabled: hasDoc },
         { ...item('Сохранить как…', 'save-as', 'CmdOrCtrl+Shift+S'), enabled: hasDoc },
+        { ...item('Экспортировать картинку…', 'export', 'CmdOrCtrl+Shift+E'), enabled: hasDoc },
         ...(mac ? [] : [{ type: 'separator' } as const, settings, { type: 'separator' } as const, { role: 'quit', label: 'Выход' } as const]),
       ],
     },
@@ -187,56 +205,103 @@ app.whenReady().then(async () => {
   await win.loadURL(server.url);
 
   if (smokeDir) {
-    // Проверка сборки: интерфейс отрисовался и достучался до сервера, файл открывается и сохраняется
+    // Проверка сборки: интерфейс отрисовался и достучался до сервера, файл открывается и сохраняется,
+    // проект .caaa сохраняется со слоем и открывается обратно, закрытие окна с несохранённым спрашивает
     const check = await win.webContents.executeJavaScript(
       `new Promise((r) => setTimeout(async () => {
         const res = await fetch('/api/state');
         r({ ui: !!document.querySelector('.app'), api: res.ok, key: (await res.json()).hasKey });
       }, 1500))`,
     );
+    const asked: string[] = [];
+    session.host = {
+      chooseOpen: async () => null,
+      chooseSave: async () => join(smokeDir, `smoke.${PROJECT_EXTENSION}`),
+      // Всегда «Отмена»
+      ask: async ({ message, buttons }) => {
+        asked.push(message);
+        return buttons.length - 1;
+      },
+    };
+    const patch = (id: string) => {
+      const layer = Buffer.alloc(16 * 16 * 4, 255);
+      session.doc!.addPatch({ id, rect: { x: 8, y: 8, width: 16, height: 16 }, layer, prompt: id, jobId: id, variant: 0, createdAt: '' });
+    };
     let files = false;
+    let project = false;
+    let close = false;
     try {
       const path = join(smokeDir, 'smoke.png');
       await writeFile(path, await encodeImage({ data: Buffer.alloc(64 * 48 * 3, 200), width: 64, height: 48, channels: 3 }, 'png'));
       await session.openPath(path);
       files = (await session.save()) === path && (await stat(path)).size > 0 && session.recentFiles()[0]?.path === path;
+      patch('a');
+      const saved = await session.saveAs();
+      await session.openPath(saved!);
+      project = saved?.endsWith(`.${PROJECT_EXTENSION}`) === true && session.doc?.patches.length === 1 && !session.dirty;
+      patch('b');
+      win.close();
+      await new Promise((r) => setTimeout(r, 300));
+      close = !win.isDestroyed() && asked.some((m) => m.startsWith('Сохранить изменения'));
     } catch (err) {
       console.log(`SMOKE файлы: ${err instanceof Error ? err.message : String(err)}`);
     }
     await rm(smokeDir, { recursive: true, force: true });
-    const ok = check.ui && check.api && files;
-    console.log(`SMOKE ${ok ? 'OK' : 'FAIL'}: ${server.url}, интерфейс ${check.ui}, API ${check.api}, открытие и сохранение ${files}, ключ ${check.key ? 'есть' : 'нет'}`);
+    const ok = check.ui && check.api && files && project && close;
+    console.log(
+      `SMOKE ${ok ? 'OK' : 'FAIL'}: ${server.url}, интерфейс ${check.ui}, API ${check.api}, открытие и сохранение ${files}, ` +
+        `проект .caaa ${project}, вопрос при закрытии ${close}, ключ ${check.key ? 'есть' : 'нет'}`,
+    );
     app.exit(ok ? 0 : 1);
+    return;
   }
 
-  app.on('second-instance', () => {
+  openFile = (path) => {
     if (win.isMinimized()) win.restore();
     win.focus();
+    session.openPath(path).catch((err: unknown) => dialog.showErrorBox('Не удалось открыть файл', err instanceof Error ? err.message : String(err)));
+  };
+  const launched = fileArg(process.argv);
+  for (const path of [...waitingFiles.splice(0), ...(launched ? [launched] : [])]) openFile(path);
+
+  app.on('second-instance', (_event, argv) => {
+    if (win.isMinimized()) win.restore();
+    win.focus();
+    const path = fileArg(argv);
+    if (path) openFile?.(path);
   });
   // Не before-quit: выход ещё может отмениться вопросом о несохранённых правках
   app.on('will-quit', () => void server.close());
 });
+
+const PROJECT_FILTER = { name: 'Проект canvaaaas', extensions: [PROJECT_EXTENSION] };
+const IMAGE_FILTERS = [
+  { name: 'PNG', extensions: ['png'] },
+  { name: 'JPEG', extensions: ['jpg', 'jpeg'] },
+  { name: 'WebP', extensions: ['webp'] },
+  { name: 'TIFF', extensions: ['tif', 'tiff'] },
+];
 
 function nativeHost(win: BrowserWindow): Host {
   return {
     async chooseOpen() {
       const res = await dialog.showOpenDialog(win, {
         properties: ['openFile'],
-        filters: [{ name: 'Картинки', extensions: IMAGE_EXTENSIONS }],
+        filters: [{ name: 'Картинки и проекты canvaaaas', extensions: [...IMAGE_EXTENSIONS, PROJECT_EXTENSION] }],
       });
       return res.canceled ? null : (res.filePaths[0] ?? null);
     },
-    async chooseSave(defaultPath, message) {
+    async chooseSave(defaultPath, { message, project = true } = {}) {
+      // Первым — фильтр расширения из имени по умолчанию: Windows ставит выбранным первый
+      const ext = extname(defaultPath).slice(1).toLowerCase();
+      const filters = [...(project ? [PROJECT_FILTER] : []), ...IMAGE_FILTERS].sort(
+        (a, b) => Number(b.extensions.includes(ext)) - Number(a.extensions.includes(ext)),
+      );
       const res = await dialog.showSaveDialog(win, {
         defaultPath,
         message,
         properties: ['createDirectory', 'showOverwriteConfirmation'],
-        filters: [
-          { name: 'PNG', extensions: ['png'] },
-          { name: 'JPEG', extensions: ['jpg', 'jpeg'] },
-          { name: 'WebP', extensions: ['webp'] },
-          { name: 'TIFF', extensions: ['tif', 'tiff'] },
-        ],
+        filters,
       });
       return res.canceled ? null : (res.filePath ?? null);
     },

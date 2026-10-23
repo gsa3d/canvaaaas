@@ -28,6 +28,7 @@ interface Draft {
   points: [number, number][];
   erase: boolean;
   size: number;
+  softness: number;
 }
 
 interface Layer {
@@ -81,6 +82,8 @@ export class CanvasView {
   private tool: Tool = 'rect';
   private spaceHeld = false;
   private brushPx = 40;
+  /** Мягкость края кисти 0..1; действует только при правке маски — выделение всегда с жёстким краем */
+  private softness = 0;
   private selection: MaskShape[] = [];
   private jobs: JobDto[] = [];
   private numbers = new Map<string, number>();
@@ -341,8 +344,9 @@ export class CanvasView {
     this.redraw();
   }
 
-  setBrush(px: number): void {
+  setBrush(px: number, softness: number): void {
     this.brushPx = px;
+    this.softness = softness;
     this.redraw();
   }
 
@@ -416,6 +420,7 @@ export class CanvasView {
       points: [p],
       erase: tool === 'eraser' || original.altKey,
       size: round(this.brushPx / this.scale()),
+      softness: this.maskMode() ? this.softness : 0,
     };
     this.redraw();
   }
@@ -451,7 +456,8 @@ export class CanvasView {
       shape = { kind: 'polygon', points: pts, erase };
     } else if (draft.kind === 'stroke') {
       const first = pts[0]!;
-      shape = { kind: 'stroke', points: pts.length > 1 ? pts : [first, [first[0] + 0.1, first[1]]], size: draft.size, erase };
+      const softness = draft.softness || undefined;
+      shape = { kind: 'stroke', points: pts.length > 1 ? pts : [first, [first[0] + 0.1, first[1]]], size: draft.size, softness, erase };
     }
     if (shape && this.maskMode()) this.pending.push(shape);
     this.redraw();
@@ -509,11 +515,15 @@ export class CanvasView {
         const color = shape.erase ? ERROR : ACCENT;
         const path = shapePath(shape);
         if (shape.kind === 'stroke') {
+          // Мягкий мазок — как его растеризует сервер: линия уже на половину зоны затухания и размыта
+          const fade = (shape.size / 2) * (shape.softness ?? 0);
           f.lineCap = 'round';
           f.lineJoin = 'round';
-          f.lineWidth = shape.size;
+          f.lineWidth = shape.size - fade;
           f.strokeStyle = color;
+          if (fade) f.filter = `blur(${(fade / 5) * s * dpr}px)`;
           f.stroke(path);
+          f.filter = 'none';
         } else {
           f.fillStyle = color;
           f.fill(path);
@@ -560,17 +570,25 @@ export class CanvasView {
     }
     if (this.layerMask) frame(this.layerMask.rect, 'Маска слоя', ACCENT, 2, [6, 4]);
 
-    // Курсор кисти
+    // Курсор кисти; у мягкой кисти пунктиром — где кончается сплошная середина
     const tool = this.activeTool();
     if (this.cursor && (tool === 'brush' || tool === 'eraser')) {
-      ctx.beginPath();
-      ctx.arc(this.cursor.x, this.cursor.y, this.brushPx / 2, 0, Math.PI * 2);
-      ctx.lineWidth = 2.5;
-      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-      ctx.stroke();
-      ctx.lineWidth = 1.2;
-      ctx.strokeStyle = tool === 'eraser' ? '#fff' : ACCENT;
-      ctx.stroke();
+      const circle = (radius: number, dash: number[]) => {
+        ctx.beginPath();
+        ctx.arc(this.cursor!.x, this.cursor!.y, radius, 0, Math.PI * 2);
+        ctx.setLineDash(dash);
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+        ctx.stroke();
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = tool === 'eraser' ? '#fff' : ACCENT;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      };
+      const radius = this.brushPx / 2;
+      circle(radius, []);
+      const soft = maskMode ? this.softness : 0;
+      if (soft > 0 && radius * (1 - soft) >= 2) circle(radius * (1 - soft), [3, 3]);
     }
   }
 }

@@ -92,12 +92,16 @@ export class CanvasDocument {
   private redoStack: HistoryOp[] = [];
   private maskVersions = 0;
 
-  private constructor(name: string, width: number, height: number, base: Buffer) {
+  private constructor(name: string, width: number, height: number, base: Buffer, patches: Patch[] = []) {
     this.name = name;
     this.width = width;
     this.height = height;
     this.base = base;
     this.composite = Buffer.from(base);
+    this.patches = patches;
+    for (const p of patches) {
+      if (p.active) applyLayer({ data: this.composite, rect: this.bounds(), channels: 3 }, p.rect, p.layer);
+    }
     this.levels = [{ width, height, data: this.composite }];
     while (true) {
       const prev = this.levels[this.levels.length - 1]!;
@@ -128,6 +132,12 @@ export class CanvasDocument {
     const base = Buffer.alloc(width * height * 3);
     for (let i = 0; i < width * height; i++) base.set(color, i * 3);
     return new CanvasDocument(name, width, height, base);
+  }
+
+  /** Документ из проекта .caaa: исходник и слои с масками как были, история отмены начинается заново */
+  static restore(name: string, width: number, height: number, base: Buffer, patches: Patch[]): CanvasDocument {
+    if (base.length !== width * height * 3) throw new Error('Исходник не того размера');
+    return new CanvasDocument(name, width, height, base, patches);
   }
 
   raw(): RawImage {

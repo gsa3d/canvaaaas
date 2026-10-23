@@ -1,3 +1,24 @@
+import {
+  IconArrowBackUp,
+  IconArrowForwardUp,
+  IconArrowsExchange,
+  IconBlur,
+  IconBrush,
+  IconChevronLeft,
+  IconChevronRight,
+  IconEraser,
+  IconEye,
+  IconEyeOff,
+  IconHandStop,
+  IconLasso,
+  IconMarquee2,
+  IconMask,
+  IconMinus,
+  IconPhotoPlus,
+  IconPlus,
+  IconX,
+  type Icon,
+} from '@tabler/icons-preact';
 import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import {
@@ -43,33 +64,16 @@ function clock(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-const ICONS: Record<Tool, ComponentChildren> = {
-  hand: <path d="M10 2v16M2 10h16M10 2 7.5 4.5M10 2l2.5 2.5M10 18l-2.5-2.5M10 18l2.5-2.5M2 10l2.5-2.5M2 10l2.5 2.5M18 10l-2.5-2.5M18 10l-2.5 2.5" />,
-  rect: <rect x="3" y="5" width="14" height="10" rx="1" stroke-dasharray="2.5 2" />,
-  lasso: <path d="M5.5 13C3.6 12 2.5 10.4 2.5 8.6 2.5 5.3 6 3 10.2 3s7.3 2.2 7.3 5.2-3.3 5-7.3 5c-1.6 0-3.4 0-4.6.6-1 .5-1.3 1.6-.6 2.4.9 1 2.6.9 3.3-.3" />,
-  brush: <circle cx="10" cy="10" r="5.5" fill="currentColor" />,
-  eraser: (
-    <>
-      <circle cx="10" cy="10" r="5.5" />
-      <path d="M6.2 13.8 13.8 6.2" />
-    </>
-  ),
-};
+// Иконки — Tabler (tabler.io/icons), обводка чуть тоньше стандартной
+const STROKE = 1.75;
 
-const EYE_OPEN = (
-  <>
-    <path d="M1.75 10S4.75 4.75 10 4.75 18.25 10 18.25 10 15.25 15.25 10 15.25 1.75 10 1.75 10Z" />
-    <circle cx="10" cy="10" r="2.5" />
-  </>
-);
-const EYE_CLOSED = <path d="M2.5 8.5C4.5 11 7 12.5 10 12.5s5.5-1.5 7.5-4M5.2 11.3l-1.4 2M10 12.5V15M14.8 11.3l1.4 2" />;
-// Маска слоя — как в графических редакторах: прямоугольник с кругом
-const MASK_ICON = (
-  <>
-    <rect x="2.75" y="4.25" width="14.5" height="11.5" rx="1.5" />
-    <circle cx="10" cy="10" r="3.25" fill="currentColor" stroke="none" />
-  </>
-);
+const TOOL_ICONS: Record<Tool, Icon> = {
+  hand: IconHandStop,
+  rect: IconMarquee2,
+  lasso: IconLasso,
+  brush: IconBrush,
+  eraser: IconEraser,
+};
 
 const TOOLS: { id: Tool; label: string; key: string }[] = [
   { id: 'rect', label: 'Прямоугольник', key: 'R' },
@@ -91,6 +95,8 @@ export function App() {
   const [state, setState] = useState<StateDto | null>(null);
   const [tool, setTool] = useState<Tool>('rect');
   const [brush, setBrush] = useState(40);
+  /** Мягкость края кисти при правке маски, 0..1 */
+  const [softness, setSoftness] = useState(0.5);
   const [selection, setSelection] = useState<MaskShape[]>([]);
   const [prompt, setPrompt] = useState('');
   const [model, setModel] = useState<ModelChoice>('flash');
@@ -183,7 +189,7 @@ export function App() {
   }, [maskLayer, editedLayer?.id, editedLayer?.maskRev]);
   useEffect(() => viewRef.current?.setSelection(selection), [selection]);
   useEffect(() => viewRef.current?.setTool(tool), [tool]);
-  useEffect(() => viewRef.current?.setBrush(brush), [brush]);
+  useEffect(() => viewRef.current?.setBrush(brush, softness), [brush, softness]);
 
   const anyRunning = jobs.some((j) => j.status !== 'done' && j.status !== 'error');
   useEffect(() => {
@@ -230,10 +236,11 @@ export function App() {
     if (state?.canRedo) post('/api/history/redo').catch(fail);
   };
 
-  // Без окон выбора файла (интерфейс в браузере для разработки) «Сохранить как» — скачивание PNG
-  const downloadPng = () => {
+  // Без окон выбора файла (интерфейс в браузере для разработки) «Сохранить как» — скачивание:
+  // документ со слоями — проектом .caaa, без слоёв — PNG
+  const download = (ext: 'png' | 'caaa') => {
     const a = document.createElement('a');
-    a.href = '/api/doc/export.png';
+    a.href = `/api/doc/export.${ext}`;
     a.download = '';
     document.body.appendChild(a);
     a.click();
@@ -247,15 +254,15 @@ export function App() {
 
   const openRecent = (id: string) => post(`/api/recent/${id}/open`).catch(fail);
 
-  const save = async (as: boolean) => {
+  const save = async (how: 'save' | 'save-as' | 'export') => {
     if (!doc) return;
-    if (!state?.nativeFiles && (as || !doc.path || doc.saveBlocker)) {
-      downloadPng();
+    if (!state?.nativeFiles && (how !== 'save' || !doc.path || doc.saveBlocker)) {
+      download(how !== 'export' && layers.length ? 'caaa' : 'png');
       return;
     }
     try {
-      const { path } = await post<{ path: string | null }>(as ? '/api/doc/save-as' : '/api/doc/save');
-      if (path) notify(`Сохранено: ${fileName(path)}`, false);
+      const { path } = await post<{ path: string | null }>(`/api/doc/${how}`);
+      if (path) notify(`${how === 'export' ? 'Экспортировано' : 'Сохранено'}: ${fileName(path)}`, false);
     } catch (err) {
       fail(err);
     }
@@ -295,10 +302,9 @@ export function App() {
         setDialog('new');
         break;
       case 'save':
-        void save(false);
-        break;
       case 'save-as':
-        void save(true);
+      case 'export':
+        void save(command);
         break;
       case 'undo':
         if (editing) document.execCommand('undo');
@@ -396,7 +402,7 @@ export function App() {
         '+': 'zoom-in',
         '-': 'zoom-out',
       };
-      const command = e.shiftKey && key === 's' ? 'save-as' : e.shiftKey || e.altKey ? undefined : byKey[key];
+      const command = e.shiftKey && key === 's' ? 'save-as' : e.shiftKey && key === 'e' ? 'export' : e.shiftKey || e.altKey ? undefined : byKey[key];
       if (command) {
         e.preventDefault();
         run(command);
@@ -413,8 +419,12 @@ export function App() {
     if (mod) return;
     const t = TOOLS.find((x) => x.key.toLowerCase() === e.key.toLowerCase());
     if (t) setTool(t.id);
-    if (e.key === '[') setBrush((b) => Math.max(4, Math.round(b / 1.25)));
-    if (e.key === ']') setBrush((b) => Math.min(400, Math.round(b * 1.25)));
+    // [ и ] — размер кисти, с Shift — жёсткость, как в Photoshop: ⇧[ мягче, ⇧] жёстче. По коду клавиши — в русской раскладке тоже
+    if (e.code === 'BracketLeft' || e.code === 'BracketRight') {
+      const up = e.code === 'BracketRight';
+      if (e.shiftKey) setSoftness((v) => Math.min(1, Math.max(0, Math.round((v + (up ? -0.25 : 0.25)) * 4) / 4)));
+      else setBrush((b) => (up ? Math.min(400, Math.round(b * 1.25)) : Math.max(4, Math.round(b / 1.25))));
+    }
     const focused = jobs.find((j) => j.id === focusJob);
     if (focused && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) switchVariant(focused, e.key === 'ArrowLeft' ? -1 : 1);
   };
@@ -428,6 +438,15 @@ export function App() {
       window.removeEventListener('keyup', up);
     };
   }, []);
+
+  // В браузере (сервер для разработки) вопрос о несохранённом задаёт сам браузер; в приложении — окно Electron
+  const unsaved = !state?.nativeFiles && !!doc && (doc.dirty || jobs.length > 0);
+  useEffect(() => {
+    if (!unsaved) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [unsaved]);
 
   // Загрузка из браузера — только когда нет окон выбора файла (интерфейс для разработки)
   const openFile = async (file: File) => {
@@ -491,16 +510,22 @@ export function App() {
           {doc && (
             <>
               <span class="sep" />
-              <button class="ghost" title="Отменить (⌘Z)" disabled={!state?.canUndo && !selection.length && !maskJob} onClick={undo}>
-                Отменить
+              <button
+                class="ghost icon"
+                title="Отменить (⌘Z)"
+                aria-label="Отменить"
+                disabled={!state?.canUndo && !selection.length && !maskJob}
+                onClick={undo}
+              >
+                <IconArrowBackUp size={20} stroke={STROKE} />
               </button>
-              <button class="ghost" title="Повторить (⇧⌘Z)" disabled={!state?.canRedo} onClick={redo}>
-                Повторить
+              <button class="ghost icon" title="Повторить (⇧⌘Z)" aria-label="Повторить" disabled={!state?.canRedo} onClick={redo}>
+                <IconArrowForwardUp size={20} stroke={STROKE} />
               </button>
               <span class="sep" />
               <div class="zoom-control">
                 <button class="ghost icon" title="Уменьшить (⌘−)" aria-label="Уменьшить" onClick={() => run('zoom-out')}>
-                  −
+                  <IconMinus size={18} stroke={STROKE} />
                 </button>
                 <button
                   class="ghost zoom"
@@ -512,7 +537,7 @@ export function App() {
                   {zoom}%
                 </button>
                 <button class="ghost icon" title="Увеличить (⌘=)" aria-label="Увеличить" onClick={() => run('zoom-in')}>
-                  +
+                  <IconPlus size={18} stroke={STROKE} />
                 </button>
                 {zoomMenu && (
                   <ul class="zoom-menu" role="menu" onClick={() => setZoomMenu(false)}>
@@ -532,7 +557,7 @@ export function App() {
               <button
                 class={doc.dirty ? 'ghost save-pending' : 'ghost'}
                 title={doc.path && !doc.saveBlocker ? `Записать в ${fileName(doc.path)} (⌘S)` : 'Сохранить в файл (⌘S)'}
-                onClick={() => void save(false)}
+                onClick={() => void save('save')}
               >
                 Сохранить
               </button>
@@ -546,23 +571,40 @@ export function App() {
       </header>
 
       <nav class="rail" aria-label="Инструменты">
-        {TOOLS.map((t) => (
-          <button
-            key={t.id}
-            class={tool === t.id ? 'tool active' : 'tool'}
-            title={`${t.label} (${t.key})`}
-            aria-pressed={tool === t.id}
-            onClick={() => setTool(t.id)}
-          >
-            <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              {ICONS[t.id]}
-            </svg>
-          </button>
-        ))}
+        {TOOLS.map((t) => {
+          const ToolIcon = TOOL_ICONS[t.id];
+          return (
+            <button
+              key={t.id}
+              class={tool === t.id ? 'tool active' : 'tool'}
+              title={`${t.label} (${t.key})`}
+              aria-label={t.label}
+              aria-pressed={tool === t.id}
+              onClick={() => setTool(t.id)}
+            >
+              <ToolIcon size={22} stroke={STROKE} />
+            </button>
+          );
+        })}
         {(tool === 'brush' || tool === 'eraser') && (
           <label class="brush-size" title="Размер кисти на экране ([ и ])">
-            <input type="range" min={4} max={400} value={brush} onInput={(e) => setBrush(Number(e.currentTarget.value))} />
+            <input type="range" min={4} max={400} value={brush} aria-label="Размер кисти" onInput={(e) => setBrush(Number(e.currentTarget.value))} />
             <span>{brush}</span>
+          </label>
+        )}
+        {(tool === 'brush' || tool === 'eraser') && (maskJob || maskLayer) && (
+          <label class="brush-size" title="Мягкость края кисти: 0% — жёсткий край, 100% — затухает от середины (⇧[ и ⇧])">
+            <IconBlur size={16} stroke={STROKE} aria-hidden="true" />
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={5}
+              value={Math.round(softness * 100)}
+              aria-label="Мягкость края кисти"
+              onInput={(e) => setSoftness(Number(e.currentTarget.value) / 100)}
+            />
+            <span>{Math.round(softness * 100)}%</span>
           </label>
         )}
       </nav>
@@ -638,13 +680,14 @@ export function App() {
                   <figure class="ref">
                     <img src={`/api/refs/${id}/thumb.jpg`} alt="Референс" />
                     <button class="ref-remove" aria-label="Убрать референс" onClick={() => setRefs((r) => r.filter((x) => x !== id))}>
-                      ×
+                      <IconX size={12} stroke={2.25} />
                     </button>
                   </figure>
                 ))}
                 {refs.length < MAX_REFERENCES && (
                   <button class="ref-add" title="Или перетащите картинку сюда, или вставьте её через ⌘V" onClick={() => refRef.current?.click()}>
-                    + Референс
+                    <IconPhotoPlus size={18} stroke={STROKE} />
+                    Референс
                   </button>
                 )}
               </div>
@@ -789,7 +832,7 @@ export function App() {
       <input
         ref={fileRef}
         type="file"
-        accept="image/png,image/jpeg,image/webp,image/tiff"
+        accept=".caaa,image/png,image/jpeg,image/webp,image/tiff"
         hidden
         onChange={(e) => {
           const file = e.currentTarget.files?.[0];
@@ -843,14 +886,14 @@ function JobCard(props: {
         <div class="job-body" onClick={(e) => e.stopPropagation()}>
           <div class="variants">
             <button class="icon" aria-label="Предыдущий вариант" disabled={done.length < 2} onClick={() => props.onSwitch(-1)}>
-              ‹
+              <IconChevronLeft size={16} stroke={STROKE} />
             </button>
             <span>
               Вариант {index + 1} из {done.length}
               {selected?.elapsedMs !== undefined && <span class="dim">, {Math.round(selected.elapsedMs / 1000)} с</span>}
             </span>
             <button class="icon" aria-label="Следующий вариант" disabled={done.length < 2} onClick={() => props.onSwitch(1)}>
-              ›
+              <IconChevronRight size={16} stroke={STROKE} />
             </button>
           </div>
           {selected?.insideChangedPct !== undefined && selected.insideChangedPct < 2 && (
@@ -875,8 +918,14 @@ function JobCard(props: {
             <button title="Добавить к маске то, что модель нарисовала за краем выделения" onClick={() => props.onAction('expand')}>
               Расширить по правке
             </button>
-            <button class="icon" title="Отменить правку маски" disabled={!job.canUndoMask} onClick={() => props.onAction('undoMask')}>
-              ↶
+            <button
+              class="icon"
+              title="Отменить правку маски"
+              aria-label="Отменить правку маски"
+              disabled={!job.canUndoMask}
+              onClick={() => props.onAction('undoMask')}
+            >
+              <IconArrowBackUp size={16} stroke={STROKE} />
             </button>
           </div>
         </div>
@@ -908,9 +957,7 @@ function LayerItem(props: { patch: PatchDto; maskMode: boolean; onToggle: () => 
         aria-pressed={patch.active}
         onClick={props.onToggle}
       >
-        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          {patch.active ? EYE_OPEN : EYE_CLOSED}
-        </svg>
+        {patch.active ? <IconEye size={18} stroke={STROKE} /> : <IconEyeOff size={18} stroke={STROKE} />}
       </button>
       <button class="link" onClick={props.onShow} title="Показать на холсте">
         {patch.prompt}
@@ -924,9 +971,7 @@ function LayerItem(props: { patch: PatchDto; maskMode: boolean; onToggle: () => 
         disabled={!patch.active}
         onClick={props.onMask}
       >
-        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          {MASK_ICON}
-        </svg>
+        <IconMask size={18} stroke={STROKE} />
       </button>
     </li>
   );
@@ -1066,7 +1111,7 @@ function NewCanvasForm(props: { onError: (err: unknown) => void; onCreated?: () 
             setHeight(width);
           }}
         >
-          ⇄
+          <IconArrowsExchange size={16} stroke={STROKE} />
         </button>
         <label>
           Высота
@@ -1096,7 +1141,10 @@ function StartScreen(props: { recent: RecentDto[]; onOpen: () => void; onOpenRec
           <header class="start-head">
             <div>
               <h1>Откройте картинку</h1>
-              <p class="hint">PNG, JPEG, WebP или TIFF любого размера. Всё вне выделенных областей останется нетронутым.</p>
+              <p class="hint">
+                PNG, JPEG, WebP или TIFF любого размера либо проект canvaaaas (.caaa) со слоями. Всё вне выделенных областей останется
+                нетронутым.
+              </p>
             </div>
             <button class="primary" onClick={props.onOpen}>
               Открыть…
