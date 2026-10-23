@@ -9,6 +9,10 @@
 - Проверки: `npm run typecheck` (корень и `src/renderer`), `npm test` (vitest, `test/`). Проверка сборки Electron: `npm run build && npx electron . --smoke`.
 - Приложение: `npm run install:mac` — electron-builder собирает `release/mac-arm64/canvaaaas.app`, скрипт подписывает его ad-hoc и кладёт в /Applications; проверка установленного: `/Applications/canvaaaas.app/Contents/MacOS/canvaaaas --smoke`. Настройки сборки — поле `build` в package.json; в зависимостях (`dependencies`) только то, что нужно main-процессу во время работы (sharp, undici), всё, что собирает Vite, — в devDependencies. `release/` исключён из Dropbox.
 
+## Git — только через GitHub
+- Репозиторий живёт на GitHub: `origin` — https://github.com/gsa3d/canvaaaas, ветка `main`. Каждый коммит сразу отправлять туда (`git push`) — коммитов, которых нет на GitHub, не оставлять.
+- Перед отправкой — `git fetch`: если на GitHub есть коммиты, которых нет здесь, сначала забрать их (`git pull --rebase`), а не перезаписывать.
+
 ## Ограничения, которые нельзя нарушать
 - Генерация сейчас — Nano Banana (Gemini image) через прокси laozhang.ai, формат Google `generateContent`, ключ в `Authorization: Bearer`. Ключ вводится в приложении (`src/core/secrets.ts`): на macOS — Связка ключей (сервис `canvaaaas-laozhang`, аккаунт `api_key`, запись через stdin `/usr/bin/security`), на Windows — файл в userData, зашифрованный Electron safeStorage; `LAOZHANG_API_KEY` главнее. Ключ никогда не выводится в лог, консоль, ошибки или чат, не отдаётся интерфейсу обратно и не кладётся в папку проекта (она синхронизируется в Dropbox).
 - Каждая генерация стоит денег. Без явного согласия пользователя — не больше ~10 генераций за тестовый прогон. Все вызовы пишутся в журнал (`src/core/ledger.ts`).
