@@ -1,6 +1,7 @@
 import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import {
+  CANVAS_PRESETS,
   COMMAND_EVENT,
   MAX_REFERENCES,
   type AppCommand,
@@ -8,6 +9,7 @@ import {
   type MaskShape,
   type ModelChoice,
   type PatchDto,
+  type RecentDto,
   type SizeChoice,
   type StateDto,
 } from '../shared/api.ts';
@@ -20,6 +22,16 @@ function plural(n: number, one: string, few: string, many: string): string {
   if (d === 1 && dd !== 11) return one;
   if (d >= 2 && d <= 4 && (dd < 12 || dd > 14)) return few;
   return many;
+}
+
+function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+/** Две последние папки пути: «work/step1»; полный путь — во всплывающей подсказке */
+function folder(path: string): string {
+  const parts = path.split(/[\\/]/).slice(0, -1).filter(Boolean);
+  return (parts.length > 2 ? '…/' : '') + parts.slice(-2).join('/');
 }
 
 function clock(ms: number): string {
@@ -122,6 +134,9 @@ export function App() {
 
   useEffect(() => viewRef.current?.setDocument(doc), [doc?.id, doc?.rev]);
   useEffect(() => {
+    document.title = doc ? `${doc.name}${doc.dirty ? ' •' : ''} — canvaaaas` : 'canvaaaas';
+  }, [doc?.name, doc?.dirty]);
+  useEffect(() => {
     setStyleDraft(doc?.style ?? '');
     setSelection([]);
     setMaskJob(null);
@@ -173,14 +188,35 @@ export function App() {
     if (state?.canRedo) post('/api/history/redo').catch(fail);
   };
 
-  const exportPng = () => {
-    if (!doc) return;
+  // Без окон выбора файла (интерфейс в браузере для разработки) «Сохранить как» — скачивание PNG
+  const downloadPng = () => {
     const a = document.createElement('a');
     a.href = '/api/doc/export.png';
     a.download = '';
     document.body.appendChild(a);
     a.click();
     a.remove();
+  };
+
+  const openDialog = () => {
+    if (state?.nativeFiles) post('/api/doc/open').catch(fail);
+    else fileRef.current?.click();
+  };
+
+  const openRecent = (id: string) => post(`/api/recent/${id}/open`).catch(fail);
+
+  const save = async (as: boolean) => {
+    if (!doc) return;
+    if (!state?.nativeFiles && (as || !doc.path || doc.saveBlocker)) {
+      downloadPng();
+      return;
+    }
+    try {
+      const { path } = await post<{ path: string | null }>(as ? '/api/doc/save-as' : '/api/doc/save');
+      if (path) notify(`Сохранено: ${fileName(path)}`, false);
+    } catch (err) {
+      fail(err);
+    }
   };
 
   const addReferences = async (files: Iterable<File>) => {
@@ -211,13 +247,16 @@ export function App() {
         setDialog('settings');
         break;
       case 'open':
-        fileRef.current?.click();
+        openDialog();
         break;
       case 'new':
         setDialog('new');
         break;
-      case 'export':
-        exportPng();
+      case 'save':
+        void save(false);
+        break;
+      case 'save-as':
+        void save(true);
         break;
       case 'undo':
         if (editing) document.execCommand('undo');
@@ -242,6 +281,8 @@ export function App() {
       case 'zoom-out':
         view?.zoomBy(0.5);
         break;
+      default:
+        if (command.startsWith('open-recent:')) void openRecent(command.slice('open-recent:'.length));
     }
   };
   const commands = useRef(run);
@@ -304,6 +345,7 @@ export function App() {
         ',': 'settings',
         o: 'open',
         n: 'new',
+        s: 'save',
         '0': 'zoom-fit',
         '1': 'zoom-100',
         '2': 'zoom-50',
@@ -311,7 +353,7 @@ export function App() {
         '+': 'zoom-in',
         '-': 'zoom-out',
       };
-      const command = e.shiftKey && key === 'e' ? 'export' : e.shiftKey || e.altKey ? undefined : byKey[key];
+      const command = e.shiftKey && key === 's' ? 'save-as' : e.shiftKey || e.altKey ? undefined : byKey[key];
       if (command) {
         e.preventDefault();
         run(command);
@@ -344,6 +386,7 @@ export function App() {
     };
   }, []);
 
+  // Загрузка из браузера — только когда нет окон выбора файла (интерфейс для разработки)
   const openFile = async (file: File) => {
     setBusy(`Открываю ${file.name}…`);
     try {
@@ -372,10 +415,11 @@ export function App() {
   return (
     <div class="app">
       <header class="topbar">
-        <div class="doc-title">
+        <div class="doc-title" title={doc?.path ?? undefined}>
           {doc ? (
             <>
               <strong>{doc.name}</strong>
+              {doc.dirty && <span class="dirty" title="Есть несохранённые изменения" aria-label="Есть несохранённые изменения" />}
               <span class="dim">
                 {doc.width}×{doc.height}
               </span>
@@ -385,7 +429,7 @@ export function App() {
           )}
         </div>
         <div class="topbar-actions">
-          <button class="ghost" onClick={() => fileRef.current?.click()}>
+          <button class="ghost" title="Открыть картинку (⌘O)" onClick={openDialog}>
             Открыть…
           </button>
           {doc && (
@@ -429,8 +473,12 @@ export function App() {
                 )}
               </div>
               <span class="sep" />
-              <button class="ghost" title="Сохранить PNG в полном разрешении (⇧⌘E)" onClick={exportPng}>
-                Сохранить PNG
+              <button
+                class="ghost"
+                title={doc.path && !doc.saveBlocker ? `Записать в ${fileName(doc.path)} (⌘S)` : 'Сохранить в файл (⌘S)'}
+                onClick={() => void save(false)}
+              >
+                Сохранить
               </button>
             </>
           )}
@@ -471,8 +519,8 @@ export function App() {
             <button onClick={() => setMaskJob(null)}>Готово</button>
           </div>
         )}
-        {!doc && <EmptyState onOpen={() => fileRef.current?.click()} onError={fail} />}
-        {busy && <div class="busy">{busy}</div>}
+        {!doc && state && <StartScreen recent={state.recent} onOpen={openDialog} onOpenRecent={openRecent} onError={fail} />}
+        {(busy ?? state?.activity) && <div class="busy">{busy ?? state?.activity}</div>}
         {toast && <div class={toast.error ? 'toast error' : 'toast'}>{toast.text}</div>}
       </main>
 
@@ -637,11 +685,9 @@ export function App() {
       )}
       {dialog === 'new' && (
         <div class="modal-backdrop" onClick={() => setDialog(null)}>
-          <div class="modal" role="dialog" aria-modal="true" aria-labelledby="new-title" onClick={(e) => e.stopPropagation()}>
+          <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="new-title" onClick={(e) => e.stopPropagation()}>
             <h2 id="new-title">Новый холст</h2>
-            {doc && <p class="hint">Текущий документ закроется вместе с непринятыми правками.</p>}
             <NewCanvasForm
-              primary
               onError={fail}
               onCreated={() => setDialog(null)}
               extra={
@@ -863,49 +909,133 @@ function SettingsDialog(props: { hasKey: boolean; onClose: () => void; onSaved: 
   );
 }
 
-function NewCanvasForm(props: { onError: (err: unknown) => void; onCreated?: () => void; extra?: ComponentChildren; primary?: boolean }) {
-  const [width, setWidth] = useState(4096);
-  const [height, setHeight] = useState(3072);
+function NewCanvasForm(props: { onError: (err: unknown) => void; onCreated?: () => void; extra?: ComponentChildren }) {
+  const [width, setWidth] = useState(3840);
+  const [height, setHeight] = useState(2160);
   const [color, setColor] = useState('#ffffff');
+  const [creating, setCreating] = useState(false);
+  // Пресет узнаётся по размеру в любой ориентации: «Повернуть» его не сбрасывает
+  const preset = CANVAS_PRESETS.find((p) => (p.width === width && p.height === height) || (p.width === height && p.height === width));
+  const valid = [width, height].every((v) => Number.isInteger(v) && v >= 16 && v <= 30000);
+  const megapixels = (width * height) / 1e6;
   return (
     <form
       class="new-canvas"
       onSubmit={(e) => {
         e.preventDefault();
-        post('/api/doc/new', { width, height, color })
-          .then(() => props.onCreated?.())
-          .catch(props.onError);
+        setCreating(true);
+        post<{ opened: boolean }>('/api/doc/new', { width, height, color, dpi: preset?.dpi })
+          .then(({ opened }) => opened && props.onCreated?.())
+          .catch(props.onError)
+          .finally(() => setCreating(false));
       }}
     >
-      <label>
-        Ширина
-        <input type="number" min={16} max={30000} value={width} onInput={(e) => setWidth(Number(e.currentTarget.value))} />
-      </label>
-      <label>
-        Высота
-        <input type="number" min={16} max={30000} value={height} onInput={(e) => setHeight(Number(e.currentTarget.value))} />
-      </label>
-      <label>
-        Фон
-        <input type="color" value={color} onInput={(e) => setColor(e.currentTarget.value)} />
-      </label>
-      <button type="submit" class={props.primary ? 'primary' : ''}>
-        Создать холст
-      </button>
-      {props.extra}
+      <div class="presets" role="radiogroup" aria-label="Размер">
+        {CANVAS_PRESETS.map((p) => {
+          const scale = 22 / Math.max(p.width, p.height);
+          const turned = preset === p && p.width !== width;
+          const w = turned ? p.height : p.width;
+          const h = turned ? p.width : p.height;
+          return (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={preset === p}
+              class={preset === p ? 'preset active' : 'preset'}
+              onClick={() => {
+                setWidth(p.width);
+                setHeight(p.height);
+              }}
+            >
+              <span class="preset-shape" aria-hidden="true">
+                <span style={{ width: `${Math.max(4, Math.round(w * scale))}px`, height: `${Math.max(4, Math.round(h * scale))}px` }} />
+              </span>
+              <span class="preset-name">{p.name}</span>
+              <span class="preset-size">
+                {w} × {h}
+                {p.dpi && `, ${p.dpi} dpi`}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <div class="size-row">
+        <label>
+          Ширина
+          <input type="number" min={16} max={30000} value={width} onInput={(e) => setWidth(Number(e.currentTarget.value))} />
+        </label>
+        <button
+          type="button"
+          class="icon swap"
+          title="Повернуть: поменять ширину и высоту"
+          aria-label="Поменять ширину и высоту"
+          onClick={() => {
+            setWidth(height);
+            setHeight(width);
+          }}
+        >
+          ⇄
+        </button>
+        <label>
+          Высота
+          <input type="number" min={16} max={30000} value={height} onInput={(e) => setHeight(Number(e.currentTarget.value))} />
+        </label>
+        <label>
+          Фон
+          <input type="color" value={color} onInput={(e) => setColor(e.currentTarget.value)} />
+        </label>
+      </div>
+      <p class="hint">{valid ? `${megapixels.toFixed(1).replace('.', ',')} Мп${preset?.dpi ? `, для печати ${preset.dpi} dpi` : ''}` : 'Каждая сторона — от 16 до 30 000 пикселей'}</p>
+      <div class="row">
+        <button type="submit" class="primary" disabled={!valid || creating}>
+          Создать холст
+        </button>
+        {props.extra}
+      </div>
     </form>
   );
 }
 
-function EmptyState(props: { onOpen: () => void; onError: (err: unknown) => void }) {
+function StartScreen(props: { recent: RecentDto[]; onOpen: () => void; onOpenRecent: (id: string) => void; onError: (err: unknown) => void }) {
   return (
-    <div class="empty">
-      <h1>Откройте картинку или начните с пустого холста</h1>
-      <p>PNG, JPEG, WebP или TIFF любого размера. Всё, что вне выделенных областей, останется нетронутым.</p>
-      <button class="primary" onClick={props.onOpen}>
-        Открыть картинку…
-      </button>
-      <NewCanvasForm onError={props.onError} />
+    <div class="start">
+      <div class="start-sheet">
+        <section class="start-open">
+          <header class="start-head">
+            <div>
+              <h1>Откройте картинку</h1>
+              <p class="hint">PNG, JPEG, WebP или TIFF любого размера. Всё вне выделенных областей останется нетронутым.</p>
+            </div>
+            <button class="primary" onClick={props.onOpen}>
+              Открыть…
+            </button>
+          </header>
+          <h2>Недавние</h2>
+          {props.recent.length ? (
+            <ul class="recent">
+              {props.recent.map((r) => (
+                <li key={r.id}>
+                  <button class="recent-item" title={r.path} onClick={() => props.onOpenRecent(r.id)}>
+                    <span class="recent-thumb">
+                      <img src={`/api/recent/${r.id}/thumb.jpg?v=${encodeURIComponent(r.openedAt)}`} alt="" loading="lazy" />
+                    </span>
+                    <span class="recent-name">{r.name}</span>
+                    <span class="recent-meta">
+                      {r.width}×{r.height} · {folder(r.path)}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p class="hint">Здесь появятся файлы, которые вы открывали и сохраняли.</p>
+          )}
+        </section>
+        <section class="start-new">
+          <h1>Или новый холст</h1>
+          <NewCanvasForm onError={props.onError} />
+        </section>
+      </div>
     </div>
   );
 }

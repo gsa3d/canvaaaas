@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { applyLayer, type RawImage } from './edit-region.ts';
 import { intersect, type Rect } from './frame.ts';
+import { encodeImage } from './image-file.ts';
 
 export const TILE_SIZE = 512;
 const TILE_CACHE_LIMIT = 600;
@@ -53,7 +54,8 @@ function downsample(src: Level, dst: Level, rect: Rect): void {
 
 export class CanvasDocument {
   readonly id = randomUUID();
-  readonly name: string;
+  /** Имя файла; меняется после «Сохранить как» */
+  name: string;
   readonly width: number;
   readonly height: number;
   /** Исходник, RGB 8 бит; никогда не меняется */
@@ -109,6 +111,20 @@ export class CanvasDocument {
 
   raw(): RawImage {
     return { data: this.composite, width: this.width, height: this.height, channels: 3 };
+  }
+
+  /** Копия холста: её можно долго кодировать, пока на холст ложатся новые правки */
+  snapshot(): RawImage {
+    return { ...this.raw(), data: Buffer.from(this.composite) };
+  }
+
+  /** Миниатюра для списка недавних файлов, JPEG не больше max по большей стороне */
+  thumbnail(max = 360): Promise<Buffer> {
+    const level = this.levels.findLast((l) => Math.max(l.width, l.height) >= max) ?? this.levels[0]!;
+    return sharp(level.data, { raw: { width: level.width, height: level.height, channels: 3 } })
+      .resize(max, max, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 80 })
+      .toBuffer();
   }
 
   get levelCount(): number {
@@ -194,9 +210,7 @@ export class CanvasDocument {
 
   /** Плоский PNG в полном разрешении */
   exportPng(): Promise<Buffer> {
-    return sharp(this.composite, { raw: { width: this.width, height: this.height, channels: 3 }, limitInputPixels: false })
-      .png()
-      .toBuffer();
+    return encodeImage(this.snapshot(), 'png');
   }
 
   private bounds(): Rect {

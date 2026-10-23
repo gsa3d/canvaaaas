@@ -27,6 +27,21 @@ export interface DocDto {
   levels: number;
   tileSize: number;
   style: string;
+  /** Файл на диске; null — новый холст или картинка, загруженная из браузера */
+  path: string | null;
+  /** Есть несохранённые изменения */
+  dirty: boolean;
+  /** Почему «Сохранить» не перезапишет файл, а предложит новый */
+  saveBlocker?: string;
+}
+
+export interface RecentDto {
+  id: string;
+  name: string;
+  path: string;
+  width: number;
+  height: number;
+  openedAt: string;
 }
 
 export interface VariantDto {
@@ -80,6 +95,11 @@ export interface StateDto {
   canUndo: boolean;
   canRedo: boolean;
   generations: { session: number; today: number };
+  recent: RecentDto[];
+  /** Что сервер сейчас делает с файлом: «Открываю…», «Сохраняю…» */
+  activity: string | null;
+  /** Есть окна выбора файла (в приложении); без них картинка загружается из браузера */
+  nativeFiles: boolean;
 }
 
 export interface CreateJobRequest {
@@ -130,8 +150,10 @@ export function shapesBBox(shapes: MaskShape[]): RectDto | null {
 export type AppCommand =
   | 'settings'
   | 'open'
+  | `open-recent:${string}`
   | 'new'
-  | 'export'
+  | 'save'
+  | 'save-as'
   | 'undo'
   | 'redo'
   | 'zoom-fit'
@@ -141,3 +163,15 @@ export type AppCommand =
   | 'zoom-out';
 
 export const COMMAND_EVENT = 'canvaaaas-command';
+
+/** Пресеты нового холста; dpi записывается в файл, чтобы печать шла в нужном размере */
+export const CANVAS_PRESETS: { name: string; width: number; height: number; dpi?: number }[] = [
+  { name: 'Full HD', width: 1920, height: 1080 },
+  { name: '4K', width: 3840, height: 2160 },
+  { name: '8K', width: 7680, height: 4320 },
+  { name: 'Квадрат', width: 4096, height: 4096 },
+  { name: 'Большой 4:3', width: 8000, height: 6000 },
+  { name: 'A4', width: 2480, height: 3508, dpi: 300 },
+  { name: 'A3', width: 3508, height: 4961, dpi: 300 },
+  { name: 'A2', width: 4961, height: 7016, dpi: 300 },
+];

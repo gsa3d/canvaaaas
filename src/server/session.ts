@@ -2,8 +2,13 @@
 // Ответ модели каждого варианта хранится в размере куска, поэтому смена маски — только перевклейка,
 // без новой генерации.
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { basename, dirname, extname, join } from 'node:path';
 import sharp from 'sharp';
 import { CanvasDocument, TILE_SIZE } from '../core/document.ts';
+import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, type ImageFormat } from '../core/image-file.ts';
+import type { RecentFiles } from '../core/recent.ts';
 import { buildLayer, fitGenerated, insideOf, measure, prepareEdit, type PreparedEdit, type RawImage } from '../core/edit-region.ts';
 import { intersect } from '../core/frame.ts';
 import { expandMaskByDiff } from '../core/expand.ts';
@@ -73,6 +78,25 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Окна выбора файла и вопросы пользователю. Их даёт Electron; у сервера для разработки их нет */
+export interface Host {
+  /** Путь к картинке или null, если пользователь передумал */
+  chooseOpen(): Promise<string | null>;
+  /** message — пояснение над окном сохранения (на macOS) */
+  chooseSave(defaultPath: string, message?: string): Promise<string | null>;
+  /** Номер нажатой кнопки; последняя кнопка — отмена */
+  ask(question: { message: string; detail?: string; buttons: string[] }): Promise<number>;
+}
+
+export interface SessionOptions {
+  host?: Host;
+  recent?: RecentFiles;
+}
+
+function stem(name: string): string {
+  return name.slice(0, name.length - extname(name).length) || name;
+}
+
 export class Session {
   readonly providerKind: 'laozhang' | 'mock';
   private readonly keys: KeyStore;
@@ -85,10 +109,24 @@ export class Session {
   private readonly listeners = new Set<() => void>();
   private readonly references = new Map<string, Reference>();
   private emitTimer: NodeJS.Timeout | undefined;
+  host: Host | null;
+  private readonly recent: RecentFiles | null;
+  /** Файл, открытый с диска; null — новый холст или картинка, загруженная из браузера */
+  private file: ImageFile | null = null;
+  /** Разрешение для печати: из исходника или из пресета нового холста */
+  private density: number | undefined;
+  /** Версия холста на момент последнего сохранения */
+  private savedRev = 0;
+  /** Что сервер сейчас делает с файлом: «Открываю…», «Сохраняю…» */
+  private activity: string | null = null;
+  /** Открытый вопрос «Сохранить изменения?»: второй ⌘Q не должен открыть второй */
+  private asking: Promise<boolean> | null = null;
 
-  constructor(providerKind: 'laozhang' | 'mock', keys: KeyStore) {
+  constructor(providerKind: 'laozhang' | 'mock', keys: KeyStore, opts: SessionOptions = {}) {
     this.providerKind = providerKind;
     this.keys = keys;
+    this.host = opts.host ?? null;
+    this.recent = opts.recent ?? null;
   }
 
   async init(): Promise<void> {
@@ -125,7 +163,7 @@ export class Session {
 
   private async apiKey(): Promise<string> {
     const key = await this.keys.get();
-    if (!key) throw new Error('Нет ключа laozhang.ai: добавьте его кнопкой «Ключ» вверху окна');
+    if (!key) throw new Error('Нет ключа laozhang.ai: добавьте его в настройках (⌘,)');
     return key;
   }
 
@@ -155,6 +193,9 @@ export class Session {
         levels: doc.levelCount,
         tileSize: TILE_SIZE,
         style: doc.style,
+        path: this.file?.path ?? null,
+        dirty: this.dirty,
+        saveBlocker: this.file?.blocker,
       },
       jobs: this.jobs.map((j) => ({
         id: j.id,
@@ -191,23 +232,213 @@ export class Session {
       canUndo: doc?.canUndo ?? false,
       canRedo: doc?.canRedo ?? false,
       generations: { session: this.generations, today: this.todayAtStart + this.generations },
+      recent: this.recentFiles().map((e) => ({
+        id: e.id,
+        name: e.name,
+        path: e.path,
+        width: e.width,
+        height: e.height,
+        openedAt: e.openedAt,
+      })),
+      activity: this.activity,
+      nativeFiles: this.host !== null,
     };
+  }
+
+  /** Недавние файлы, которые ещё лежат на месте */
+  recentFiles() {
+    return (this.recent?.list() ?? []).filter((e) => existsSync(e.path));
   }
 
   // ——— Документ ———
 
-  async openDocument(input: Buffer | string, name: string): Promise<void> {
-    const doc = await CanvasDocument.open(input, name);
-    this.dropAllJobs();
-    this.doc = doc;
+  /** Путь к открытому файлу; null — у документа файла нет */
+  get filePath(): string | null {
+    return this.file?.path ?? null;
+  }
+
+  /** Есть несохранённые изменения холста */
+  get dirty(): boolean {
+    return !!this.doc && this.doc.rev !== this.savedRev;
+  }
+
+  /** При закрытии документа есть что потерять: несохранённые правки или задачи в очереди */
+  needsConfirm(): boolean {
+    return this.dirty || this.jobs.length > 0;
+  }
+
+  /** «Открыть…»: окно выбора файла. false — пользователь передумал */
+  async openWithDialog(): Promise<boolean> {
+    const path = await this.requireHost().chooseOpen();
+    if (!path) return false;
+    return this.openPath(path);
+  }
+
+  async openPath(path: string): Promise<boolean> {
+    if (!(await this.confirmClose())) return false;
+    this.setActivity(`Открываю ${basename(path)}…`);
+    try {
+      const [doc, file] = await Promise.all([CanvasDocument.open(path, basename(path)), inspectImage(path)]);
+      this.replaceDoc(doc, file, file.density);
+      await this.remember(doc, path);
+    } finally {
+      this.setActivity(null);
+    }
+    return true;
+  }
+
+  async openRecent(id: string): Promise<boolean> {
+    const entry = this.recent?.get(id);
+    if (!entry) throw new Error('Этого файла уже нет в списке недавних');
+    if (!existsSync(entry.path)) {
+      await this.recent?.remove(id);
+      this.changed();
+      throw new Error(`Файл не найден: ${entry.path}`);
+    }
+    return this.openPath(entry.path);
+  }
+
+  async clearRecent(): Promise<void> {
+    await this.recent?.clear();
     this.changed();
   }
 
-  newDocument(width: number, height: number, color: [number, number, number]): void {
-    const doc = CanvasDocument.blank(width, height, color, `Холст ${width}×${height}`);
+  recentThumb(id: string): string {
+    if (!this.recent?.get(id)) throw new Error('Нет такого файла в списке недавних');
+    return this.recent.thumbPath(id);
+  }
+
+  /** Картинка, загруженная из браузера (сервер для разработки): пути к файлу нет, «Сохранить» её не перезапишет */
+  async openDocument(input: Buffer, name: string): Promise<boolean> {
+    if (!(await this.confirmClose())) return false;
+    this.replaceDoc(await CanvasDocument.open(input, name), null, undefined);
+    return true;
+  }
+
+  async newDocument(width: number, height: number, color: [number, number, number], density?: number): Promise<boolean> {
+    if (!(await this.confirmClose())) return false;
+    this.replaceDoc(CanvasDocument.blank(width, height, color, `Холст ${width}×${height}`), null, density);
+    return true;
+  }
+
+  private replaceDoc(doc: CanvasDocument, file: ImageFile | null, density: number | undefined): void {
     this.dropAllJobs();
     this.doc = doc;
+    this.file = file;
+    this.density = density;
+    this.savedRev = doc.rev;
     this.changed();
+  }
+
+  /**
+   * Можно ли закрыть документ. Если есть несохранённые правки или задачи в очереди, спрашивает;
+   * false — пользователь передумал. Без окон (сервер для разработки) не спрашивает.
+   */
+  confirmClose(): Promise<boolean> {
+    if (!this.doc || !this.needsConfirm() || !this.host) return Promise.resolve(true);
+    this.asking ??= this.askClose(this.host).finally(() => {
+      this.asking = null;
+    });
+    return this.asking;
+  }
+
+  private async askClose(host: Host): Promise<boolean> {
+    const doc = this.requireDoc();
+    const jobs = this.jobs.length;
+    const lost = jobs ? `${jobs} ${jobs === 1 ? 'правка' : jobs < 5 ? 'правки' : 'правок'} в очереди` : '';
+    if (this.dirty) {
+      const answer = await host.ask({
+        message: `Сохранить изменения в «${doc.name}»?`,
+        detail: lost ? `Иначе принятые правки пропадут. ${lost[0]!.toUpperCase()}${lost.slice(1)} пропадут в любом случае.` : 'Иначе принятые правки пропадут.',
+        buttons: ['Сохранить', 'Не сохранять', 'Отмена'],
+      });
+      if (answer === 0) return (await this.save()) !== null;
+      return answer === 1;
+    }
+    const answer = await host.ask({
+      message: `Закрыть «${doc.name}»? У вас ${lost}.`,
+      detail: 'Непринятые варианты пропадут, идущие генерации остановятся.',
+      buttons: ['Закрыть', 'Отмена'],
+    });
+    return answer === 0;
+  }
+
+  /**
+   * «Сохранить»: холст записывается в открытый файл. Новый холст и файл, который без потерь
+   * не перезаписать, идут через «Сохранить как». Возвращает путь или null, если пользователь передумал.
+   */
+  async save(): Promise<string | null> {
+    const doc = this.requireDoc();
+    const file = this.file;
+    if (!file || file.blocker) return this.saveAs(file?.blocker);
+    const now = await stat(file.path).catch(() => null);
+    if (now && (now.size !== file.size || now.mtimeMs !== file.mtimeMs)) {
+      if (!this.host) throw new Error(`Файл «${doc.name}» изменила другая программа: сохраните под другим именем`);
+      const answer = await this.host.ask({
+        message: `Файл «${doc.name}» изменила другая программа`,
+        detail: 'Если перезаписать его, эти изменения пропадут.',
+        buttons: ['Перезаписать', 'Сохранить как…', 'Отмена'],
+      });
+      if (answer === 1) return this.saveAs();
+      if (answer !== 0) return null;
+    }
+    await this.write(file.path, file.format, file.chromaSubsampling);
+    return file.path;
+  }
+
+  /** «Сохранить как…»: новый файл, формат — по расширению (PNG, JPEG, WebP, TIFF) */
+  async saveAs(reason?: string): Promise<string | null> {
+    const doc = this.requireDoc();
+    const host = this.requireHost();
+    const name = this.file?.blocker ? `${stem(doc.name)}-canvaaaas.png` : this.file ? doc.name : `${stem(doc.name)}.png`;
+    const dir = this.file ? dirname(this.file.path) : this.recentFiles()[0] && dirname(this.recentFiles()[0]!.path);
+    let path = await host.chooseSave(dir ? join(dir, name) : name, reason);
+    if (!path) return null;
+    let format = formatOf(path);
+    if (!format) {
+      path += '.png';
+      format = 'png';
+    }
+    await this.write(path, format, this.file?.path === path ? this.file.chromaSubsampling : undefined);
+    doc.name = basename(path);
+    this.changed();
+    return path;
+  }
+
+  private async write(path: string, format: ImageFormat, chromaSubsampling?: string): Promise<void> {
+    const doc = this.requireDoc();
+    this.setActivity(`Сохраняю ${basename(path)}…`);
+    try {
+      const rev = doc.rev;
+      const data = await encodeImage(doc.snapshot(), format, { density: this.density, chromaSubsampling });
+      await writeFileAtomic(path, data);
+      const info = await stat(path);
+      this.file = { path, format, density: this.density, chromaSubsampling, size: info.size, mtimeMs: info.mtimeMs };
+      this.savedRev = rev;
+      await this.remember(doc, path);
+    } finally {
+      this.setActivity(null);
+    }
+  }
+
+  /** В список недавних; сбой списка не мешает открыть или сохранить файл */
+  private async remember(doc: CanvasDocument, path: string): Promise<void> {
+    if (!this.recent) return;
+    try {
+      await this.recent.add({ path, name: basename(path), width: doc.width, height: doc.height }, await doc.thumbnail());
+    } catch {
+      // не удалось записать список — не страшно
+    }
+  }
+
+  private setActivity(text: string | null): void {
+    this.activity = text;
+    this.changed();
+  }
+
+  private requireHost(): Host {
+    if (!this.host) throw new Error('Окна выбора файла есть только в приложении canvaaaas');
+    return this.host;
   }
 
   setStyle(style: string): void {

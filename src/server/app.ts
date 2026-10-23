@@ -99,8 +99,29 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   route('POST', '/api/doc/upload', async (req, res, _p, url) => {
     const body = await readBody(req, 4 * 1024 * 1024 * 1024);
     if (!body.length) throw new HttpError(400, 'Пустой файл');
-    await session.openDocument(body, url.searchParams.get('name') ?? 'Без имени');
+    json(res, { opened: await session.openDocument(body, url.searchParams.get('name') ?? 'Без имени') });
+  });
+
+  // Окна выбора файла и вопросы «Сохранить изменения?» показывает Electron; ответ приходит, когда их закроют
+  route('POST', '/api/doc/open', async (_req, res) => {
+    json(res, { opened: await session.openWithDialog() });
+  });
+  route('POST', '/api/doc/save', async (_req, res) => {
+    json(res, { path: await session.save() });
+  });
+  route('POST', '/api/doc/save-as', async (_req, res) => {
+    json(res, { path: await session.saveAs() });
+  });
+
+  route('POST', '/api/recent/:id/open', async (_req, res, [id]) => {
+    json(res, { opened: await session.openRecent(id!) });
+  });
+  route('POST', '/api/recent/clear', async (_req, res) => {
+    await session.clearRecent();
     json(res, { ok: true });
+  });
+  route('GET', '/api/recent/:id/thumb.jpg', async (_req, res, [id]) => {
+    send(res, 200, await readFile(session.recentThumb(id!)), 'image/jpeg', { 'Cache-Control': 'no-cache' });
   });
 
   route('POST', '/api/refs', async (req, res) => {
@@ -113,11 +134,11 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
 
   route('POST', '/api/doc/new', async (req, res) => {
-    const { width, height, color } = await readJson<{ width: number; height: number; color?: string }>(req);
+    const { width, height, color, dpi } = await readJson<{ width: number; height: number; color?: string; dpi?: number }>(req);
     const hex = /^#?([0-9a-f]{6})$/i.exec(color ?? '#ffffff')?.[1] ?? 'ffffff';
     const rgb: [number, number, number] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16)) as [number, number, number];
-    session.newDocument(Math.round(width), Math.round(height), rgb);
-    json(res, { ok: true });
+    const density = typeof dpi === 'number' && dpi >= 1 && dpi <= 2400 ? dpi : undefined;
+    json(res, { opened: await session.newDocument(Math.round(width), Math.round(height), rgb, density) });
   });
 
   route('POST', '/api/doc/style', async (req, res) => {
