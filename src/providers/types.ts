@@ -1,5 +1,5 @@
-// Общий интерфейс провайдеров генерации: Nano Banana через laozhang сейчас,
-// GPT Image через Codex — запасной вариант на потом.
+// Общий интерфейс провайдеров генерации: Nano Banana через laozhang по ключу
+// и ChatGPT Images по подписке через Codex CLI.
 
 export interface Size {
   width: number;

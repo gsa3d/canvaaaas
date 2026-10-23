@@ -16,7 +16,8 @@ export type MaskShape =
   /** softness — доля радиуса кисти, на которой мазок плавно сходит на нет: 0 — жёсткий край, 1 — затухает от середины */
   | { kind: 'stroke'; points: [number, number][]; size: number; softness?: number; erase?: boolean };
 
-export type ModelChoice = 'flash' | 'pro';
+/** flash и pro — Nano Banana через laozhang.ai по ключу; chatgpt — ChatGPT Images по подписке через Codex CLI */
+export type ModelChoice = 'flash' | 'pro' | 'chatgpt';
 export type SizeChoice = 'auto' | '1K' | '2K' | '4K';
 
 export interface DocDto {
@@ -92,6 +93,8 @@ export interface PatchDto {
   createdAt: string;
   /** Меняется при каждой правке маски слоя: по нему браузер перезапрашивает её картинку */
   maskRev: number;
+  /** Модель, которой сделан слой: ею же идут «Ещё варианты» */
+  model?: ModelChoice;
 }
 
 /** Какие ответы умеет модель — чтобы подсказать про разрешение ещё до генерации */
@@ -107,6 +110,8 @@ export interface StateDto {
   models: Record<ModelChoice, ModelOutputsDto>;
   /** Есть ли ключ laozhang.ai (само значение интерфейс никогда не получает) */
   hasKey: boolean;
+  /** Codex CLI, через который идёт ChatGPT по подписке: путь или null, если не найден */
+  codex: string | null;
   doc: DocDto | null;
   jobs: JobDto[];
   history: PatchDto[];

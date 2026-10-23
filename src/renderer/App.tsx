@@ -113,6 +113,15 @@ const TOOLS: { id: Tool; label: string; key: string }[] = [
   { id: 'hand', label: 'Рука (или зажать пробел)', key: 'H' },
 ];
 
+const MODELS: { id: ModelChoice; label: string; tag: string }[] = [
+  { id: 'flash', label: 'Nano Banana 2', tag: '' },
+  { id: 'pro', label: 'Nano Banana Pro', tag: 'Pro' },
+  { id: 'chatgpt', label: 'ChatGPT Images, подписка', tag: 'ChatGPT' },
+];
+
+/** Nano Banana идёт через laozhang.ai по ключу, ChatGPT — по подписке через Codex, ключ ему не нужен */
+const needsKey = (model: ModelChoice) => model !== 'chatgpt';
+
 const STATUS: Record<JobDto['status'], string> = {
   queued: 'Ждёт очереди',
   preparing: 'Готовлю кусок',
@@ -240,16 +249,18 @@ export function App() {
 
   const hasSelection = selection.some((s) => !s.erase);
   const canGenerate = !!doc && hasSelection && prompt.trim().length > 0 && !maskJob && !maskLayer;
-  const sizeAdvice = doc && state && hasSelection ? adviseSelection(doc, selection, state.models[model], size) : null;
+  // У ChatGPT одно разрешение — его выбирает сама модель
+  const sizeFor = (m: ModelChoice): SizeChoice => (m === 'chatgpt' ? 'auto' : size);
+  const sizeAdvice = doc && state && hasSelection ? adviseSelection(doc, selection, state.models[model], sizeFor(model)) : null;
 
   const generate = async () => {
     if (!canGenerate) return;
-    if (!state?.hasKey) {
+    if (needsKey(model) && !state?.hasKey) {
       setDialog('settings');
       return;
     }
     try {
-      const { id } = await post<{ id: string }>('/api/jobs', { shapes: selection, prompt, variants, model, size, refs });
+      const { id } = await post<{ id: string }>('/api/jobs', { shapes: selection, prompt, variants, model, size: sizeFor(model), refs });
       setSelection([]);
       setFocusJob(id);
     } catch (err) {
@@ -517,7 +528,7 @@ export function App() {
 
   // Ещё варианты принятого слоя: если они уже в очереди — туда же, а не второй задачей на тот же слой
   const layerVariants = async (patch: PatchDto) => {
-    if (!state?.hasKey) {
+    if (needsKey(patch.model ?? model) && !state?.hasKey) {
       setDialog('settings');
       return;
     }
@@ -529,7 +540,7 @@ export function App() {
         else notify('Варианты этого слоя уже генерируются', false);
         return;
       }
-      const { id } = await post<{ id: string }>(`/api/history/${patch.id}/variants`, { variants, model, size });
+      const { id } = await post<{ id: string }>(`/api/history/${patch.id}/variants`, { variants, model, size: sizeFor(model) });
       setFocusJob(id);
       viewRef.current?.showRect(patch.rect);
     } catch (err) {
@@ -688,10 +699,13 @@ export function App() {
       </main>
 
       <aside class="side">
-        {state && !state.hasKey && (
+        {state && !state.hasKey && needsKey(model) && (
           <section class="panel notice">
             <h2>Нужен ключ laozhang.ai</h2>
-            <p class="hint">Без него генерация не работает. Ключ вводится один раз в настройках (⌘,) и хранится на этом компьютере.</p>
+            <p class="hint">
+              Без него Nano Banana не работает. Ключ вводится один раз в настройках (⌘,) и хранится на этом компьютере. ChatGPT Images
+              ключ не нужен: он идёт по подписке ChatGPT — выберите его в «Модели».
+            </p>
             <button class="primary" onClick={() => setDialog('settings')}>
               Открыть настройки
             </button>
@@ -754,18 +768,25 @@ export function App() {
                 <label>
                   Модель
                   <select value={model} onChange={(e) => setModel(e.currentTarget.value as ModelChoice)}>
-                    <option value="flash">Nano Banana 2</option>
-                    <option value="pro">Nano Banana Pro</option>
+                    {MODELS.map((m) => (
+                      <option value={m.id}>{m.label}</option>
+                    ))}
                   </select>
                 </label>
                 <label>
                   Разрешение
-                  <select value={size} onChange={(e) => setSize(e.currentTarget.value as SizeChoice)}>
-                    <option value="auto">Авто, до 2K</option>
-                    <option value="1K">1K</option>
-                    <option value="2K">2K</option>
-                    <option value="4K">4K, 4–5 мин</option>
-                  </select>
+                  {model === 'chatgpt' ? (
+                    <select disabled title="Разрешение ответа ChatGPT выбирает сам: около 1,6 мегапикселя в пропорциях куска">
+                      <option>Само, ~1,6 Мп</option>
+                    </select>
+                  ) : (
+                    <select value={size} onChange={(e) => setSize(e.currentTarget.value as SizeChoice)}>
+                      <option value="auto">Авто, до 2K</option>
+                      <option value="1K">1K</option>
+                      <option value="2K">2K</option>
+                      <option value="4K">4K, 4–5 мин</option>
+                    </select>
+                  )}
                 </label>
                 <label>
                   Варианты
@@ -778,7 +799,7 @@ export function App() {
               </div>
               {typeof sizeAdvice === 'string' && <p class="job-warning">{sizeAdvice}</p>}
               {sizeAdvice && typeof sizeAdvice === 'object' && (
-                <SizeHint advice={sizeAdvice} auto={size === 'auto'} sizes={state!.models[model].imageSizes} onSize={setSize} />
+                <SizeHint advice={sizeAdvice} auto={sizeFor(model) === 'auto'} sizes={state!.models[model].imageSizes} onSize={setSize} />
               )}
               <button class="primary" disabled={!canGenerate} onClick={generate} title="⌘↵">
                 Сгенерировать {variants} {plural(variants, 'вариант', 'варианта', 'вариантов')}
@@ -860,6 +881,7 @@ export function App() {
       {dialog === 'settings' && state && (
         <SettingsDialog
           hasKey={state.hasKey}
+          codex={state.codex}
           onClose={() => setDialog(null)}
           onSaved={(text) => {
             setDialog(null);
@@ -947,7 +969,7 @@ function JobCard(props: {
         {job.status === 'running' && `, готово ${done.length} из ${job.variants.length}`}
         {busy && `, ${clock(Date.now() - Date.parse(job.createdAt))}`}
         {job.status === 'done' && running > 0 && `, ещё ${running} в работе`}
-        {job.modelSize && <span class="dim">, {[job.imageSize, job.model === 'pro' ? 'Pro' : ''].filter(Boolean).join(' ')}</span>}
+        {job.modelSize && <span class="dim">, {[job.imageSize, MODELS.find((m) => m.id === job.model)?.tag].filter(Boolean).join(' ')}</span>}
         {job.refs > 0 && <span class="dim">, референсов: {job.refs}</span>}
       </p>
       {replacing !== undefined && (
@@ -1125,7 +1147,13 @@ function SizeHint(props: { advice: SizeAdvice; auto: boolean; sizes: string[]; o
   );
 }
 
-function SettingsDialog(props: { hasKey: boolean; onClose: () => void; onSaved: (text: string) => void; onError: (err: unknown) => void }) {
+function SettingsDialog(props: {
+  hasKey: boolean;
+  codex: string | null;
+  onClose: () => void;
+  onSaved: (text: string) => void;
+  onError: (err: unknown) => void;
+}) {
   const [value, setValue] = useState('');
   const [saving, setSaving] = useState(false);
   const mac = navigator.userAgent.includes('Mac');
@@ -1189,6 +1217,20 @@ function SettingsDialog(props: { hasKey: boolean; onClose: () => void; onSaved: 
             )}
           </div>
         </form>
+        <h3>ChatGPT Images по подписке</h3>
+        {props.codex ? (
+          <>
+            <p>
+              Ключ не нужен: картинки рисует Codex от имени вашего аккаунта ChatGPT и тратит лимит подписки. Вход — тот же, что у Codex в
+              приложении ChatGPT.
+            </p>
+            <p class="hint">
+              Codex: <code>{props.codex}</code>. Если генерация пишет, что вход не выполнен, войдите в Codex в приложении ChatGPT.
+            </p>
+          </>
+        ) : (
+          <p>Не найден Codex CLI. Установите приложение ChatGPT (в нём есть Codex) или Codex CLI и войдите в свой аккаунт ChatGPT.</p>
+        )}
       </div>
     </div>
   );

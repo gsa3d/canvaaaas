@@ -17,6 +17,7 @@ import { readLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha, maskBBox } from '../core/mask.ts';
 import { applyShapes } from '../core/mask-shapes.ts';
 import type { KeyStore } from '../core/secrets.ts';
+import { chatgptCodex, findCodex } from '../providers/chatgpt-codex.ts';
 import { laozhangGemini } from '../providers/laozhang-gemini.ts';
 import { mockProvider } from '../providers/mock.ts';
 import type { ImageProvider, InputImage } from '../providers/types.ts';
@@ -133,6 +134,8 @@ export class Session {
   readonly providerKind: 'laozhang' | 'mock';
   private readonly keys: KeyStore;
   private hasKey = false;
+  /** Codex CLI для ChatGPT по подписке; ищется заново при каждой генерации, здесь — для настроек */
+  private codex: string | null = null;
   doc: CanvasDocument | null = null;
   private jobs: Job[] = [];
   private readonly providers = new Map<ModelChoice, ImageProvider>();
@@ -177,6 +180,7 @@ export class Session {
 
   async init(): Promise<void> {
     this.hasKey = (await this.keys.get()) !== null;
+    this.codex = findCodex();
     if (this.providerKind !== 'laozhang') return;
     const today = new Date().toISOString().slice(0, 10);
     this.todayAtStart = (await readLedger()).filter((e) => e.at.startsWith(today)).length;
@@ -210,7 +214,9 @@ export class Session {
       p =
         this.providerKind === 'mock'
           ? mockProvider({ mode: 'blob', delayMs: 1500 })
-          : withLedger(laozhangGemini({ model, apiKey: () => this.apiKey() }), 'ui');
+          : model === 'chatgpt'
+            ? withLedger(chatgptCodex(), 'ui')
+            : withLedger(laozhangGemini({ model, apiKey: () => this.apiKey() }), 'ui');
       this.providers.set(model, p);
     }
     return p;
@@ -241,7 +247,7 @@ export class Session {
       const outputs = Object.fromEntries(p.aspectRatios.map((ar) => [ar, Object.fromEntries(p.imageSizes.map((size) => [size, p.outputSize(ar, size)]))]));
       return { imageSizes: [...p.imageSizes], outputs };
     };
-    this.outputs ??= { flash: of('flash'), pro: of('pro') };
+    this.outputs ??= { flash: of('flash'), pro: of('pro'), chatgpt: of('chatgpt') };
     return this.outputs;
   }
 
@@ -251,6 +257,7 @@ export class Session {
       provider: this.providerKind,
       models: this.modelOutputs(),
       hasKey: this.hasKey || this.providerKind === 'mock',
+      codex: this.codex,
       doc: doc && {
         id: doc.id,
         name: doc.name,
@@ -299,6 +306,7 @@ export class Session {
         active: p.active,
         createdAt: p.createdAt,
         maskRev: p.maskVersion,
+        model: p.model,
       })),
       canUndo: doc?.canUndo ?? false,
       canRedo: doc?.canRedo ?? false,
@@ -739,6 +747,8 @@ export class Session {
     const doc = this.requireDoc();
     const job: Job = {
       ...task,
+      // У ChatGPT одно разрешение: его выбирает сама модель
+      size: task.model === 'chatgpt' ? 'auto' : task.size,
       id: randomUUID(),
       docId: doc.id,
       style: doc.style,

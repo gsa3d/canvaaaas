@@ -48,7 +48,7 @@ interface Manifest {
   refs?: { mimeType: string; data: Part }[];
 }
 
-const MODELS: readonly string[] = ['flash', 'pro'] satisfies ModelChoice[];
+const MODELS: readonly string[] = ['flash', 'pro', 'chatgpt'] satisfies ModelChoice[];
 const SIZES: readonly string[] = ['auto', '1K', '2K', '4K'] satisfies SizeChoice[];
 
 export function isProjectPath(path: string): boolean {

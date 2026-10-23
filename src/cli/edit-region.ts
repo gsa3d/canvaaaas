@@ -6,11 +6,12 @@ import { parseArgs } from 'node:util';
 import { prepareEdit, runVariants, type Guide } from '../core/edit-region.ts';
 import { readLedger, withLedger } from '../core/ledger.ts';
 import { getLaozhangKey } from '../core/secrets.ts';
+import { chatgptCodex } from '../providers/chatgpt-codex.ts';
 import { laozhangGemini, type GeminiModel } from '../providers/laozhang-gemini.ts';
 import { mockProvider } from '../providers/mock.ts';
 import type { ImageProvider } from '../providers/types.ts';
 
-const HELP = `Правка области большой картинки через Nano Banana.
+const HELP = `Правка области большой картинки через Nano Banana или ChatGPT Images.
 
   --image <файл>        исходная картинка (обязательно)
   --mask <файл>         маска того же размера: белое — перерисовать (обязательно)
@@ -19,13 +20,15 @@ const HELP = `Правка области большой картинки чер
   --style <текст>       общий стиль документа
   --variants <N>        сколько вариантов (по умолчанию 2)
   --model flash|pro     Nano Banana 2 или Nano Banana Pro (по умолчанию flash)
-  --size auto|1K|2K|4K  разрешение ответа модели (по умолчанию auto)
+  --size auto|1K|2K|4K  разрешение ответа Nano Banana (по умолчанию auto); ChatGPT выбирает его сам
   --context <доля>      запас контекста вокруг выделения (по умолчанию 0.3)
   --context-min <px>    минимальный запас контекста (по умолчанию 128)
   --feather <px>        растушёвка внутрь маски (по умолчанию 24)
   --guide pair|overlay|blank  как показать модели область (по умолчанию pair)
   --work <папка>        куда сложить промежуточные файлы (по умолчанию <out>.work)
-  --provider laozhang|mock    mock — без сети, для проверки
+  --provider laozhang|chatgpt|mock
+                        laozhang — Nano Banana по ключу (по умолчанию); chatgpt — ChatGPT Images
+                        по подписке через Codex CLI, вошедший в ChatGPT; mock — без сети, для проверки
   --dry-run             только посчитать кусок и сохранить то, что уйдёт в модель
 `;
 
@@ -69,7 +72,8 @@ async function main(): Promise<void> {
   if (a.provider === 'mock') provider = mockProvider();
   else if (a.provider === 'laozhang')
     provider = withLedger(laozhangGemini({ model: a.model as GeminiModel, apiKey: getLaozhangKey }), 'edit-region');
-  else fail('--provider: laozhang или mock');
+  else if (a.provider === 'chatgpt') provider = withLedger(chatgptCodex(), 'edit-region');
+  else fail('--provider: laozhang, chatgpt или mock');
 
   const outExt = extname(a.out) || '.png';
   const outBase = join(dirname(a.out), basename(a.out, outExt));
@@ -86,7 +90,7 @@ async function main(): Promise<void> {
     context: Number(a.context),
     contextMin: Number(a['context-min']),
     feather: Number(a.feather),
-    imageSize: a.size,
+    imageSize: a.provider === 'chatgpt' ? 'auto' : a.size,
     guide: a.guide as Guide,
   });
   const { rect } = prep.frame;
@@ -148,7 +152,7 @@ async function main(): Promise<void> {
     ),
   );
 
-  if (a.provider === 'laozhang') {
+  if (a.provider !== 'mock') {
     const today = new Date().toISOString().slice(0, 10);
     const n = (await readLedger()).filter((e) => e.at.startsWith(today)).length;
     console.log(`Генераций сегодня: ${n}`);
