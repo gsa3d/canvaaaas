@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
-import { API_HEADER, type CreateJobRequest, type MaskShape } from '../shared/api.ts';
+import { API_HEADER, type CreateJobRequest, type MaskShape, type PatchVariantsRequest } from '../shared/api.ts';
 import type { Session } from './session.ts';
 
 export interface ServerOptions {
@@ -198,6 +198,14 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   route('POST', '/api/history/:id/toggle', async (_req, res, [id]) => {
     await session.togglePatch(id!);
     json(res, { ok: true });
+  });
+  route('POST', '/api/history/:id/delete', async (_req, res, [id]) => {
+    await session.removePatch(id!);
+    json(res, { ok: true });
+  });
+  route('POST', '/api/history/:id/variants', async (req, res, [id]) => {
+    const body = await readJson<PatchVariantsRequest>(req);
+    json(res, { id: session.patchVariants(id!, body) });
   });
   route('POST', '/api/history/:id/mask', async (req, res, [id]) => {
     const { shapes } = await readJson<{ shapes: MaskShape[] }>(req);

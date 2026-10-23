@@ -791,7 +791,7 @@ button.swap {
 
 .layers li {
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
+  grid-template-columns: auto 1fr auto auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 4px 2px;
@@ -842,6 +842,36 @@ button.layer-icon.active:hover:not(:disabled) {
 
 .layers li.off button.layer-icon {
   color: var(--muted);
+}
+
+/* Удаление приглушено и краснеет только под курсором */
+.layers li button.layer-icon.delete {
+  color: var(--muted);
+}
+
+.layers li button.layer-icon.delete:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+/* ——— Подсказка о разрешении ——— */
+
+.size-hint {
+  font-size: 12px;
+}
+
+.size-hint.warn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: #fff3d6;
+  color: var(--warn);
+}
+
+.size-hint.warn p {
+  margin: 0;
 }
 
 /* ——— Масштаб ——— */

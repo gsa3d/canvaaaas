@@ -56,6 +56,8 @@ export interface VariantDto {
   outsideChangedPct?: number;
   /** Доля пикселей внутри маски, которые модель заметно изменила: около нуля — правка не случилась */
   insideChangedPct?: number;
+  /** Не новая генерация, а слой, который сейчас лежит на холсте */
+  current?: boolean;
 }
 
 export interface JobDto {
@@ -78,6 +80,8 @@ export interface JobDto {
   /** Растёт при любой перевклейке: по нему браузер перезапрашивает слой и маску */
   rev: number;
   canUndoMask: boolean;
+  /** Ещё варианты принятого слоя: «Принять» заменит этот слой */
+  replaces?: string;
 }
 
 export interface PatchDto {
@@ -90,8 +94,17 @@ export interface PatchDto {
   maskRev: number;
 }
 
+/** Какие ответы умеет модель — чтобы подсказать про разрешение ещё до генерации */
+export interface ModelOutputsDto {
+  /** Разрешения от меньшего к большему */
+  imageSizes: string[];
+  /** Размер ответа: outputs[пропорции][разрешение] */
+  outputs: Record<string, Record<string, { width: number; height: number }>>;
+}
+
 export interface StateDto {
   provider: 'laozhang' | 'mock';
+  models: Record<ModelChoice, ModelOutputsDto>;
   /** Есть ли ключ laozhang.ai (само значение интерфейс никогда не получает) */
   hasKey: boolean;
   doc: DocDto | null;
@@ -115,6 +128,13 @@ export interface CreateJobRequest {
   size: SizeChoice;
   /** Картинки-референсы, загруженные через /api/refs (не больше MAX_REFERENCES) */
   refs?: string[];
+}
+
+/** «Ещё варианты» принятого слоя: задача, маска и референсы — слоя, модель и разрешение — слоя, если он их помнит */
+export interface PatchVariantsRequest {
+  variants: number;
+  model: ModelChoice;
+  size: SizeChoice;
 }
 
 export const MAX_REFERENCES = 3;

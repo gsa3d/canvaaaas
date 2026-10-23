@@ -1,9 +1,12 @@
 // Свой формат canvaaaas, .caaa: исходник и слои правок вместе с масками. После повторного открытия
 // слои можно скрывать и править их маски, как до сохранения; история отмены начинается заново.
 // Внутри — подпись, длина и JSON-описание, затем PNG подряд: исходник, у каждого слоя — RGBA
-// (ответ модели и растушёванная маска в альфе) и маска до растушёвки.
+// (ответ модели и растушёванная маска в альфе) и маска до растушёвки; в конце — референсы слоёв,
+// чтобы слой можно было перерисовать ещё раз и после повторного открытия.
 import { extname } from 'node:path';
 import sharp from 'sharp';
+import type { InputImage } from '../providers/types.ts';
+import type { ModelChoice, SizeChoice } from '../shared/api.ts';
 import { CanvasDocument, type Patch } from './document.ts';
 import type { Rect } from './frame.ts';
 
@@ -36,8 +39,17 @@ interface Manifest {
     createdAt: string;
     pixels: Part;
     mask: Part;
+    model?: ModelChoice;
+    size?: SizeChoice;
+    /** Номера в refs */
+    refs?: number[];
   }[];
+  /** Референсы: картинка, которая ушла с несколькими правками, хранится один раз */
+  refs?: { mimeType: string; data: Part }[];
 }
+
+const MODELS: readonly string[] = ['flash', 'pro'] satisfies ModelChoice[];
+const SIZES: readonly string[] = ['auto', '1K', '2K', '4K'] satisfies SizeChoice[];
 
 export function isProjectPath(path: string): boolean {
   return extname(path).toLowerCase() === `.${PROJECT_EXTENSION}`;
@@ -67,6 +79,11 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
     base,
     ...patches.flatMap((p) => [png(p.layer, p.rect.width, p.rect.height, 4), png(p.mask, p.rect.width, p.rect.height, 1)]),
   ]);
+  const refs: InputImage[] = [];
+  const refIndex = (ref: InputImage): number => {
+    const i = refs.findIndex((r) => r.data === ref.data);
+    return i >= 0 ? i : refs.push(ref) - 1;
+  };
   let offset = 0;
   const part = (data: Buffer): Part => {
     const p = { offset, length: data.length };
@@ -92,12 +109,16 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
       createdAt: p.createdAt,
       pixels: part(images[1 + i * 2]!),
       mask: part(images[2 + i * 2]!),
+      model: p.model,
+      size: p.size,
+      refs: p.refs?.map(refIndex),
     })),
   };
+  manifest.refs = refs.map((r) => ({ mimeType: r.mimeType, data: part(r.data) }));
   const json = Buffer.from(JSON.stringify(manifest), 'utf8');
   const length = Buffer.alloc(4);
   length.writeUInt32BE(json.length);
-  return Buffer.concat([MAGIC, length, json, ...images]);
+  return Buffer.concat([MAGIC, length, json, ...images, ...refs.map((r) => r.data)]);
 }
 
 /** Открыть проект: документ со слоями, стилем и разрешением для печати */
@@ -131,9 +152,16 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
     decode(manifest.base, width, height, 3),
     ...manifest.layers.flatMap((l) => [decode(l.pixels, l.rect.width, l.rect.height, 4), decode(l.mask, l.rect.width, l.rect.height, 1)]),
   ]);
+  // Копия, а не кусок файла: иначе в памяти остался бы весь файл
+  const refs = (manifest.refs ?? []).map((r): InputImage => ({ mimeType: r.mimeType, data: Buffer.from(slice(r.data)) }));
   const patches = manifest.layers.map((l, i): Patch => {
     const { x, y, width: w, height: h } = l.rect;
     if (x < 0 || y < 0 || x + w > width || y + h > height) throw broken('слой за краем холста');
+    const layerRefs = l.refs?.map((n) => {
+      const ref = refs[n];
+      if (!ref) throw broken('нет референса слоя');
+      return ref;
+    });
     return {
       id: l.id,
       rect: l.rect,
@@ -146,6 +174,9 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       variant: l.variant,
       active: l.active,
       createdAt: l.createdAt,
+      model: l.model && MODELS.includes(l.model) ? l.model : undefined,
+      size: l.size && SIZES.includes(l.size) ? l.size : undefined,
+      refs: layerRefs,
     };
   });
   const doc = CanvasDocument.restore(name, width, height, base!, patches);

@@ -6,21 +6,32 @@ import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import sharp from 'sharp';
-import { CanvasDocument, TILE_SIZE } from '../core/document.ts';
+import { CanvasDocument, TILE_SIZE, type NewPatch } from '../core/document.ts';
 import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, type ImageFormat } from '../core/image-file.ts';
 import { encodeProject, isProject, isProjectPath, openProject, PROJECT_EXTENSION } from '../core/project.ts';
 import type { RecentFiles } from '../core/recent.ts';
-import { buildLayer, fitGenerated, insideOf, measure, prepareEdit, type PreparedEdit, type RawImage } from '../core/edit-region.ts';
-import { intersect } from '../core/frame.ts';
+import { buildLayer, fitGenerated, insideOf, layerAsGen, measure, prepareEdit, type PreparedEdit, type RawImage } from '../core/edit-region.ts';
+import { intersect, type Rect } from '../core/frame.ts';
 import { expandMaskByDiff } from '../core/expand.ts';
 import { readLedger, withLedger } from '../core/ledger.ts';
-import { featherAlpha } from '../core/mask.ts';
+import { featherAlpha, maskBBox } from '../core/mask.ts';
 import { applyShapes } from '../core/mask-shapes.ts';
 import type { KeyStore } from '../core/secrets.ts';
 import { laozhangGemini } from '../providers/laozhang-gemini.ts';
 import { mockProvider } from '../providers/mock.ts';
 import type { ImageProvider, InputImage } from '../providers/types.ts';
-import { MAX_REFERENCES, shapesBBox, type CreateJobRequest, type JobDto, type MaskShape, type ModelChoice, type RectDto, type SizeChoice, type StateDto } from '../shared/api.ts';
+import {
+  MAX_REFERENCES,
+  shapesBBox,
+  type CreateJobRequest,
+  type JobDto,
+  type MaskShape,
+  type ModelChoice,
+  type PatchVariantsRequest,
+  type RectDto,
+  type SizeChoice,
+  type StateDto,
+} from '../shared/api.ts';
 
 const MAX_RUNNING_JOBS = 2;
 const MAX_VARIANTS_PER_JOB = 8;
@@ -43,6 +54,16 @@ interface Variant {
   gen?: Buffer;
   outsideChangedPct?: number;
   insideChangedPct?: number;
+  /** Слой, который сейчас на холсте: с ним сравнивают новые варианты */
+  current?: boolean;
+}
+
+/** Принятый слой, который правка перерисовывает: маска и место — на момент, когда попросили ещё вариантов */
+interface Replaced {
+  patchId: string;
+  mask: Uint8Array;
+  rect: Rect;
+  feather: number;
 }
 
 interface Job {
@@ -60,6 +81,8 @@ interface Job {
   area: RectDto;
   variantsRequested: number;
   references: InputImage[];
+  /** Ещё варианты принятого слоя: «Принять» кладёт вариант на его место */
+  replaces?: Replaced;
   prep?: PreparedEdit;
   /** Текущая маска части куска внутри холста — её можно править после генерации */
   mask?: Uint8Array;
@@ -67,6 +90,8 @@ interface Job {
   maskUndo: Uint8Array[];
   variants: Variant[];
   selected: number;
+  /** Вариант выбрали руками: новые готовые его не перебивают */
+  picked: boolean;
   rev: number;
   layerPngs: Map<number, Buffer>;
   maskPng?: Buffer;
@@ -124,6 +149,8 @@ export class Session {
   private density: number | undefined;
   /** Содержимое холста на момент последнего сохранения (contentKey документа) */
   private savedKey = '';
+  /** Слои со скрытыми на момент сохранения (layersKey документа): в проект .caaa ложатся и они */
+  private savedLayers = '';
   /** Стиль на момент сохранения: в проект .caaa он записывается, в картинку — нет */
   private savedStyle = '';
   /** Документ со слоями уже записывали картинкой: «Сохранить» больше не спрашивает, сохранить ли слои */
@@ -136,6 +163,10 @@ export class Session {
   private docChain: Promise<unknown> = Promise.resolve();
   /** Последняя показанная маска слоя: её PNG перезапрашивается после каждого мазка */
   private patchMaskCache: { key: string; png: Buffer } | null = null;
+  /** Холст, по которому построены превью замены слоя (rev документа) */
+  private previewRev: number | undefined;
+  /** Какие ответы умеет каждая модель — не меняется */
+  private outputs: StateDto['models'] | undefined;
 
   constructor(providerKind: 'laozhang' | 'mock', keys: KeyStore, opts: SessionOptions = {}) {
     this.providerKind = providerKind;
@@ -157,6 +188,15 @@ export class Session {
   }
 
   private changed(): void {
+    // Превью замены слоя показывает участок холста целиком, поэтому устаревает при любой правке документа
+    if (this.doc?.rev !== this.previewRev) {
+      this.previewRev = this.doc?.rev;
+      for (const job of this.jobs) {
+        if (!job.replaces) continue;
+        job.rev++;
+        job.layerPngs.clear();
+      }
+    }
     if (this.emitTimer) return;
     this.emitTimer = setTimeout(() => {
       this.emitTimer = undefined;
@@ -194,10 +234,22 @@ export class Session {
     this.changed();
   }
 
+  /** Размеры ответа каждой модели по пропорциям и разрешениям */
+  private modelOutputs(): StateDto['models'] {
+    const of = (model: ModelChoice) => {
+      const p = this.provider(model);
+      const outputs = Object.fromEntries(p.aspectRatios.map((ar) => [ar, Object.fromEntries(p.imageSizes.map((size) => [size, p.outputSize(ar, size)]))]));
+      return { imageSizes: [...p.imageSizes], outputs };
+    };
+    this.outputs ??= { flash: of('flash'), pro: of('pro') };
+    return this.outputs;
+  }
+
   state(): StateDto {
     const doc = this.doc;
     return {
       provider: this.providerKind,
+      models: this.modelOutputs(),
       hasKey: this.hasKey || this.providerKind === 'mock',
       doc: doc && {
         id: doc.id,
@@ -233,10 +285,12 @@ export class Session {
           elapsedMs: v.elapsedMs,
           outsideChangedPct: v.outsideChangedPct,
           insideChangedPct: v.insideChangedPct,
+          current: v.current,
         })),
         selected: j.selected,
         rev: j.rev,
         canUndoMask: j.maskUndo.length > 0,
+        replaces: j.replaces?.patchId,
       })),
       history: (doc?.patches ?? []).map((p) => ({
         id: p.id,
@@ -274,10 +328,11 @@ export class Session {
     return this.file?.path ?? null;
   }
 
-  /** Есть несохранённые изменения холста (у проекта .caaa — и стиля) */
+  /** Есть несохранённые изменения холста; у проекта .caaa — и скрытых слоёв, и стиля */
   get dirty(): boolean {
     if (!this.doc) return false;
-    return this.doc.contentKey !== this.savedKey || (this.file?.format === PROJECT_EXTENSION && this.doc.style !== this.savedStyle);
+    if (this.file?.format === PROJECT_EXTENSION) return this.doc.layersKey !== this.savedLayers || this.doc.style !== this.savedStyle;
+    return this.doc.contentKey !== this.savedKey;
   }
 
   /** При закрытии документа есть что потерять: несохранённые правки или задачи в очереди */
@@ -357,6 +412,7 @@ export class Session {
     this.file = file;
     this.density = density;
     this.savedKey = doc.contentKey;
+    this.savedLayers = doc.layersKey;
     this.savedStyle = doc.style;
     this.flattened = false;
     this.changed();
@@ -502,6 +558,7 @@ export class Session {
     this.setActivity(`Сохраняю ${basename(path)}…`);
     try {
       const key = doc.contentKey;
+      const layers = doc.layersKey;
       const style = doc.style;
       const data =
         format === PROJECT_EXTENSION
@@ -511,6 +568,7 @@ export class Session {
       const info = await stat(path);
       this.file = { path, format, density: this.density, chromaSubsampling, size: info.size, mtimeMs: info.mtimeMs };
       this.savedKey = key;
+      this.savedLayers = layers;
       this.savedStyle = style;
       if (format !== PROJECT_EXTENSION) this.flattened = true;
       await this.remember(doc, path);
@@ -576,6 +634,14 @@ export class Session {
     });
   }
 
+  /** Удалить слой: обычный шаг истории, ⌘Z его возвращает */
+  removePatch(patchId: string): Promise<void> {
+    return this.serialDoc((doc) => {
+      doc.removePatch(patchId);
+      this.changed();
+    });
+  }
+
   /** Дорисовать или стереть маску принятого слоя: кисть возвращает его пиксели, ластик открывает холст под ним */
   editPatchMask(patchId: string, shapes: MaskShape[]): Promise<void> {
     return this.serialDoc(async (doc) => {
@@ -634,11 +700,9 @@ export class Session {
   // ——— Задачи ———
 
   createJob(req: CreateJobRequest): string {
-    const doc = this.requireDoc();
     if (!req.prompt.trim()) throw new Error('Пустой промпт');
     const area = shapesBBox(req.shapes);
     if (!area) throw new Error('Нет выделения');
-    const variants = Math.min(Math.max(Math.round(req.variants), 1), 4);
     const refIds = req.refs ?? [];
     if (refIds.length > MAX_REFERENCES) throw new Error(`Не больше ${MAX_REFERENCES} референсов на правку`);
     const references = refIds.map((id) => {
@@ -646,22 +710,45 @@ export class Session {
       if (!ref) throw new Error('Референс не найден — добавьте картинку заново');
       return ref.image;
     });
+    return this.enqueue({ prompt: req.prompt.trim(), model: req.model, size: req.size, variants: req.variants, shapes: req.shapes, area, references });
+  }
+
+  /**
+   * «Ещё варианты» принятого слоя: та же задача, маска слоя и его референсы; модель видит холст под слоем, а не его самого.
+   * Нынешний слой становится первым вариантом, чтобы новые было с чем сравнить; «Принять» кладёт выбранный на его место.
+   */
+  patchVariants(patchId: string, req: PatchVariantsRequest): string {
+    const patch = this.requireDoc().patch(patchId);
+    const box = maskBBox(patch.mask, patch.rect.width, patch.rect.height);
+    if (!box) throw new Error('Маска слоя пустая: верните кистью то, что нужно перерисовать');
+    return this.enqueue({
+      prompt: patch.prompt,
+      model: patch.model ?? req.model,
+      size: patch.size ?? req.size,
+      variants: req.variants,
+      shapes: [],
+      area: { ...box, x: box.x + patch.rect.x, y: box.y + patch.rect.y },
+      references: patch.refs ?? [],
+      replaces: { patchId, mask: patch.mask, rect: patch.rect, feather: patch.feather },
+    });
+  }
+
+  private enqueue(
+    task: Pick<Job, 'prompt' | 'model' | 'size' | 'shapes' | 'area' | 'references' | 'replaces'> & { variants: number },
+  ): string {
+    const doc = this.requireDoc();
     const job: Job = {
+      ...task,
       id: randomUUID(),
       docId: doc.id,
-      prompt: req.prompt.trim(),
       style: doc.style,
-      model: req.model,
-      size: req.size,
       createdAt: new Date().toISOString(),
       status: 'queued',
-      shapes: req.shapes,
-      area,
-      variantsRequested: variants,
-      references,
+      variantsRequested: Math.min(Math.max(Math.round(task.variants), 1), 4),
       maskUndo: [],
       variants: [],
       selected: 0,
+      picked: false,
       rev: 1,
       layerPngs: new Map(),
       abort: new AbortController(),
@@ -702,9 +789,14 @@ export class Session {
     try {
       const doc = this.doc;
       if (!doc || doc.id !== job.docId) throw new Error('Документ уже закрыт');
+      // Слой могли удалить, пока задача ждала очереди: тогда вариант ляжет новым слоем
+      const { replaces } = job;
+      const current = replaces && doc.hasPatch(replaces.patchId) ? doc.patch(replaces.patchId) : null;
       const prep = await prepareEdit({
         image: doc.raw(),
-        mask: await this.rasterize(job, doc),
+        mask: replaces ? layerMask(replaces) : await this.rasterize(job, doc),
+        crop: current ? (inside) => doc.regionWithout(inside, current.id) : undefined,
+        feather: replaces?.feather,
         prompt: job.prompt,
         style: job.style,
         provider: this.provider(job.model),
@@ -714,6 +806,11 @@ export class Session {
       job.prep = prep;
       job.mask = prep.insideMask;
       job.alpha = prep.alpha;
+      if (current) {
+        const gen = layerAsGen(prep, current.rect, current.layer);
+        const stats = await measure(prep, gen, prep.modelSize);
+        job.variants.push({ n: 0, status: 'done', current: true, gen, outsideChangedPct: stats.outsideChangedPct, insideChangedPct: stats.insideChangedPct });
+      }
       job.status = 'running';
       this.changed();
       await this.generate(job, job.variantsRequested);
@@ -765,7 +862,9 @@ export class Session {
           v.outsideChangedPct = stats.outsideChangedPct;
           v.insideChangedPct = stats.insideChangedPct;
           v.status = 'done';
-          if (job.variants[job.selected]?.status !== 'done') job.selected = v.n;
+          // Первый готовый новый вариант сразу на холсте, даже если до него был выбран нынешний слой
+          const selected = job.variants[job.selected];
+          if (selected?.status !== 'done' || (selected.current && !job.picked)) job.selected = v.n;
         } catch (err) {
           v.status = 'error';
           v.error = message(err);
@@ -782,6 +881,7 @@ export class Session {
     const job = this.job(jobId);
     if (job.variants[n]?.status !== 'done') throw new Error('Вариант не готов');
     job.selected = n;
+    job.picked = true;
     this.changed();
   }
 
@@ -804,7 +904,7 @@ export class Session {
     const job = this.job(jobId);
     if (job.status !== 'error') throw new Error('Повторить можно только задачу с ошибкой');
     job.abort = new AbortController();
-    Object.assign(job, { status: 'queued', error: undefined, prep: undefined, mask: undefined, alpha: undefined, variants: [], maskUndo: [], selected: 0 });
+    Object.assign(job, { status: 'queued', error: undefined, prep: undefined, mask: undefined, alpha: undefined, variants: [], maskUndo: [], selected: 0, picked: false });
     job.layerPngs.clear();
     job.maskPng = undefined;
     this.changed();
@@ -820,23 +920,33 @@ export class Session {
     this.schedule();
   }
 
+  /** Принять выбранный вариант: новым слоем сверху или, если это ещё варианты слоя, на его место */
   accept(jobId: string): void {
     const job = this.readyJob(jobId);
     const doc = this.requireDoc();
     if (doc.id !== job.docId) throw new Error('Задача от другого документа');
     const v = job.variants[job.selected];
     if (v?.status !== 'done' || !v.gen) throw new Error('Выбранный вариант не готов');
-    doc.addPatch({
-      id: randomUUID(),
-      rect: job.prep.frame.inside,
-      layer: buildLayer(job.prep, v.gen, job.alpha),
-      mask: job.mask,
-      feather: job.prep.feather,
-      prompt: job.prompt,
-      jobId: job.id,
-      variant: v.n,
-      createdAt: new Date().toISOString(),
-    });
+    const target = job.replaces && doc.hasPatch(job.replaces.patchId) ? job.replaces.patchId : null;
+    // Оставили нынешний слой и маску не трогали — менять нечего
+    if (!(v.current && target && job.mask === job.prep.insideMask)) {
+      const patch: NewPatch = {
+        id: randomUUID(),
+        rect: job.prep.frame.inside,
+        layer: buildLayer(job.prep, v.gen, job.alpha),
+        mask: job.mask,
+        feather: job.prep.feather,
+        prompt: job.prompt,
+        jobId: job.id,
+        variant: v.n,
+        createdAt: new Date().toISOString(),
+        model: job.model,
+        size: job.size,
+        refs: job.references,
+      };
+      if (target) doc.replacePatch(target, patch);
+      else doc.addPatch(patch);
+    }
     this.discard(jobId);
   }
 
@@ -899,7 +1009,11 @@ export class Session {
     });
   }
 
-  /** Слой варианта: цвет ответа модели и растушёванная маска в альфе, PNG размером с часть куска на холсте */
+  /**
+   * Слой варианта: цвет ответа модели и растушёванная маска в альфе, PNG размером с часть куска на холсте.
+   * Вариант на замену слоя ложится не поверх него, а вместо: показываем участок холста, каким он станет, — везде,
+   * где лежит новый или прежний слой, иначе у края растушёвки и там, где маску сузили, проглядывал бы прежний.
+   */
   async layerPng(jobId: string, n: number): Promise<Buffer> {
     const job = this.readyJob(jobId);
     const cached = job.layerPngs.get(n);
@@ -907,12 +1021,33 @@ export class Session {
     const v = job.variants[n];
     if (v?.status !== 'done' || !v.gen) throw new Error('Вариант не готов');
     const { inside } = job.prep.frame;
-    const png = await sharp(buildLayer(job.prep, v.gen, job.alpha), {
+    const rev = job.rev;
+    const layer = buildLayer(job.prep, v.gen, job.alpha);
+    const doc = this.requireDoc();
+    const target = job.replaces && doc.hasPatch(job.replaces.patchId) ? doc.patch(job.replaces.patchId) : null;
+    if (target) {
+      const after = doc.regionReplaced(inside, target.id, inside, layer);
+      const old = target.rect;
+      for (let y = 0; y < inside.height; y++) {
+        for (let x = 0; x < inside.width; x++) {
+          const i = y * inside.width + x;
+          const ox = inside.x + x - old.x;
+          const oy = inside.y + y - old.y;
+          const under = ox >= 0 && oy >= 0 && ox < old.width && oy < old.height && target.layer[(oy * old.width + ox) * 4 + 3]! > 0;
+          layer[i * 4] = after[i * 3]!;
+          layer[i * 4 + 1] = after[i * 3 + 1]!;
+          layer[i * 4 + 2] = after[i * 3 + 2]!;
+          layer[i * 4 + 3] = under || layer[i * 4 + 3]! > 0 ? 255 : 0;
+        }
+      }
+    }
+    const png = await sharp(layer, {
       raw: { width: inside.width, height: inside.height, channels: 4 },
     })
       .png({ compressionLevel: 2 })
       .toBuffer();
-    job.layerPngs.set(n, png);
+    // Пока кодировали, маска или холст могли измениться: такую картинку не кэшируем
+    if (job.rev === rev) job.layerPngs.set(n, png);
     return png;
   }
 
@@ -923,6 +1058,11 @@ export class Session {
     job.maskPng ??= await maskOverlay(job.mask, inside.width, inside.height);
     return job.maskPng;
   }
+}
+
+/** Маска слоя одним каналом на его месте на холсте — так её принимает prepareEdit */
+function layerMask({ mask, rect }: Replaced): RawImage & { x: number; y: number } {
+  return { data: Buffer.from(mask.buffer, mask.byteOffset, mask.length), width: rect.width, height: rect.height, channels: 1, x: rect.x, y: rect.y };
 }
 
 /** Маска для показа поверх холста: полупрозрачная голубая заливка */

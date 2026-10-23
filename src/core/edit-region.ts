@@ -2,7 +2,7 @@
 // к размеру куска и вклеиваем по маске с растушёвкой. Где маска = 0, пиксели не меняются.
 import sharp from 'sharp';
 import type { GenerateResult, ImageProvider, InputImage, Size } from '../providers/types.ts';
-import { computeFrame, intersect, type Frame, type Rect } from './frame.ts';
+import { AUTO_SIZE_CAP, chooseImageSize, computeFrame, FRAME_CONTEXT, frameScale, intersect, SCALE_WARN, type Frame, type Rect } from './frame.ts';
 import { blankOut, featherAlpha, highlight, insideDistance, maskBBox } from './mask.ts';
 
 /**
@@ -52,6 +52,11 @@ export interface EditRegionOptions {
   guide?: Guide;
   /** Картинки-референсы (персонаж, стиль): уходят модели после куска */
   references?: InputImage[];
+  /**
+   * Пиксели части куска внутри холста, если они не те, что в image: так слой перерисовывают
+   * по холсту под ним, а не по собственному неудачному результату
+   */
+  crop?: (inside: Rect) => Buffer;
 }
 
 export interface PreparedEdit {
@@ -100,9 +105,7 @@ export interface CompositedVariant {
   stats: VariantStats;
 }
 
-const DEFAULTS = { context: 0.3, contextMin: 128, feather: 24, imageSize: 'auto', maxAutoSize: '2K', guide: 'pair' as Guide };
-/** Насколько кусок может быть больше ответа модели, прежде чем предупреждать о потере детализации */
-const SCALE_WARN = 1.15;
+const DEFAULTS = { ...FRAME_CONTEXT, feather: 24, imageSize: 'auto', maxAutoSize: AUTO_SIZE_CAP, guide: 'pair' as Guide };
 
 export function buildPrompt(guide: Guide, request: string, style?: string, references = 0): string {
   // Задача — первой и как обязательная: с осторожной формулировкой («верни картинку 1, всё сохрани»)
@@ -132,22 +135,6 @@ export function buildPrompt(guide: Guide, request: string, style?: string, refer
   }
   if (style?.trim()) lines.push('', `Style of the whole illustration: ${style.trim()}`);
   return lines.join('\n');
-}
-
-function chooseImageSize(provider: ImageProvider, aspectRatio: string, frame: Size, requested: string, maxAuto: string): string {
-  if (requested !== 'auto') {
-    if (!provider.imageSizes.includes(requested)) {
-      throw new Error(`Разрешение ${requested} не поддерживается, есть: ${provider.imageSizes.join(', ')}`);
-    }
-    return requested;
-  }
-  const cap = provider.imageSizes.indexOf(maxAuto);
-  const sizes = cap >= 0 ? provider.imageSizes.slice(0, cap + 1) : provider.imageSizes;
-  for (const size of sizes) {
-    const out = provider.outputSize(aspectRatio, size);
-    if (out.width >= frame.width * 0.95 && out.height >= frame.height * 0.95) return size;
-  }
-  return sizes[sizes.length - 1]!;
 }
 
 function copyRect(src: Buffer, srcWidth: number, rect: Rect, channels: number): Buffer {
@@ -224,7 +211,7 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
     opts.maxAutoSize ?? DEFAULTS.maxAutoSize,
   );
   const modelSize = provider.outputSize(frame.aspectRatio, imageSize);
-  const scale = Math.max(rect.width / modelSize.width, rect.height / modelSize.height);
+  const scale = frameScale(rect, modelSize);
 
   const warnings: string[] = [];
   if (scale > SCALE_WARN) {
@@ -239,7 +226,8 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
   }
 
   // Исходный кусок; поля за холстом — отражение
-  const insideRaw = copyRect(baseRaw, canvas.width, inside, channels);
+  const insideRaw = opts.crop ? opts.crop(inside) : copyRect(baseRaw, canvas.width, inside, channels);
+  if (insideRaw.length !== inside.width * inside.height * channels) throw new Error('Кусок не того размера');
   let frameImg = sharp(insideRaw, { raw: { width: inside.width, height: inside.height, channels } });
   if (inside.width < rect.width || inside.height < rect.height) {
     frameImg = sharp(
@@ -426,6 +414,26 @@ export async function fitGenerated(prep: PreparedEdit, generated: Buffer): Promi
 export function insideOf(prep: PreparedEdit, frameBuf: Buffer): Buffer {
   const { rect, inside } = prep.frame;
   return copyRect(frameBuf, rect.width, { ...inside, x: inside.x - rect.x, y: inside.y - rect.y }, 3);
+}
+
+/**
+ * Принятый слой как ответ модели в размере рамки: его цвета там, где он лежит, вокруг — исходный кусок.
+ * Так уже принятый вариант стоит в одном ряду с новыми, когда слой перерисовывают ещё раз.
+ */
+export function layerAsGen(prep: PreparedEdit, layerRect: Rect, layer: Buffer): Buffer {
+  const { rect } = prep.frame;
+  const gen = Buffer.from(prep.frameRgb);
+  const overlap = intersect(prep.frame.inside, layerRect);
+  for (let y = overlap.y; y < overlap.y + overlap.height; y++) {
+    for (let x = overlap.x; x < overlap.x + overlap.width; x++) {
+      const l = ((y - layerRect.y) * layerRect.width + x - layerRect.x) * 4;
+      const g = ((y - rect.y) * rect.width + x - rect.x) * 3;
+      gen[g] = layer[l]!;
+      gen[g + 1] = layer[l + 1]!;
+      gen[g + 2] = layer[l + 2]!;
+    }
+  }
+  return gen;
 }
 
 /** Слой правки: RGBA размером с часть рамки внутри холста, альфа — растушёванная маска */

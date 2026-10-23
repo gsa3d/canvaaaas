@@ -16,19 +16,25 @@ import {
   IconMinus,
   IconPhotoPlus,
   IconPlus,
+  IconRefresh,
+  IconTrash,
   IconX,
   type Icon,
 } from '@tabler/icons-preact';
 import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { adviseSize, intersect, type ModelOutputs, type SizeAdvice } from '../core/frame.ts';
 import {
   CANVAS_PRESETS,
   COMMAND_EVENT,
   MAX_REFERENCES,
+  shapesBBox,
   type AppCommand,
+  type DocDto,
   type JobDto,
   type MaskShape,
   type ModelChoice,
+  type ModelOutputsDto,
   type PatchDto,
   type RecentDto,
   type SizeChoice,
@@ -62,6 +68,30 @@ function short(text: string, max = 32): string {
 function clock(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function modelOutputs(dto: ModelOutputsDto): ModelOutputs {
+  return {
+    aspectRatios: Object.keys(dto.outputs),
+    imageSizes: dto.imageSizes,
+    outputSize: (aspectRatio, imageSize) => {
+      const out = dto.outputs[aspectRatio]?.[imageSize];
+      if (!out) throw new Error(`Модель не умеет ${aspectRatio} в ${imageSize}`);
+      return out;
+    },
+  };
+}
+
+/** Хватает ли выделению выбранного разрешения — тем же расчётом, что сделает сервер; ошибка — текстом */
+function adviseSelection(doc: DocDto, shapes: MaskShape[], dto: ModelOutputsDto, size: SizeChoice): SizeAdvice | string | null {
+  const box = shapesBBox(shapes);
+  const area = box && intersect(box, { x: 0, y: 0, width: doc.width, height: doc.height });
+  if (!area?.width || !area.height) return null;
+  try {
+    return adviseSize(area, doc, modelOutputs(dto), size);
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
 }
 
 // Иконки — Tabler (tabler.io/icons), обводка чуть тоньше стандартной
@@ -210,6 +240,7 @@ export function App() {
 
   const hasSelection = selection.some((s) => !s.erase);
   const canGenerate = !!doc && hasSelection && prompt.trim().length > 0 && !maskJob && !maskLayer;
+  const sizeAdvice = doc && state && hasSelection ? adviseSelection(doc, selection, state.models[model], size) : null;
 
   const generate = async () => {
     if (!canGenerate) return;
@@ -484,6 +515,34 @@ export function App() {
     if (r) viewRef.current?.showRect(r);
   };
 
+  // Ещё варианты принятого слоя: если они уже в очереди — туда же, а не второй задачей на тот же слой
+  const layerVariants = async (patch: PatchDto) => {
+    if (!state?.hasKey) {
+      setDialog('settings');
+      return;
+    }
+    const open = jobs.find((j) => j.replaces === patch.id);
+    try {
+      if (open) {
+        focus(open);
+        if (open.status === 'done' || open.status === 'error') await post(`/api/jobs/${open.id}/more`, { count: variants });
+        else notify('Варианты этого слоя уже генерируются', false);
+        return;
+      }
+      const { id } = await post<{ id: string }>(`/api/history/${patch.id}/variants`, { variants, model, size });
+      setFocusJob(id);
+      viewRef.current?.showRect(patch.rect);
+    } catch (err) {
+      fail(err);
+    }
+  };
+
+  const deleteLayer = (patch: PatchDto) => {
+    post(`/api/history/${patch.id}/delete`)
+      .then(() => notify(`Слой «${short(patch.prompt)}» удалён. ⌘Z вернёт его`, false))
+      .catch(fail);
+  };
+
   const sortedJobs = [...jobs].sort((a, b) => (numbers.current.get(b.id) ?? 0) - (numbers.current.get(a.id) ?? 0));
 
   return (
@@ -717,6 +776,10 @@ export function App() {
                   </select>
                 </label>
               </div>
+              {typeof sizeAdvice === 'string' && <p class="job-warning">{sizeAdvice}</p>}
+              {sizeAdvice && typeof sizeAdvice === 'object' && (
+                <SizeHint advice={sizeAdvice} auto={size === 'auto'} sizes={state!.models[model].imageSizes} onSize={setSize} />
+              )}
               <button class="primary" disabled={!canGenerate} onClick={generate} title="⌘↵">
                 Сгенерировать {variants} {plural(variants, 'вариант', 'варианта', 'вариантов')}
               </button>
@@ -731,6 +794,7 @@ export function App() {
                 <JobCard
                   key={job.id}
                   job={job}
+                  replacing={job.replaces === undefined ? undefined : (layers.find((p) => p.id === job.replaces) ?? null)}
                   number={numbers.current.get(job.id) ?? 0}
                   focused={job.id === focusJob}
                   maskMode={job.id === maskJob}
@@ -768,7 +832,10 @@ export function App() {
             <section class="panel">
               <h2>Слои</h2>
               {!layers.length && (
-                <p class="hint">Принятые правки ложатся слоями поверх исходника. Глаз скрывает слой, маска стирает его часть или возвращает обратно.</p>
+                <p class="hint">
+                  Принятые правки ложатся слоями поверх исходника. Глаз скрывает слой, маска стирает его часть или возвращает обратно, а
+                  стрелки по кругу генерируют ещё варианты той же правки.
+                </p>
               )}
               <ol class="layers">
                 {[...layers].reverse().map((p) => (
@@ -776,9 +843,12 @@ export function App() {
                     key={p.id}
                     patch={p}
                     maskMode={p.id === maskLayer}
+                    variants={variants}
                     onToggle={() => post(`/api/history/${p.id}/toggle`).catch(fail)}
                     onShow={() => viewRef.current?.showRect(p.rect)}
                     onMask={() => editLayerMask(p)}
+                    onVariants={() => void layerVariants(p)}
+                    onDelete={() => deleteLayer(p)}
                   />
                 ))}
               </ol>
@@ -848,6 +918,8 @@ type JobAction = 'accept' | 'discard' | 'retry' | 'more' | 'expand' | 'undoMask'
 
 function JobCard(props: {
   job: JobDto;
+  /** Слой, который заменит принятый вариант; null — его уже удалили */
+  replacing?: PatchDto | null;
   number: number;
   focused: boolean;
   maskMode: boolean;
@@ -862,6 +934,7 @@ function JobCard(props: {
   const selected = job.variants[job.selected];
   const index = done.findIndex((v) => v.n === job.selected);
   const busy = job.status === 'queued' || job.status === 'preparing' || job.status === 'running';
+  const replacing = props.replacing;
 
   return (
     <article class={`job ${job.status}${props.focused ? ' focused' : ''}`} onClick={props.onFocus}>
@@ -877,6 +950,13 @@ function JobCard(props: {
         {job.modelSize && <span class="dim">, {[job.imageSize, job.model === 'pro' ? 'Pro' : ''].filter(Boolean).join(' ')}</span>}
         {job.refs > 0 && <span class="dim">, референсов: {job.refs}</span>}
       </p>
+      {replacing !== undefined && (
+        <p class="hint">
+          {replacing
+            ? 'Ещё варианты слоя: модель видит холст под ним. Принятый вариант ляжет на место слоя, «Отклонить» оставит слой как был.'
+            : 'Слой удалили: принятый вариант ляжет новым слоем.'}
+        </p>
+      )}
       {job.error && <p class="job-error">{job.error}</p>}
       {job.warnings.map((w) => (
         <p class="job-warning">{w}</p>
@@ -889,7 +969,8 @@ function JobCard(props: {
               <IconChevronLeft size={16} stroke={STROKE} />
             </button>
             <span>
-              Вариант {index + 1} из {done.length}
+              {selected?.current ? 'Нынешний слой, ' : 'Вариант '}
+              {index + 1} из {done.length}
               {selected?.elapsedMs !== undefined && <span class="dim">, {Math.round(selected.elapsedMs / 1000)} с</span>}
             </span>
             <button class="icon" aria-label="Следующий вариант" disabled={done.length < 2} onClick={() => props.onSwitch(1)}>
@@ -904,7 +985,7 @@ function JobCard(props: {
           )}
           <div class="row">
             <button class="primary" onClick={() => props.onAction('accept')}>
-              Принять
+              {!replacing ? 'Принять' : selected?.current ? 'Оставить этот' : 'Заменить слой'}
             </button>
             <button onClick={() => props.onAction('discard')}>Отклонить</button>
             <button onClick={() => props.onAction('more')} disabled={running > 0}>
@@ -945,7 +1026,17 @@ function JobCard(props: {
   );
 }
 
-function LayerItem(props: { patch: PatchDto; maskMode: boolean; onToggle: () => void; onShow: () => void; onMask: () => void }) {
+function LayerItem(props: {
+  patch: PatchDto;
+  maskMode: boolean;
+  /** Сколько вариантов сгенерировать */
+  variants: number;
+  onToggle: () => void;
+  onShow: () => void;
+  onMask: () => void;
+  onVariants: () => void;
+  onDelete: () => void;
+}) {
   const { patch } = props;
   const time = new Date(patch.createdAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
   return (
@@ -973,7 +1064,64 @@ function LayerItem(props: { patch: PatchDto; maskMode: boolean; onToggle: () => 
       >
         <IconMask size={18} stroke={STROKE} />
       </button>
+      <button
+        class="layer-icon"
+        title={`Ещё ${props.variants} ${plural(props.variants, 'вариант', 'варианта', 'вариантов')} этой правки: та же задача и маска; выбранный заменит слой`}
+        aria-label="Ещё варианты слоя"
+        onClick={props.onVariants}
+      >
+        <IconRefresh size={18} stroke={STROKE} />
+      </button>
+      <button class="layer-icon delete" title="Удалить слой (⌘Z вернёт его)" aria-label="Удалить слой" onClick={props.onDelete}>
+        <IconTrash size={18} stroke={STROKE} />
+      </button>
     </li>
+  );
+}
+
+/** Хватает ли куску разрешения ответа: мало — размоется, много — лишнее ожидание без новых деталей */
+function SizeHint(props: { advice: SizeAdvice; auto: boolean; sizes: string[]; onSize: (size: SizeChoice) => void }) {
+  const { frame, imageSize, output, scale, enough } = props.advice;
+  const piece = `${frame.rect.width}×${frame.rect.height}`;
+  const label = props.auto ? `авто (${imageSize})` : imageSize;
+  const slow = (size: string) => (size === '4K' ? ', но идёт 4–5 минут' : '');
+  const pick = (size: string) => (
+    <button class="small" onClick={() => props.onSize(size as SizeChoice)}>
+      Поставить {size}
+    </button>
+  );
+  if (props.advice.tooSmall) {
+    const better = props.sizes.indexOf(enough) > props.sizes.indexOf(imageSize) ? enough : null;
+    return (
+      <div class="size-hint warn">
+        <p>
+          Разрешения не хватает: кусок с контекстом {piece}, а {label} вернёт {output.width}×{output.height} — детализация упадёт в{' '}
+          {scale.toFixed(1).replace('.', ',')} раза.{' '}
+          {!better
+            ? 'Это наибольшее разрешение модели: выделите область поменьше или правьте её по частям.'
+            : props.advice.beyond
+              ? `Даже ${better} будет мало${slow(better)}: лучше выделить область поменьше.`
+              : `Хватит ${better}${slow(better)}.`}
+        </p>
+        {better && pick(better)}
+      </div>
+    );
+  }
+  if (props.advice.tooBig) {
+    return (
+      <div class="size-hint warn">
+        <p>
+          Разрешение с запасом: куску {piece} хватит {enough}. {label} не добавит деталей — ответ всё равно уменьшится до размера куска
+          {imageSize === '4K' ? ', а ждать его 4–5 минут' : ''}.
+        </p>
+        {pick(enough)}
+      </div>
+    );
+  }
+  return (
+    <p class="hint size-hint">
+      Кусок с контекстом {piece} → ответ модели {output.width}×{output.height}, {label}
+    </p>
   );
 }
 

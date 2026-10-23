@@ -4,7 +4,9 @@
 // копий и режем из неё тайлы по запросу.
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
-import { applyLayer, type RawImage } from './edit-region.ts';
+import type { InputImage } from '../providers/types.ts';
+import type { ModelChoice, SizeChoice } from '../shared/api.ts';
+import { applyLayer, type RawImage, type RawRegion } from './edit-region.ts';
 import { intersect, type Rect } from './frame.ts';
 import { encodeImage } from './image-file.ts';
 import { featherAlpha } from './mask.ts';
@@ -31,6 +33,10 @@ export interface Patch {
   variant: number;
   active: boolean;
   createdAt: string;
+  /** С чем слой генерировали: с тем же его можно перерисовать ещё раз */
+  model?: ModelChoice;
+  size?: SizeChoice;
+  refs?: InputImage[];
 }
 
 interface Level {
@@ -49,8 +55,16 @@ interface MaskState {
 
 type HistoryOp =
   | { kind: 'add'; patch: Patch; index: number }
+  | { kind: 'remove'; patch: Patch; index: number }
+  | { kind: 'replace'; before: Patch; after: Patch; index: number }
   | { kind: 'toggle'; patchId: string }
   | { kind: 'mask'; patchId: string; before: MaskState; after: MaskState };
+
+function union(a: Rect, b: Rect): Rect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return { x, y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
+}
 
 // Уменьшение вдвое средним по 2×2 для участка уровня dst (на краях нечётных размеров пиксель повторяется)
 function downsample(src: Level, dst: Level, rect: Rect): void {
@@ -170,6 +184,11 @@ export class CanvasDocument {
       .join(',');
   }
 
+  /** То же со скрытыми слоями — они тоже ложатся в проект .caaa */
+  get layersKey(): string {
+    return this.patches.map((p) => `${p.id}:${p.maskVersion}${p.active ? '' : ':off'}`).join(',');
+  }
+
   get canUndo(): boolean {
     return this.undoStack.length > 0;
   }
@@ -180,18 +199,31 @@ export class CanvasDocument {
 
   /** Принять правку: слой ложится поверх текущего холста */
   addPatch(patch: NewPatch): Patch {
-    const { width, height } = patch.rect;
-    let mask = patch.mask;
-    if (!mask) {
-      mask = new Uint8Array(width * height);
-      for (let i = 0; i < mask.length; i++) mask[i] = patch.layer[i * 4 + 3]!;
-    }
-    const full: Patch = { ...patch, mask, feather: patch.mask ? (patch.feather ?? 0) : 0, maskVersion: 0, active: true };
+    const full = this.complete(patch);
     this.patches.push(full);
     applyLayer({ data: this.composite, rect: this.bounds(), channels: 3 }, full.rect, full.layer);
     this.refresh(full.rect);
     this.record({ kind: 'add', patch: full, index: this.patches.length - 1 });
     return full;
+  }
+
+  /** Удалить слой; ⌘Z возвращает его на прежнее место */
+  removePatch(patchId: string): void {
+    const index = this.indexOf(patchId);
+    const [patch] = this.patches.splice(index, 1);
+    this.recompute(patch!.rect);
+    this.record({ kind: 'remove', patch: patch!, index });
+  }
+
+  /** Новый вариант слоя на его место в стопке: слои над ним остаются сверху; ⌘Z возвращает прежний */
+  replacePatch(patchId: string, patch: NewPatch): Patch {
+    const index = this.indexOf(patchId);
+    const before = this.patches[index]!;
+    const after = this.complete(patch);
+    this.patches[index] = after;
+    this.recompute(union(before.rect, after.rect));
+    this.record({ kind: 'replace', before, after, index });
+    return after;
   }
 
   /** Выключить или снова включить правку из истории */
@@ -201,9 +233,21 @@ export class CanvasDocument {
   }
 
   patch(patchId: string): Patch {
-    const patch = this.patches.find((p) => p.id === patchId);
-    if (!patch) throw new Error('Нет такого слоя');
-    return patch;
+    return this.patches[this.indexOf(patchId)]!;
+  }
+
+  hasPatch(patchId: string): boolean {
+    return this.patches.some((p) => p.id === patchId);
+  }
+
+  /** Участок холста без слоя patchId — каким он был бы, если слой удалить; RGB размером с rect */
+  regionWithout(rect: Rect, patchId: string): Buffer {
+    return this.compose(rect, patchId).data;
+  }
+
+  /** Участок холста, где вместо слоя patchId лежит другой (включённым, на том же месте в стопке): так выглядела бы замена */
+  regionReplaced(rect: Rect, patchId: string, layerRect: Rect, layer: Buffer): Buffer {
+    return this.compose(rect, patchId, { rect: layerRect, layer }).data;
   }
 
   /** Новая маска слоя (до растушёвки) размером с его rect: где 0, сквозь слой виден холст под ним */
@@ -222,6 +266,12 @@ export class CanvasDocument {
     if (op.kind === 'add') {
       this.patches.splice(op.index, 1);
       this.recompute(op.patch.rect);
+    } else if (op.kind === 'remove') {
+      this.patches.splice(op.index, 0, op.patch);
+      this.recompute(op.patch.rect);
+    } else if (op.kind === 'replace') {
+      this.patches[op.index] = op.before;
+      this.recompute(union(op.before.rect, op.after.rect));
     } else if (op.kind === 'mask') {
       this.applyMask(this.patch(op.patchId), op.before);
     } else {
@@ -236,6 +286,12 @@ export class CanvasDocument {
     if (op.kind === 'add') {
       this.patches.splice(op.index, 0, op.patch);
       this.recompute(op.patch.rect);
+    } else if (op.kind === 'remove') {
+      this.patches.splice(op.index, 1);
+      this.recompute(op.patch.rect);
+    } else if (op.kind === 'replace') {
+      this.patches[op.index] = op.after;
+      this.recompute(union(op.before.rect, op.after.rect));
     } else if (op.kind === 'mask') {
       this.applyMask(this.patch(op.patchId), op.after);
     } else {
@@ -286,6 +342,23 @@ export class CanvasDocument {
     return { x: 0, y: 0, width: this.width, height: this.height };
   }
 
+  private indexOf(patchId: string): number {
+    const index = this.patches.findIndex((p) => p.id === patchId);
+    if (index < 0) throw new Error('Нет такого слоя');
+    return index;
+  }
+
+  /** Слой из принятой правки: включён, маска ещё не правилась */
+  private complete(patch: NewPatch): Patch {
+    const { width, height } = patch.rect;
+    let mask = patch.mask;
+    if (!mask) {
+      mask = new Uint8Array(width * height);
+      for (let i = 0; i < mask.length; i++) mask[i] = patch.layer[i * 4 + 3]!;
+    }
+    return { ...patch, mask, feather: patch.mask ? (patch.feather ?? 0) : 0, maskVersion: 0, active: true };
+  }
+
   private flip(patchId: string): void {
     const patch = this.patch(patchId);
     patch.active = !patch.active;
@@ -302,16 +375,23 @@ export class CanvasDocument {
     if (patch.active) this.recompute(patch.rect);
   }
 
-  /** Пересобрать участок из исходника и включённых правок по порядку */
-  private recompute(rect: Rect): void {
+  /** Участок из исходника и включённых правок по порядку; слой skip пропускается, а на его место ложится swap */
+  private compose(rect: Rect, skip?: string, swap?: { rect: Rect; layer: Buffer }): RawRegion {
     const region = { data: Buffer.alloc(rect.width * rect.height * 3), rect, channels: 3 };
     for (let row = 0; row < rect.height; row++) {
       const from = ((rect.y + row) * this.width + rect.x) * 3;
       this.base.copy(region.data, row * rect.width * 3, from, from + rect.width * 3);
     }
     for (const p of this.patches) {
-      if (p.active && intersect(p.rect, rect).width > 0) applyLayer(region, p.rect, p.layer);
+      const layer = p.id === skip ? swap : p.active ? p : undefined;
+      if (layer && intersect(layer.rect, rect).width > 0) applyLayer(region, layer.rect, layer.layer);
     }
+    return region;
+  }
+
+  /** Пересобрать участок из исходника и включённых правок по порядку */
+  private recompute(rect: Rect): void {
+    const region = this.compose(rect);
     for (let row = 0; row < rect.height; row++) {
       region.data.copy(this.composite, ((rect.y + row) * this.width + rect.x) * 3, row * rect.width * 3, (row + 1) * rect.width * 3);
     }
