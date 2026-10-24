@@ -9,7 +9,7 @@ import type { ModelChoice, SizeChoice } from '../shared/api.ts';
 import { applyLayer, type RawImage, type RawRegion } from './edit-region.ts';
 import { intersect, type Rect } from './frame.ts';
 import { encodeImage } from './image-file.ts';
-import { featherAlpha } from './mask.ts';
+import { featherAlpha, featherAlphaRegion } from './mask.ts';
 
 export const TILE_SIZE = 512;
 const TILE_CACHE_LIMIT = 600;
@@ -37,6 +37,8 @@ export interface Patch {
   model?: ModelChoice;
   size?: SizeChoice;
   refs?: InputImage[];
+  /** Модель не видела, что было под маской: область ей стёрли */
+  hide?: boolean;
 }
 
 interface Level {
@@ -58,7 +60,8 @@ type HistoryOp =
   | { kind: 'remove'; patch: Patch; index: number }
   | { kind: 'replace'; before: Patch; after: Patch; index: number }
   | { kind: 'toggle'; patchId: string }
-  | { kind: 'mask'; patchId: string; before: MaskState; after: MaskState };
+  /** changed — участок маски, где before и after различаются: отмена пересчитывает только его */
+  | { kind: 'mask'; patchId: string; before: MaskState; after: MaskState; changed?: Rect };
 
 function union(a: Rect, b: Rect): Rect {
   const x = Math.min(a.x, b.x);
@@ -82,6 +85,23 @@ function downsample(src: Level, dst: Level, rect: Rect): void {
       for (let k = 0; k < 3; k++) {
         dst.data[o + k] = (src.data[a + k]! + src.data[b + k]! + src.data[c + k]! + src.data[d + k]! + 2) >> 2;
       }
+    }
+  }
+}
+
+/** Положить слой правки (RGBA) поверх прозрачного RGBA-участка dst: так несколько слоёв сводятся в один с той же картинкой поверх холста */
+function overLayer(dst: Buffer, rect: Rect, layerRect: Rect, layer: Buffer): void {
+  const o = intersect(rect, layerRect);
+  for (let y = o.y; y < o.y + o.height; y++) {
+    for (let x = o.x; x < o.x + o.width; x++) {
+      const l = ((y - layerRect.y) * layerRect.width + x - layerRect.x) * 4;
+      const a = layer[l + 3]! / 255;
+      if (a === 0) continue;
+      const d = ((y - rect.y) * rect.width + x - rect.x) * 4;
+      const under = (dst[d + 3]! / 255) * (1 - a);
+      const out = a + under;
+      for (let c = 0; c < 3; c++) dst[d + c] = Math.round((layer[l + c]! * a + dst[d + c]! * under) / out);
+      dst[d + 3] = Math.round(out * 255);
     }
   }
 }
@@ -250,14 +270,31 @@ export class CanvasDocument {
     return this.compose(rect, patchId, { rect: layerRect, layer }).data;
   }
 
-  /** Новая маска слоя (до растушёвки) размером с его rect: где 0, сквозь слой виден холст под ним */
-  setPatchMask(patchId: string, mask: Uint8Array): void {
+  /**
+   * Участок холста под слоем patchId (исходник и включённые слои ниже, RGB) и над ним (включённые слои выше, RGBA,
+   * прозрачно, где их нет) — чтобы браузер показывал правку маски сразу. Без слоя — весь холст под новым слоем сверху.
+   */
+  regionAround(rect: Rect, patchId: string | null): { below: Buffer; above: Buffer } {
+    const index = patchId === null ? this.patches.length : this.indexOf(patchId);
+    const below = this.compose(rect, undefined, undefined, index).data;
+    const above = Buffer.alloc(rect.width * rect.height * 4);
+    for (const p of this.patches.slice(index + 1)) {
+      if (p.active && intersect(p.rect, rect).width > 0) overLayer(above, rect, p.rect, p.layer);
+    }
+    return { below, above };
+  }
+
+  /**
+   * Новая маска слоя (до растушёвки) размером с его rect: где 0, сквозь слой виден холст под ним.
+   * changed — участок, вне которого маска не менялась: тогда растушёвка и холст пересчитываются только около него.
+   */
+  setPatchMask(patchId: string, mask: Uint8Array, changed?: Rect): void {
     const patch = this.patch(patchId);
     if (mask.length !== patch.rect.width * patch.rect.height) throw new Error('Маска не того размера');
     const before = { mask: patch.mask, version: patch.maskVersion };
     const after = { mask, version: ++this.maskVersions };
-    this.applyMask(patch, after);
-    this.record({ kind: 'mask', patchId, before, after });
+    this.applyMask(patch, after, changed);
+    this.record({ kind: 'mask', patchId, before, after, changed });
   }
 
   undo(): void {
@@ -273,7 +310,7 @@ export class CanvasDocument {
       this.patches[op.index] = op.before;
       this.recompute(union(op.before.rect, op.after.rect));
     } else if (op.kind === 'mask') {
-      this.applyMask(this.patch(op.patchId), op.before);
+      this.applyMask(this.patch(op.patchId), op.before, op.changed);
     } else {
       this.flip(op.patchId);
     }
@@ -293,7 +330,7 @@ export class CanvasDocument {
       this.patches[op.index] = op.after;
       this.recompute(union(op.before.rect, op.after.rect));
     } else if (op.kind === 'mask') {
-      this.applyMask(this.patch(op.patchId), op.after);
+      this.applyMask(this.patch(op.patchId), op.after, op.changed);
     } else {
       this.flip(op.patchId);
     }
@@ -365,24 +402,30 @@ export class CanvasDocument {
     this.recompute(patch.rect);
   }
 
-  /** Поставить маску слою: альфа слоя пересчитывается с растушёвкой, участок пересобирается */
-  private applyMask(patch: Patch, state: MaskState): void {
+  /** Поставить маску слою: альфа слоя пересчитывается с растушёвкой, участок пересобирается; changed — где маска менялась */
+  private applyMask(patch: Patch, state: MaskState, changed?: Rect): void {
     const { width, height } = patch.rect;
-    const alpha = featherAlpha(state.mask, width, height, patch.feather);
-    for (let i = 0; i < alpha.length; i++) patch.layer[i * 4 + 3] = Math.round(alpha[i]! * 255);
+    const { rect, alpha } = changed
+      ? featherAlphaRegion(state.mask, width, height, patch.feather, changed)
+      : { rect: { x: 0, y: 0, width, height }, alpha: featherAlpha(state.mask, width, height, patch.feather) };
+    for (let row = 0; row < rect.height; row++) {
+      for (let col = 0; col < rect.width; col++) {
+        patch.layer[((rect.y + row) * width + rect.x + col) * 4 + 3] = Math.round(alpha[row * rect.width + col]! * 255);
+      }
+    }
     patch.mask = state.mask;
     patch.maskVersion = state.version;
-    if (patch.active) this.recompute(patch.rect);
+    if (patch.active) this.recompute({ ...rect, x: patch.rect.x + rect.x, y: patch.rect.y + rect.y });
   }
 
-  /** Участок из исходника и включённых правок по порядку; слой skip пропускается, а на его место ложится swap */
-  private compose(rect: Rect, skip?: string, swap?: { rect: Rect; layer: Buffer }): RawRegion {
+  /** Участок из исходника и включённых правок по порядку (первые until); слой skip пропускается, а на его место ложится swap */
+  private compose(rect: Rect, skip?: string, swap?: { rect: Rect; layer: Buffer }, until = this.patches.length): RawRegion {
     const region = { data: Buffer.alloc(rect.width * rect.height * 3), rect, channels: 3 };
     for (let row = 0; row < rect.height; row++) {
       const from = ((rect.y + row) * this.width + rect.x) * 3;
       this.base.copy(region.data, row * rect.width * 3, from, from + rect.width * 3);
     }
-    for (const p of this.patches) {
+    for (const p of this.patches.slice(0, until)) {
       const layer = p.id === skip ? swap : p.active ? p : undefined;
       if (layer && intersect(layer.rect, rect).width > 0) applyLayer(region, layer.rect, layer.layer);
     }

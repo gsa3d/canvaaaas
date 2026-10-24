@@ -719,6 +719,7 @@ button.swap {
 }
 
 .job-prompt {
+  flex: 1;
   margin: 0;
   display: -webkit-box;
   -webkit-line-clamp: 3;
@@ -779,6 +780,51 @@ button.swap {
   margin-left: auto;
 }
 
+button.redo-toggle {
+  flex: none;
+  min-height: 0;
+  margin: -3px -4px 0 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+button.redo-toggle:hover:not(:disabled) {
+  color: var(--accent);
+}
+
+button.redo-toggle.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.variant-task {
+  font-size: 12px;
+}
+
+/* Повтор с поправкой: прежняя задача уже в поле, её остаётся поправить */
+.redo {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: default;
+}
+
+/* Флажок с подписью: у полей ширина 100%, у флажка — своя */
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.check input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 /* ——— Слои ——— */
 
 .layers {
@@ -791,7 +837,7 @@ button.swap {
 
 .layers li {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto auto;
+  grid-template-columns: auto 1fr auto auto auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 4px 2px;
@@ -800,6 +846,11 @@ button.swap {
 
 .layers li:last-child {
   border-bottom: none;
+}
+
+.layer-redo {
+  grid-column: 1 / -1;
+  padding: 2px 0 6px;
 }
 
 .layers li.editing {

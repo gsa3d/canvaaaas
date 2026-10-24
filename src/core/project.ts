@@ -43,6 +43,8 @@ interface Manifest {
     size?: SizeChoice;
     /** Номера в refs */
     refs?: number[];
+    /** Модель не видела, что было под маской */
+    hide?: boolean;
   }[];
   /** Референсы: картинка, которая ушла с несколькими правками, хранится один раз */
   refs?: { mimeType: string; data: Part }[];
@@ -112,6 +114,7 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
       model: p.model,
       size: p.size,
       refs: p.refs?.map(refIndex),
+      hide: p.hide || undefined,
     })),
   };
   manifest.refs = refs.map((r) => ({ mimeType: r.mimeType, data: part(r.data) }));
@@ -177,6 +180,7 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       model: l.model && MODELS.includes(l.model) ? l.model : undefined,
       size: l.size && SIZES.includes(l.size) ? l.size : undefined,
       refs: layerRefs,
+      hide: l.hide === true || undefined,
     };
   });
   const doc = CanvasDocument.restore(name, width, height, base!, patches);

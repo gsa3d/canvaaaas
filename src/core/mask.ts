@@ -89,6 +89,34 @@ export function featherAlpha(mask: Uint8Array, width: number, height: number, fe
   return alpha;
 }
 
+/**
+ * Растушёвка только там, куда достаёт изменение маски в участке changed: участок, где альфа могла измениться,
+ * и её значения в нём — побайтно как у featherAlpha по всей маске. Расстояние короче feather не выходит за
+ * участок, расширенный на feather, поэтому считать дальше незачем. Так мазок по большому слою пересчитывается за миллисекунды.
+ */
+export function featherAlphaRegion(mask: Uint8Array, width: number, height: number, feather: number, changed: Rect): { rect: Rect; alpha: Float32Array } {
+  const reach = feather > 0 ? Math.ceil(feather) + 1 : 0;
+  const grow = (r: Rect, by: number): Rect => {
+    const x = Math.max(0, r.x - by);
+    const y = Math.max(0, r.y - by);
+    return { x, y, width: Math.min(width, r.x + r.width + by) - x, height: Math.min(height, r.y + r.height + by) - y };
+  };
+  const rect = grow(changed, reach);
+  const box = grow(rect, reach);
+  const part = new Uint8Array(box.width * box.height);
+  for (let row = 0; row < box.height; row++) {
+    const from = (box.y + row) * width + box.x;
+    part.set(mask.subarray(from, from + box.width), row * box.width);
+  }
+  const boxAlpha = featherAlpha(part, box.width, box.height, feather);
+  const alpha = new Float32Array(rect.width * rect.height);
+  for (let row = 0; row < rect.height; row++) {
+    const from = (rect.y - box.y + row) * box.width + rect.x - box.x;
+    alpha.set(boxAlpha.subarray(from, from + rect.width), row * rect.width);
+  }
+  return { rect, alpha };
+}
+
 export interface HighlightStyle {
   color: [number, number, number];
   /** Непрозрачность заливки выделения */

@@ -8,7 +8,7 @@ import { blankOut, featherAlpha, highlight, insideDistance, maskBBox } from './m
 /**
  * Как показать модели, что менять:
  * pair — чистый кусок + тот же кусок с подсветкой; overlay — только кусок с подсветкой;
- * blank — кусок, где область правки залита серым.
+ * blank — кусок, где область правки залита серым: модель не видит, что там было, и рисует область заново.
  */
 export type Guide = 'pair' | 'overlay' | 'blank';
 
@@ -71,6 +71,11 @@ export interface PreparedEdit {
   scale: number;
   feather: number;
   warnings: string[];
+  /** Задача пользователя, стиль, показ области и референсы — из них собраны prompt и images */
+  request: string;
+  style?: string;
+  guide: Guide;
+  references: InputImage[];
   prompt: string;
   images: InputImage[];
   /** Исходный кусок в размере рамки, RGB — для вклейки и сравнения */
@@ -115,7 +120,8 @@ export function buildPrompt(guide: Guide, request: string, style?: string, refer
     pair: 'Image 1 is a crop of a larger illustration. Image 2 is the same crop with the area to edit tinted magenta and outlined. Apply the task to that area of image 1 and return the edited crop.',
     overlay:
       'The image is a crop of a larger illustration; the area to edit is tinted magenta and outlined. Apply the task to that area and return the edited crop with the magenta tint and outline completely gone.',
-    blank: 'The image is a crop of a larger illustration; the area to edit is painted flat gray. Apply the task there and return the crop with the gray area fully painted, no gray patch left.',
+    blank:
+      'The image is a crop of a larger illustration; the area to edit is painted flat gray, and what was there is hidden on purpose. Paint that area anew following the task and the surroundings, and return the crop with the gray area fully painted, no gray patch left.',
   };
   const lines = [
     'Edit this illustration. Carry out the task clearly and completely.',
@@ -254,11 +260,40 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
     const from = (overlap.y - maskRect.y + row) * maskRect.width + overlap.x - maskRect.x;
     insideMask.set(mask.subarray(from, from + overlap.width), (overlap.y - inside.y + row) * inside.width + overlap.x - inside.x);
   }
+  const alpha = featherAlpha(insideMask, inside.width, inside.height, feather);
+  const references = opts.references ?? [];
+  const images = await guideImages(frameRgb, insideMask, frame, modelSize, guide);
+
+  return {
+    provider,
+    canvas,
+    channels,
+    bbox,
+    frame,
+    imageSize,
+    modelSize,
+    scale,
+    feather,
+    warnings,
+    request: opts.prompt,
+    style: opts.style,
+    guide,
+    references,
+    prompt: buildPrompt(guide, opts.prompt, opts.style, references.length),
+    images: [...images, ...references],
+    frameRgb,
+    insideMask,
+    alpha,
+    baseRaw,
+    lock: { chain: Promise.resolve() },
+  };
+}
+
+/** То, что увидит модель: кусок и маска в размере её ответа, показанные по guide */
+async function guideImages(frameRgb: Buffer, insideMask: Uint8Array, frame: Frame, modelSize: Size, guide: Guide): Promise<InputImage[]> {
+  const { rect, inside } = frame;
   const frameMask = Buffer.alloc(rect.width * rect.height);
   pasteRect(frameMask, rect.width, { ...inside, x: inside.x - rect.x, y: inside.y - rect.y }, 1, Buffer.from(insideMask));
-  const alpha = featherAlpha(insideMask, inside.width, inside.height, feather);
-
-  // То, что увидит модель: кусок и маска в размере её ответа
   const { width: mw, height: mh } = modelSize;
   const modelRgb = new Uint8Array(
     await sharp(frameRgb, { raw: { width: rect.width, height: rect.height, channels: 3 } })
@@ -277,32 +312,20 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
     data: await sharp(rgb, { raw: { width: mw, height: mh, channels: 3 } }).jpeg({ quality: 92 }).toBuffer(),
     mimeType: 'image/jpeg',
   });
-  const images: InputImage[] =
-    guide === 'pair'
-      ? [await jpeg(modelRgb), await jpeg(highlight(modelRgb, modelMask, mw, mh))]
-      : guide === 'overlay'
-        ? [await jpeg(highlight(modelRgb, modelMask, mw, mh))]
-        : [await jpeg(blankOut(modelRgb, modelMask, mw, mh))];
+  return guide === 'pair'
+    ? [await jpeg(modelRgb), await jpeg(highlight(modelRgb, modelMask, mw, mh))]
+    : guide === 'overlay'
+      ? [await jpeg(highlight(modelRgb, modelMask, mw, mh))]
+      : [await jpeg(blankOut(modelRgb, modelMask, mw, mh))];
+}
 
-  return {
-    provider,
-    canvas,
-    channels,
-    bbox,
-    frame,
-    imageSize,
-    modelSize,
-    scale,
-    feather,
-    warnings,
-    prompt: buildPrompt(guide, opts.prompt, opts.style, opts.references?.length ?? 0),
-    images: [...images, ...(opts.references ?? [])],
-    frameRgb,
-    insideMask,
-    alpha,
-    baseRaw,
-    lock: { chain: Promise.resolve() },
-  };
+/**
+ * Та же правка с другой задачей или другим показом области (например, со стёртым под маской): кусок, маска
+ * и разрешение прежние, заново собираются только промпт и картинки для модели.
+ */
+export async function retarget(prep: PreparedEdit, change: { request: string; guide: Guide }): Promise<Pick<PreparedEdit, 'request' | 'guide' | 'prompt' | 'images'>> {
+  const images = change.guide === prep.guide ? prep.images : [...(await guideImages(prep.frameRgb, prep.insideMask, prep.frame, prep.modelSize, change.guide)), ...prep.references];
+  return { ...change, prompt: buildPrompt(change.guide, change.request, prep.style, prep.references.length), images };
 }
 
 // Насколько ответ модели отличается от исходного куска там, где менять было нельзя

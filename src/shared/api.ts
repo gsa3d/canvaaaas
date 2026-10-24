@@ -59,11 +59,17 @@ export interface VariantDto {
   insideChangedPct?: number;
   /** Не новая генерация, а слой, который сейчас лежит на холсте */
   current?: boolean;
+  /** С какой задачей и показом области сделан вариант: после повтора с поправкой они у вариантов разные */
+  prompt: string;
+  hide: boolean;
 }
 
 export interface JobDto {
   id: string;
+  /** Задача, с которой пойдут следующие варианты */
   prompt: string;
+  /** Модель не видит, что под маской: область ей стирают */
+  hide: boolean;
   model: ModelChoice;
   status: 'queued' | 'preparing' | 'running' | 'done' | 'error';
   error?: string;
@@ -80,6 +86,10 @@ export interface JobDto {
   selected: number;
   /** Растёт при любой перевклейке: по нему браузер перезапрашивает слой и маску */
   rev: number;
+  /** Растёт только при правке маски: по нему браузер узнаёт, что маску поменяли не его мазки */
+  maskRev: number;
+  /** Растушёвка внутрь маски, пиксели холста */
+  feather?: number;
   canUndoMask: boolean;
   /** Ещё варианты принятого слоя: «Принять» заменит этот слой */
   replaces?: string;
@@ -95,6 +105,10 @@ export interface PatchDto {
   maskRev: number;
   /** Модель, которой сделан слой: ею же идут «Ещё варианты» */
   model?: ModelChoice;
+  /** Растушёвка внутрь маски, пиксели холста */
+  feather: number;
+  /** Модель не видела, что было под маской */
+  hide?: boolean;
 }
 
 /** Какие ответы умеет модель — чтобы подсказать про разрешение ещё до генерации */
@@ -133,13 +147,32 @@ export interface CreateJobRequest {
   size: SizeChoice;
   /** Картинки-референсы, загруженные через /api/refs (не больше MAX_REFERENCES) */
   refs?: string[];
+  /** Стереть модели то, что под маской: пусть рисует область заново, а не правит увиденное */
+  hide?: boolean;
+}
+
+/** Повтор правки с поправкой: другая задача или другой показ области; чего нет — остаётся как было */
+export interface RedoChange {
+  prompt?: string;
+  hide?: boolean;
 }
 
 /** «Ещё варианты» принятого слоя: задача, маска и референсы — слоя, модель и разрешение — слоя, если он их помнит */
-export interface PatchVariantsRequest {
+export interface PatchVariantsRequest extends RedoChange {
   variants: number;
   model: ModelChoice;
   size: SizeChoice;
+}
+
+/** «Ещё варианты» задачи в очереди, можно с поправкой */
+export interface MoreVariantsRequest extends RedoChange {
+  count: number;
+}
+
+/** Ответ на мазок по маске: номер её нового состояния и rev того, что теперь надо перерисовать (холста или задачи) */
+export interface MaskEditResult {
+  version: number;
+  rev: number;
 }
 
 export const MAX_REFERENCES = 3;

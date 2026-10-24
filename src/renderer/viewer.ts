@@ -1,25 +1,25 @@
 // Просмотр холста: OpenSeadragon тянет тайлы с сервера, поверх — канвас размером с экран
-// для выделения, контуров задач и курсора кисти. Фигуры хранятся в координатах холста,
-// поэтому большой canvas в браузере не нужен ни для какой операции.
+// для выделения, контуров задач, курсора кисти и превью правки маски (mask-edit.ts). Фигуры хранятся
+// в координатах холста, поэтому большой canvas в браузере не нужен ни для какой операции.
 import OpenSeadragon from 'openseadragon';
-import type { DocDto, JobDto, MaskShape, RectDto } from '../shared/api.ts';
+import type { DocDto, JobDto, MaskEditResult, MaskShape, RectDto } from '../shared/api.ts';
+import { MaskPreview, type MaskEditView } from './mask-edit.ts';
 
 export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser';
 
 const ACCENT = '#2F5BEA';
 const ERROR = '#C8431A';
 
-/** Маска принятого слоя, которую сейчас правят */
-export interface LayerMaskView {
-  id: string;
-  /** Меняется вместе с маской: по нему перезапрашивается картинка */
-  key: string;
-  url: string;
-  rect: RectDto;
-}
+export type { MaskEditView };
+
+/** Превью правки, которую уже закончили, держится не дольше этого, даже если холст так и не догнал мазки */
+const SETTLE_TIMEOUT = 5000;
 
 export interface ViewerHooks {
+  /** Фигура выделения */
   onShape(shape: MaskShape): void;
+  /** Мазок по маске слоя или задачи: отправить на сервер */
+  onMaskShape(view: MaskEditView, shape: MaskShape): Promise<MaskEditResult>;
   onZoom(percent: number): void;
 }
 
@@ -29,6 +29,8 @@ interface Draft {
   erase: boolean;
   size: number;
   softness: number;
+  /** Мазок сразу виден в превью маски — черновик поверх рисовать не нужно */
+  live?: boolean;
 }
 
 interface Layer {
@@ -88,10 +90,10 @@ export class CanvasView {
   private jobs: JobDto[] = [];
   private numbers = new Map<string, number>();
   private focused: string | null = null;
-  private maskJob: string | null = null;
-  private layerMask: LayerMaskView | null = null;
-  /** Фигуры, ушедшие в маску: видны, пока не пришла обновлённая маска */
-  private pending: MaskShape[] = [];
+  /** Правка маски слоя или задачи: участок показывает превью, кисть меняет его сразу */
+  private edit: MaskPreview | null = null;
+  /** Законченная правка: её превью видно, пока холст или слой задачи не догонят последние мазки */
+  private closing: { preview: MaskPreview; until: number } | null = null;
   private draft: Draft | null = null;
   private cursor: { x: number; y: number } | null = null;
   private frame = 0;
@@ -124,8 +126,9 @@ export class CanvasView {
       this.move(e.position);
     });
     this.viewer.addHandler('canvas-release', () => this.release());
-    this.viewer.addHandler('animation', () => this.redraw());
-    this.viewer.addHandler('update-viewport', () => this.redraw());
+    // При движении картинки поверх рисуем в том же кадре, что и тайлы: превью маски непрозрачно и иначе отставало бы от них
+    this.viewer.addHandler('animation', () => this.drawNow());
+    this.viewer.addHandler('update-viewport', () => this.drawNow());
     this.viewer.addHandler('animation', () => this.reportZoom());
     this.viewer.addHandler('animation-finish', () => this.reportZoom());
     this.viewer.addHandler('open', () => {
@@ -205,6 +208,8 @@ export class CanvasView {
   }
 
   private reset(): void {
+    this.closing?.preview.dispose();
+    this.closing = null;
     this.base = null;
     this.baseItems.clear();
     this.baseCount = 0;
@@ -244,35 +249,57 @@ export class CanvasView {
     };
   }
 
-  setJobs(jobs: JobDto[], numbers: Map<string, number>, focused: string | null, maskJob: string | null): void {
+  setJobs(jobs: JobDto[], numbers: Map<string, number>, focused: string | null): void {
     this.jobs = jobs;
     this.numbers = numbers;
     this.focused = focused;
-    if (maskJob !== this.maskJob) this.pending = [];
-    this.maskJob = maskJob;
     this.syncLayers();
   }
 
-  setLayerMask(mask: LayerMaskView | null): void {
-    if (mask?.id !== this.layerMask?.id) this.pending = [];
-    this.layerMask = mask;
-    this.syncLayers();
-  }
-
-  /** Мазок не дошёл до сервера — больше не показываем его */
-  clearPending(): void {
-    this.pending = [];
+  /** Правка маски слоя или задачи; null — правку закончили */
+  setMaskEdit(view: MaskEditView | null): void {
+    const key = view && `${view.kind}:${view.target}`;
+    if (view && this.edit?.key === key) {
+      this.edit.update(view);
+      return;
+    }
+    if (this.edit) {
+      this.closing?.preview.dispose();
+      this.closing = null;
+      if (this.edit.ready) {
+        this.closing = { preview: this.edit, until: Date.now() + SETTLE_TIMEOUT };
+        setTimeout(() => this.redraw(), SETTLE_TIMEOUT + 50);
+      } else {
+        this.edit.dispose();
+      }
+    }
+    this.edit = view ? new MaskPreview(view, () => this.redraw()) : null;
     this.redraw();
   }
 
-  private maskMode(): boolean {
-    return this.maskJob !== null || this.layerMask !== null;
+  /** Маску правимого слоя или задачи поменяли не мазки (отмена, «Расширить по правке»): превью перезапросит её */
+  maskChanged(): void {
+    this.edit?.markStale();
   }
 
-  // Слои поверх холста: варианты задач, маска правимой задачи или правимого слоя
+  private maskMode(): boolean {
+    return this.edit !== null;
+  }
+
+  /** Холст или слой задачи уже показывают всё, что нарисовали в законченной правке */
+  private settled(preview: MaskPreview): boolean {
+    if (preview.inflight > 0) return false;
+    const { kind, target } = preview.view;
+    if (kind === 'layer') return this.pendingRev === null && (this.doc?.rev ?? 0) >= preview.settleRev;
+    const job = this.jobs.find((j) => j.id === target);
+    if (!job || job.status !== 'done') return true;
+    const layer = this.layers.get(target);
+    return job.rev >= preview.settleRev && !!layer?.item && layer.key === `${job.selected}:${job.rev}`;
+  }
+
+  // Слои поверх холста: варианты задач
   private syncLayers(): void {
     const jobs = this.jobs;
-    const maskJob = this.maskJob;
     const swapPending = this.pendingRev !== null;
 
     const wanted = new Map<string, { key: string; url: string; rect: RectDto }>();
@@ -283,11 +310,7 @@ export class CanvasView {
         url: `/api/jobs/${job.id}/layer/${job.selected}.png?rev=${job.rev}`,
         rect: job.inside,
       });
-      if (job.id === maskJob) {
-        wanted.set(`${job.id}:mask`, { key: String(job.rev), url: `/api/jobs/${job.id}/mask.png?rev=${job.rev}`, rect: job.inside });
-      }
     }
-    if (this.layerMask) wanted.set('layer:mask', this.layerMask);
     for (const [id, layer] of this.layers) {
       if (wanted.has(id)) continue;
       this.layers.delete(id);
@@ -315,22 +338,11 @@ export class CanvasView {
           }
           next.item = item;
           if (layer?.item) this.viewer.world.removeItem(layer.item);
-          if (id.endsWith(':mask')) this.pending = [];
-          this.raiseMasks();
           this.redraw();
         },
       });
     }
     this.redraw();
-  }
-
-  // Маска задачи всегда поверх её слоя
-  private raiseMasks(): void {
-    for (const [id, layer] of this.layers) {
-      if (id.endsWith(':mask') && layer.item) {
-        this.viewer.world.setItemIndex(layer.item, this.viewer.world.getItemCount() - 1);
-      }
-    }
   }
 
   setSelection(shapes: MaskShape[]): void {
@@ -415,13 +427,15 @@ export class CanvasView {
     if (tool === 'hand') return;
     const p = this.toImage(position);
     if (!p) return;
-    this.draft = {
+    const draft: Draft = {
       kind: tool === 'rect' ? 'rect' : tool === 'lasso' ? 'lasso' : 'stroke',
       points: [p],
       erase: tool === 'eraser' || original.altKey,
       size: round(this.brushPx / this.scale()),
       softness: this.maskMode() ? this.softness : 0,
     };
+    if (draft.kind === 'stroke' && this.edit) draft.live = this.edit.begin(p, draft.size, draft.softness, draft.erase);
+    this.draft = draft;
     this.redraw();
   }
 
@@ -434,7 +448,10 @@ export class CanvasView {
     } else {
       const last = draft.points[draft.points.length - 1]!;
       const minStep = 2 / this.scale();
-      if (Math.hypot(p[0] - last[0], p[1] - last[1]) >= minStep) draft.points.push(p);
+      if (Math.hypot(p[0] - last[0], p[1] - last[1]) >= minStep) {
+        draft.points.push(p);
+        if (draft.live) this.edit?.extend(p);
+      }
     }
     this.redraw();
   }
@@ -459,9 +476,17 @@ export class CanvasView {
       const softness = draft.softness || undefined;
       shape = { kind: 'stroke', points: pts.length > 1 ? pts : [first, [first[0] + 0.1, first[1]]], size: draft.size, softness, erase };
     }
-    if (shape && this.maskMode()) this.pending.push(shape);
+    const edit = this.edit;
+    if (draft.live) edit?.end();
     this.redraw();
-    if (shape) this.hooks.onShape(shape);
+    if (!shape) return;
+    if (!edit) {
+      this.hooks.onShape(shape);
+      return;
+    }
+    const applied = draft.live || edit.fill(shape);
+    const view = edit.view;
+    edit.send(shape, applied, (s) => this.hooks.onMaskShape(view, s));
   }
 
   private reportZoom(): void {
@@ -489,6 +514,12 @@ export class CanvasView {
     });
   }
 
+  private drawNow(): void {
+    if (this.frame) cancelAnimationFrame(this.frame);
+    this.frame = 0;
+    this.draw();
+  }
+
   private draw(): void {
     const ctx = this.overlay.getContext('2d')!;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -498,15 +529,54 @@ export class CanvasView {
     const o = this.base.imageToViewerElementCoordinates(new OpenSeadragon.Point(0, 0));
     const s = this.scale();
     const toImage = (c: CanvasRenderingContext2D) => c.setTransform(dpr * s, 0, 0, dpr * s, dpr * o.x, dpr * o.y);
+    const f = this.fill.getContext('2d')!;
+    const e = this.edge.getContext('2d')!;
+    // Контур снаружи заливки: она же, сдвинутая на 1,5 px в четыре стороны, минус сама заливка
+    const outline = () => {
+      e.setTransform(1, 0, 0, 1, 0, 0);
+      e.globalCompositeOperation = 'source-over';
+      e.clearRect(0, 0, this.edge.width, this.edge.height);
+      const d = 1.5 * dpr;
+      for (const [dx, dy] of [[d, 0], [-d, 0], [0, d], [0, -d]] as const) e.drawImage(this.fill, dx, dy);
+      e.globalCompositeOperation = 'destination-out';
+      e.drawImage(this.fill, 0, 0);
+      e.globalCompositeOperation = 'source-over';
+    };
+
+    // Правка маски: участок таким, каким он станет, и контур маски вместо заливки — её не путать с самой картинкой
+    if (this.closing && (this.settled(this.closing.preview) || Date.now() > this.closing.until)) {
+      this.closing.preview.dispose();
+      this.closing = null;
+    }
+    const preview = this.edit?.ready ? this.edit : this.closing?.preview;
+    if (preview) {
+      toImage(ctx);
+      preview.draw(ctx);
+    }
+    if (preview && preview === this.edit) {
+      const { x, y, width, height } = preview.view.rect;
+      f.setTransform(1, 0, 0, 1, 0, 0);
+      f.globalCompositeOperation = 'source-over';
+      f.clearRect(0, 0, this.fill.width, this.fill.height);
+      toImage(f);
+      f.drawImage(preview.outline, x, y, width, height);
+      f.setTransform(1, 0, 0, 1, 0, 0);
+      f.globalCompositeOperation = 'source-in';
+      f.fillStyle = ACCENT;
+      f.fillRect(0, 0, this.fill.width, this.fill.height);
+      f.globalCompositeOperation = 'source-over';
+      outline();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(this.edge, 0, 0);
+    }
 
     // Выделение: объединение фигур с вычитанием ластика — на отдельном канвасе, затем заливка и контур.
-    // Пока правится маска, выделение не показываем, чтобы не путать одно с другим: видны только мазки по маске,
-    // и стирающие — красным, иначе ластик на пустом канвасе не оставлял бы следа
+    // Пока правится маска, выделение не показываем, чтобы не путать одно с другим. Мазок по маске виден сразу
+    // в превью; черновик — только у прямоугольника и лассо (и пока превью грузится), стирающий — красным
     const maskMode = this.maskMode();
-    const shapes: (MaskShape | Draft)[] = maskMode ? [...this.pending] : [...this.selection];
-    if (this.draft) shapes.push(this.draft);
+    const shapes: (MaskShape | Draft)[] = maskMode ? [] : [...this.selection];
+    if (this.draft && !this.draft.live) shapes.push(this.draft);
     if (shapes.length) {
-      const f = this.fill.getContext('2d')!;
       f.setTransform(1, 0, 0, 1, 0, 0);
       f.clearRect(0, 0, this.fill.width, this.fill.height);
       toImage(f);
@@ -530,15 +600,8 @@ export class CanvasView {
         }
       }
       f.globalCompositeOperation = 'source-over';
-      // Контур: копия заливки минус она же, сдвинутая на 1,5 px в четыре стороны
-      const e = this.edge.getContext('2d')!;
-      e.setTransform(1, 0, 0, 1, 0, 0);
-      e.globalCompositeOperation = 'source-over';
-      e.clearRect(0, 0, this.edge.width, this.edge.height);
-      e.drawImage(this.fill, 0, 0);
-      e.globalCompositeOperation = 'destination-out';
-      const d = 1.5 * dpr;
-      for (const [dx, dy] of [[d, 0], [-d, 0], [0, d], [0, -d]] as const) e.drawImage(this.fill, dx, dy);
+      outline();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalAlpha = maskMode ? 0.4 : 0.32;
       ctx.drawImage(this.fill, 0, 0);
       ctx.globalAlpha = 1;
@@ -568,7 +631,7 @@ export class CanvasView {
       const color = job.status === 'error' ? ERROR : ACCENT;
       frame(r, `#${this.numbers.get(job.id) ?? '?'}`, color, job.id === this.focused ? 2 : 1, job.status === 'done' ? [] : [6, 4]);
     }
-    if (this.layerMask) frame(this.layerMask.rect, 'Маска слоя', ACCENT, 2, [6, 4]);
+    if (this.edit?.view.kind === 'layer') frame(this.edit.view.rect, 'Маска слоя', ACCENT, 2, [6, 4]);
 
     // Курсор кисти; у мягкой кисти пунктиром — где кончается сплошная середина
     const tool = this.activeTool();

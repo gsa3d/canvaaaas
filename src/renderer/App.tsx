@@ -14,6 +14,7 @@ import {
   IconMarquee2,
   IconMask,
   IconMinus,
+  IconPencil,
   IconPhotoPlus,
   IconPlus,
   IconRefresh,
@@ -32,16 +33,18 @@ import {
   type AppCommand,
   type DocDto,
   type JobDto,
+  type MaskEditResult,
   type MaskShape,
   type ModelChoice,
   type ModelOutputsDto,
   type PatchDto,
   type RecentDto,
+  type RedoChange,
   type SizeChoice,
   type StateDto,
 } from '../shared/api.ts';
 import { getState, post, subscribe, upload, uploadReference } from './api.ts';
-import { CanvasView, type Tool } from './viewer.ts';
+import { CanvasView, type MaskEditView, type Tool } from './viewer.ts';
 
 function plural(n: number, one: string, few: string, many: string): string {
   const d = n % 10;
@@ -68,6 +71,46 @@ function short(text: string, max = 32): string {
 function clock(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** Короткий отпечаток строки — для адреса картинки, которая меняется вместе с ней */
+function hash(text: string): string {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+/** Что браузеру нужно для живого превью правки маски слоя */
+function layerMaskEdit(layer: PatchDto, layers: PatchDto[]): MaskEditView {
+  // Холст под слоем и над ним меняется, только когда меняются другие слои
+  const context = hash(layers.map((p) => (p.id === layer.id ? '*' : `${p.id}:${p.maskRev}:${p.active ? 1 : 0}`)).join(','));
+  const base = `/api/history/${layer.id}/edit`;
+  return {
+    kind: 'layer',
+    target: layer.id,
+    rect: layer.rect,
+    feather: layer.feather,
+    below: `${base}/below.jpg?c=${context}`,
+    above: `${base}/above.png?c=${context}`,
+    layer: `${base}/layer.jpg`,
+    mask: `${base}/mask.png`,
+  };
+}
+
+/** То же для задачи: под ней весь холст, слой — выбранный вариант */
+function jobMaskEdit(job: JobDto, doc: DocDto): MaskEditView | null {
+  if (!job.inside) return null;
+  const base = `/api/jobs/${job.id}/edit`;
+  return {
+    kind: 'job',
+    target: job.id,
+    rect: job.inside,
+    feather: job.feather ?? 0,
+    below: `${base}/below.jpg?rev=${doc.rev}`,
+    above: `${base}/above.png?rev=${doc.rev}`,
+    layer: `${base}/layer.jpg?n=${job.selected}`,
+    mask: `${base}/mask.png`,
+  };
 }
 
 function modelOutputs(dto: ModelOutputsDto): ModelOutputs {
@@ -138,6 +181,8 @@ export function App() {
   const [softness, setSoftness] = useState(0.5);
   const [selection, setSelection] = useState<MaskShape[]>([]);
   const [prompt, setPrompt] = useState('');
+  /** Стереть модели то, что под выделением */
+  const [hide, setHide] = useState(false);
   const [model, setModel] = useState<ModelChoice>('flash');
   const [size, setSize] = useState<SizeChoice>('auto');
   const [variants, setVariants] = useState(2);
@@ -162,6 +207,7 @@ export function App() {
   const nextNumber = useRef(1);
   const refreshSeq = useRef(0);
   const onShape = useRef<(shape: MaskShape) => void>(() => undefined);
+  const onMaskShape = useRef<(view: MaskEditView, shape: MaskShape) => Promise<MaskEditResult>>(() => Promise.reject(new Error('Нет правки маски')));
   const styleTimer = useRef<number | undefined>(undefined);
   const toastTimer = useRef<number | undefined>(undefined);
 
@@ -169,6 +215,8 @@ export function App() {
   const jobs = state?.jobs ?? [];
   const layers = state?.history ?? [];
   const editedLayer = layers.find((p) => p.id === maskLayer && p.active) ?? null;
+  const editedJob = jobs.find((j) => j.id === maskJob && j.status === 'done') ?? null;
+  const maskEdit = editedLayer ? layerMaskEdit(editedLayer, layers) : editedJob && doc ? jobMaskEdit(editedJob, doc) : null;
 
   const notify = (text: string, error = true) => {
     setToast({ text, error });
@@ -189,6 +237,7 @@ export function App() {
   useEffect(() => {
     viewRef.current = new CanvasView(stageRef.current!, {
       onShape: (shape) => onShape.current(shape),
+      onMaskShape: (view, shape) => onMaskShape.current(view, shape),
       onZoom: setZoom,
     });
     refresh();
@@ -211,21 +260,15 @@ export function App() {
     setMaskLayer(null);
   }, [doc?.id]);
   useEffect(() => {
-    if (maskJob && !jobs.some((j) => j.id === maskJob && j.status === 'done')) setMaskJob(null);
-    viewRef.current?.setJobs(jobs, numbers.current, focusJob, maskJob);
+    if (maskJob && !editedJob) setMaskJob(null);
+    viewRef.current?.setJobs(jobs, numbers.current, focusJob);
   }, [state?.jobs, focusJob, maskJob]);
   // Скрытый или отменённый слой маску больше не правит
   useEffect(() => {
     if (maskLayer && !editedLayer) setMaskLayer(null);
-    viewRef.current?.setLayerMask(
-      editedLayer && {
-        id: editedLayer.id,
-        key: `${editedLayer.id}:${editedLayer.maskRev}`,
-        url: `/api/history/${editedLayer.id}/mask.png?v=${editedLayer.maskRev}`,
-        rect: editedLayer.rect,
-      },
-    );
-  }, [maskLayer, editedLayer?.id, editedLayer?.maskRev]);
+  }, [maskLayer, editedLayer?.id]);
+  const maskEditKey = JSON.stringify(maskEdit);
+  useEffect(() => viewRef.current?.setMaskEdit(maskEdit), [maskEditKey]);
   useEffect(() => viewRef.current?.setSelection(selection), [selection]);
   useEffect(() => viewRef.current?.setTool(tool), [tool]);
   useEffect(() => viewRef.current?.setBrush(brush, softness), [brush, softness]);
@@ -237,15 +280,16 @@ export function App() {
     return () => window.clearInterval(t);
   }, [anyRunning]);
 
-  const maskFail = (err: unknown) => {
-    viewRef.current?.clearPending();
-    fail(err);
-  };
-  onShape.current = (shape) => {
-    if (maskJob) post(`/api/jobs/${maskJob}/mask`, { shapes: [shape] }).catch(maskFail);
-    else if (maskLayer) post(`/api/history/${maskLayer}/mask`, { shapes: [shape] }).catch(maskFail);
-    else setSelection((s) => [...s, shape]);
-  };
+  onShape.current = (shape) => setSelection((s) => [...s, shape]);
+  onMaskShape.current = (view, shape) =>
+    post<MaskEditResult>(view.kind === 'job' ? `/api/jobs/${view.target}/mask` : `/api/history/${view.target}/mask`, { shapes: [shape] }).catch(
+      (err: unknown) => {
+        fail(err);
+        throw err;
+      },
+    );
+  /** Маску правимого слоя или задачи поменяли не мазки — превью перезапросит её */
+  const maskChanged = () => viewRef.current?.maskChanged();
 
   const hasSelection = selection.some((s) => !s.erase);
   const canGenerate = !!doc && hasSelection && prompt.trim().length > 0 && !maskJob && !maskLayer;
@@ -260,8 +304,12 @@ export function App() {
       return;
     }
     try {
-      const { id } = await post<{ id: string }>('/api/jobs', { shapes: selection, prompt, variants, model, size: sizeFor(model), refs });
+      const { id } = await post<{ id: string }>('/api/jobs', { shapes: selection, prompt, variants, model, size: sizeFor(model), refs, hide });
+      // Форма — для следующей области: задача, референсы и скрытие у неё свои; модель, разрешение и число вариантов остаются
       setSelection([]);
+      setPrompt('');
+      setRefs([]);
+      setHide(false);
       setFocusJob(id);
     } catch (err) {
       fail(err);
@@ -270,12 +318,12 @@ export function App() {
 
   // Правки маски слоя — обычные шаги истории документа, поэтому в режиме маски слоя ⌘Z отменяет их
   const undo = () => {
-    if (maskJob) post(`/api/jobs/${maskJob}/mask/undo`).catch(fail);
+    if (maskJob) post(`/api/jobs/${maskJob}/mask/undo`).then(maskChanged, fail);
     else if (selection.length && !maskLayer) setSelection((s) => s.slice(0, -1));
-    else if (state?.canUndo) post('/api/history/undo').catch(fail);
+    else if (state?.canUndo) post('/api/history/undo').then(maskChanged, fail);
   };
   const redo = () => {
-    if (state?.canRedo) post('/api/history/redo').catch(fail);
+    if (state?.canRedo) post('/api/history/redo').then(maskChanged, fail);
   };
 
   // Без окон выбора файла (интерфейс в браузере для разработки) «Сохранить как» — скачивание:
@@ -526,8 +574,12 @@ export function App() {
     if (r) viewRef.current?.showRect(r);
   };
 
-  // Ещё варианты принятого слоя: если они уже в очереди — туда же, а не второй задачей на тот же слой
-  const layerVariants = async (patch: PatchDto) => {
+  /** Ещё варианты задачи в очереди, можно с поправкой; с ошибкой до подготовки куска — начать её заново */
+  const redoJob = (job: JobDto, change: RedoChange = {}) =>
+    job.inside ? post(`/api/jobs/${job.id}/more`, { count: variants, ...change }) : post(`/api/jobs/${job.id}/retry`, change);
+
+  // Ещё варианты принятого слоя, можно с поправкой: если они уже в очереди — туда же, а не второй задачей на тот же слой
+  const layerVariants = async (patch: PatchDto, change: RedoChange = {}) => {
     if (needsKey(patch.model ?? model) && !state?.hasKey) {
       setDialog('settings');
       return;
@@ -536,11 +588,12 @@ export function App() {
     try {
       if (open) {
         focus(open);
-        if (open.status === 'done' || open.status === 'error') await post(`/api/jobs/${open.id}/more`, { count: variants });
+        const idle = (open.status === 'done' || open.status === 'error') && !open.variants.some((v) => v.status === 'running');
+        if (idle) await redoJob(open, change);
         else notify('Варианты этого слоя уже генерируются', false);
         return;
       }
-      const { id } = await post<{ id: string }>(`/api/history/${patch.id}/variants`, { variants, model, size: sizeFor(model) });
+      const { id } = await post<{ id: string }>(`/api/history/${patch.id}/variants`, { variants, model, size: sizeFor(model), ...change });
       setFocusJob(id);
       viewRef.current?.showRect(patch.rect);
     } catch (err) {
@@ -748,6 +801,7 @@ export function App() {
                 value={prompt}
                 onInput={(e) => setPrompt(e.currentTarget.value)}
               />
+              <HideOption checked={hide} onChange={setHide} />
               <div class="refs">
                 {refs.map((id) => (
                   <figure class="ref">
@@ -819,6 +873,7 @@ export function App() {
                   number={numbers.current.get(job.id) ?? 0}
                   focused={job.id === focusJob}
                   maskMode={job.id === maskJob}
+                  variants={variants}
                   onFocus={() => focus(job)}
                   onSwitch={(dir) => switchVariant(job, dir)}
                   onMaskMode={() => {
@@ -827,10 +882,15 @@ export function App() {
                     setFocusJob(job.id);
                     if (tool === 'hand') setTool('brush');
                   }}
+                  onRedo={(change) => {
+                    if (needsKey(job.model) && !state?.hasKey) setDialog('settings');
+                    else redoJob(job, change).catch(fail);
+                  }}
                   onAction={(action) => {
                     if (action === 'expand') {
                       post<{ addedPx: number }>(`/api/jobs/${job.id}/mask/expand`)
                         .then(({ addedPx }) => {
+                          if (addedPx) maskChanged();
                           const area = job.inside ? job.inside.width * job.inside.height : 1;
                           notify(
                             addedPx
@@ -844,7 +904,9 @@ export function App() {
                     }
                     const path = { accept: 'accept', discard: 'discard', retry: 'retry', more: 'more', undoMask: 'mask/undo' }[action];
                     if (action === 'accept' || action === 'discard') setMaskJob(null);
-                    post(`/api/jobs/${job.id}/${path}`, action === 'more' ? { count: variants } : undefined).catch(fail);
+                    post(`/api/jobs/${job.id}/${path}`, action === 'more' ? { count: variants } : undefined)
+                      .then(() => action === 'undoMask' && maskChanged())
+                      .catch(fail);
                   }}
                 />
               ))}
@@ -854,8 +916,8 @@ export function App() {
               <h2>Слои</h2>
               {!layers.length && (
                 <p class="hint">
-                  Принятые правки ложатся слоями поверх исходника. Глаз скрывает слой, маска стирает его часть или возвращает обратно, а
-                  стрелки по кругу генерируют ещё варианты той же правки.
+                  Принятые правки ложатся слоями поверх исходника. Глаз скрывает слой, маска стирает его часть или возвращает обратно,
+                  стрелки по кругу генерируют ещё варианты той же правки, а карандаш — с поправленной задачей.
                 </p>
               )}
               <ol class="layers">
@@ -868,7 +930,7 @@ export function App() {
                     onToggle={() => post(`/api/history/${p.id}/toggle`).catch(fail)}
                     onShow={() => viewRef.current?.showRect(p.rect)}
                     onMask={() => editLayerMask(p)}
-                    onVariants={() => void layerVariants(p)}
+                    onVariants={(change) => void layerVariants(p, change)}
                     onDelete={() => deleteLayer(p)}
                   />
                 ))}
@@ -945,25 +1007,63 @@ function JobCard(props: {
   number: number;
   focused: boolean;
   maskMode: boolean;
+  /** Сколько вариантов сгенерировать */
+  variants: number;
   onFocus: () => void;
   onSwitch: (dir: number) => void;
   onMaskMode: () => void;
   onAction: (action: JobAction) => void;
+  onRedo: (change: RedoChange) => void;
 }) {
   const { job } = props;
+  const [redoing, setRedoing] = useState(false);
   const done = job.variants.filter((v) => v.status === 'done');
   const running = job.variants.filter((v) => v.status === 'running').length;
   const selected = job.variants[job.selected];
   const index = done.findIndex((v) => v.n === job.selected);
   const busy = job.status === 'queued' || job.status === 'preparing' || job.status === 'running';
   const replacing = props.replacing;
+  // Вариант сделан не с той задачей, что сейчас в карточке: после повтора с поправкой
+  const otherTask = selected && (selected.prompt !== job.prompt || selected.hide !== job.hide) ? selected : null;
+  // Поправить задачу можно, когда новых вариантов не ждём
+  const canRedo = (job.status === 'done' && running === 0) || job.status === 'error';
+  useEffect(() => {
+    if (!canRedo) setRedoing(false);
+  }, [canRedo]);
+  const redoForm = redoing && canRedo && (
+    <RedoForm
+      prompt={job.prompt}
+      hide={job.hide}
+      variants={props.variants}
+      onCancel={() => setRedoing(false)}
+      onSubmit={(change) => {
+        setRedoing(false);
+        props.onRedo(change);
+      }}
+    />
+  );
 
   return (
     <article class={`job ${job.status}${props.focused ? ' focused' : ''}`} onClick={props.onFocus}>
       <header>
         <span class="job-number">#{props.number}</span>
         <p class="job-prompt">{job.prompt}</p>
+        {canRedo && (
+          <button
+            class={redoing ? 'icon redo-toggle active' : 'icon redo-toggle'}
+            title={`Поправить задачу и сгенерировать ещё ${props.variants} ${plural(props.variants, 'вариант', 'варианта', 'вариантов')}`}
+            aria-label="Поправить задачу"
+            aria-pressed={redoing}
+            onClick={(e) => {
+              e.stopPropagation();
+              setRedoing((v) => !v);
+            }}
+          >
+            <IconPencil size={16} stroke={STROKE} />
+          </button>
+        )}
       </header>
+      {redoForm}
       <p class="job-status">
         {STATUS[job.status]}
         {job.status === 'running' && `, готово ${done.length} из ${job.variants.length}`}
@@ -971,6 +1071,7 @@ function JobCard(props: {
         {job.status === 'done' && running > 0 && `, ещё ${running} в работе`}
         {job.modelSize && <span class="dim">, {[job.imageSize, MODELS.find((m) => m.id === job.model)?.tag].filter(Boolean).join(' ')}</span>}
         {job.refs > 0 && <span class="dim">, референсов: {job.refs}</span>}
+        {job.hide && <span class="dim">, под маской стёрто</span>}
       </p>
       {replacing !== undefined && (
         <p class="hint">
@@ -999,6 +1100,12 @@ function JobCard(props: {
               <IconChevronRight size={16} stroke={STROKE} />
             </button>
           </div>
+          {otherTask && (
+            <p class="hint variant-task">
+              {otherTask.prompt === job.prompt ? 'С той же задачей' : `По прежней задаче: «${otherTask.prompt}»`}
+              {otherTask.hide !== job.hide && (otherTask.hide ? ', под маской было стёрто' : ', модель видела, что под маской')}
+            </p>
+          )}
           {selected?.insideChangedPct !== undefined && selected.insideChangedPct < 2 && (
             <p class="job-warning">
               В этом варианте модель почти ничего не изменила. Опишите, что должно получиться, а не что исправить, или выделите
@@ -1056,10 +1163,12 @@ function LayerItem(props: {
   onToggle: () => void;
   onShow: () => void;
   onMask: () => void;
-  onVariants: () => void;
+  /** Ещё варианты; change — с поправленной задачей */
+  onVariants: (change?: RedoChange) => void;
   onDelete: () => void;
 }) {
   const { patch } = props;
+  const [redoing, setRedoing] = useState(false);
   const time = new Date(patch.createdAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
   return (
     <li class={[patch.active ? '' : 'off', props.maskMode ? 'editing' : ''].filter(Boolean).join(' ')}>
@@ -1090,14 +1199,91 @@ function LayerItem(props: {
         class="layer-icon"
         title={`Ещё ${props.variants} ${plural(props.variants, 'вариант', 'варианта', 'вариантов')} этой правки: та же задача и маска; выбранный заменит слой`}
         aria-label="Ещё варианты слоя"
-        onClick={props.onVariants}
+        onClick={() => props.onVariants()}
       >
         <IconRefresh size={18} stroke={STROKE} />
+      </button>
+      <button
+        class={redoing ? 'layer-icon active' : 'layer-icon'}
+        title={`Ещё ${props.variants} ${plural(props.variants, 'вариант', 'варианта', 'вариантов')} с поправленной задачей; выбранный заменит слой`}
+        aria-label="Перерисовать слой с поправкой"
+        aria-pressed={redoing}
+        onClick={() => setRedoing((v) => !v)}
+      >
+        <IconPencil size={18} stroke={STROKE} />
       </button>
       <button class="layer-icon delete" title="Удалить слой (⌘Z вернёт его)" aria-label="Удалить слой" onClick={props.onDelete}>
         <IconTrash size={18} stroke={STROKE} />
       </button>
+      {redoing && (
+        <div class="layer-redo">
+          <RedoForm
+            prompt={patch.prompt}
+            hide={patch.hide ?? false}
+            variants={props.variants}
+            onCancel={() => setRedoing(false)}
+            onSubmit={(change) => {
+              setRedoing(false);
+              props.onVariants(change);
+            }}
+          />
+        </div>
+      )}
     </li>
+  );
+}
+
+/** Флажок «скрыть от модели то, что под маской» */
+function HideOption(props: { checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label
+      class="check"
+      title="Модель получит кусок, где выделенная область стёрта, и нарисует её с нуля, не держась за то, что там было. Подходит, чтобы заменить предмет, а не поправить его"
+    >
+      <input type="checkbox" checked={props.checked} onChange={(e) => props.onChange(e.currentTarget.checked)} />
+      Скрыть от модели то, что под маской
+    </label>
+  );
+}
+
+/** Повтор правки с поправкой: задача и скрытие под маской; ⌘↵ — сгенерировать, Esc — передумать */
+function RedoForm(props: { prompt: string; hide: boolean; variants: number; onSubmit: (change: RedoChange) => void; onCancel: () => void }) {
+  const [prompt, setPrompt] = useState(props.prompt);
+  const [hide, setHide] = useState(props.hide);
+  const submit = () => {
+    if (prompt.trim()) props.onSubmit({ prompt: prompt.trim(), hide });
+  };
+  return (
+    <form
+      class="redo"
+      onClick={(e) => e.stopPropagation()}
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+      onKeyDown={(e) => {
+        // Свои ⌘↵ и Esc: общие сочетания отправили бы форму новой правки и сбросили выделение
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+          e.preventDefault();
+          e.stopPropagation();
+          submit();
+        } else if (e.key === 'Escape') {
+          e.stopPropagation();
+          props.onCancel();
+        }
+      }}
+    >
+      <textarea rows={3} autoFocus value={prompt} aria-label="Поправленная задача" onInput={(e) => setPrompt(e.currentTarget.value)} />
+      <HideOption checked={hide} onChange={setHide} />
+      <div class="row">
+        <button type="submit" class="primary" disabled={!prompt.trim()} title="⌘↵">
+          Сгенерировать {props.variants} {plural(props.variants, 'вариант', 'варианта', 'вариантов')}
+        </button>
+        <button type="button" onClick={props.onCancel}>
+          Отмена
+        </button>
+      </div>
+    </form>
   );
 }
 

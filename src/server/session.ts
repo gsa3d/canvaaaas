@@ -10,12 +10,12 @@ import { CanvasDocument, TILE_SIZE, type NewPatch } from '../core/document.ts';
 import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, type ImageFormat } from '../core/image-file.ts';
 import { encodeProject, isProject, isProjectPath, openProject, PROJECT_EXTENSION } from '../core/project.ts';
 import type { RecentFiles } from '../core/recent.ts';
-import { buildLayer, fitGenerated, insideOf, layerAsGen, measure, prepareEdit, type PreparedEdit, type RawImage } from '../core/edit-region.ts';
+import { buildLayer, fitGenerated, insideOf, layerAsGen, measure, prepareEdit, retarget, type Guide, type PreparedEdit, type RawImage } from '../core/edit-region.ts';
 import { intersect, type Rect } from '../core/frame.ts';
 import { expandMaskByDiff } from '../core/expand.ts';
 import { readLedger, withLedger } from '../core/ledger.ts';
-import { featherAlpha, maskBBox } from '../core/mask.ts';
-import { applyShapes } from '../core/mask-shapes.ts';
+import { featherAlpha, featherAlphaRegion, maskBBox } from '../core/mask.ts';
+import { applyShapes, applyShapesRegion } from '../core/mask-shapes.ts';
 import type { KeyStore } from '../core/secrets.ts';
 import { chatgptCodex, findCodex } from '../providers/chatgpt-codex.ts';
 import { laozhangGemini } from '../providers/laozhang-gemini.ts';
@@ -26,10 +26,12 @@ import {
   shapesBBox,
   type CreateJobRequest,
   type JobDto,
+  type MaskEditResult,
   type MaskShape,
   type ModelChoice,
   type PatchVariantsRequest,
   type RectDto,
+  type RedoChange,
   type SizeChoice,
   type StateDto,
 } from '../shared/api.ts';
@@ -40,6 +42,8 @@ const MASK_UNDO_LIMIT = 30;
 const REFERENCES_KEPT = 30;
 /** Референс уменьшается до этого размера по большей стороне: модели больше не нужно */
 const REFERENCE_SIZE = 1536;
+/** Картинки для правки маски в браузере — не больше этого по большей стороне */
+const EDIT_PREVIEW_MAX = 2560;
 
 interface Reference {
   image: InputImage;
@@ -57,6 +61,9 @@ interface Variant {
   insideChangedPct?: number;
   /** Слой, который сейчас на холсте: с ним сравнивают новые варианты */
   current?: boolean;
+  /** С какой задачей и показом области сделан: ими же ляжет слой */
+  prompt: string;
+  hide: boolean;
 }
 
 /** Принятый слой, который правка перерисовывает: маска и место — на момент, когда попросили ещё вариантов */
@@ -70,7 +77,10 @@ interface Replaced {
 interface Job {
   id: string;
   docId: string;
+  /** Задача следующих вариантов: повтор с поправкой её меняет */
   prompt: string;
+  /** Стирать модели то, что под маской */
+  hide: boolean;
   style: string;
   model: ModelChoice;
   size: SizeChoice;
@@ -89,13 +99,14 @@ interface Job {
   mask?: Uint8Array;
   alpha?: Float32Array;
   maskUndo: Uint8Array[];
+  /** Растёт при каждой смене маски */
+  maskRev: number;
   variants: Variant[];
   selected: number;
   /** Вариант выбрали руками: новые готовые его не перебивают */
   picked: boolean;
   rev: number;
   layerPngs: Map<number, Buffer>;
-  maskPng?: Buffer;
   abort: AbortController;
   /** Правки маски идут строго по очереди */
   maskChain: Promise<unknown>;
@@ -164,8 +175,8 @@ export class Session {
   private asking: Promise<boolean> | null = null;
   /** Правки масок слоёв, отмена и повтор идут строго по очереди: ⌘Z сразу после мазка отменяет этот мазок */
   private docChain: Promise<unknown> = Promise.resolve();
-  /** Последняя показанная маска слоя: её PNG перезапрашивается после каждого мазка */
-  private patchMaskCache: { key: string; png: Buffer } | null = null;
+  /** Холст под правимым слоем и над ним: браузер просит обе картинки разом */
+  private aroundCache: { key: string; below: Buffer; above: Buffer } | null = null;
   /** Холст, по которому построены превью замены слоя (rev документа) */
   private previewRev: number | undefined;
   /** Какие ответы умеет каждая модель — не меняется */
@@ -275,6 +286,7 @@ export class Session {
       jobs: this.jobs.map((j) => ({
         id: j.id,
         prompt: j.prompt,
+        hide: j.hide,
         model: j.model,
         status: j.status,
         error: j.error,
@@ -293,9 +305,13 @@ export class Session {
           outsideChangedPct: v.outsideChangedPct,
           insideChangedPct: v.insideChangedPct,
           current: v.current,
+          prompt: v.prompt,
+          hide: v.hide,
         })),
         selected: j.selected,
         rev: j.rev,
+        maskRev: j.maskRev,
+        feather: j.prep?.feather,
         canUndoMask: j.maskUndo.length > 0,
         replaces: j.replaces?.patchId,
       })),
@@ -307,6 +323,8 @@ export class Session {
         createdAt: p.createdAt,
         maskRev: p.maskVersion,
         model: p.model,
+        feather: p.feather,
+        hide: p.hide,
       })),
       canUndo: doc?.canUndo ?? false,
       canRedo: doc?.canRedo ?? false,
@@ -650,26 +668,70 @@ export class Session {
     });
   }
 
-  /** Дорисовать или стереть маску принятого слоя: кисть возвращает его пиксели, ластик открывает холст под ним */
-  editPatchMask(patchId: string, shapes: MaskShape[]): Promise<void> {
+  /**
+   * Дорисовать или стереть маску принятого слоя: кисть возвращает его пиксели, ластик открывает холст под ним.
+   * Пересчитывается только участок около мазка, поэтому холст догоняет кисть быстро и на большом слое.
+   */
+  editPatchMask(patchId: string, shapes: MaskShape[]): Promise<MaskEditResult> {
     return this.serialDoc(async (doc) => {
       const patch = doc.patch(patchId);
-      const mask = await applyShapes(patch.mask, patch.rect, shapes);
-      if (this.doc !== doc) return;
-      doc.setPatchMask(patchId, mask);
+      const { mask, changed } = await applyShapesRegion(patch.mask, patch.rect, shapes);
+      if (this.doc !== doc) throw new Error('Документ уже закрыт');
+      if (changed) doc.setPatchMask(patchId, mask, changed);
       this.changed();
+      return { version: patch.maskVersion, rev: doc.rev };
     });
   }
 
-  /** Маска слоя для показа поверх холста — так же, как маска задачи; version — какое состояние маски в картинке */
-  async patchMaskPng(patchId: string): Promise<{ png: Buffer; version: number }> {
-    const patch = this.requireDoc().patch(patchId);
-    const version = patch.maskVersion;
-    const key = `${patchId}:${version}`;
-    if (this.patchMaskCache?.key !== key) {
-      this.patchMaskCache = { key, png: await maskOverlay(patch.mask, patch.rect.width, patch.rect.height) };
+  /**
+   * Картинки, по которым браузер сам показывает правку маски слоя или задачи, не дожидаясь сервера: холст под слоем,
+   * слои над ним, ответ модели на весь кусок и маска до растушёвки — в размере превью. version — чья маска в картинке.
+   */
+  async maskEditImage(target: { patch: string } | { job: string; n: number }, part: string): Promise<{ data: Buffer; type: string; version: number }> {
+    const doc = this.requireDoc();
+    let rect: Rect;
+    let skip: string | null;
+    let mask: Uint8Array;
+    let version: number;
+    let rgb: () => Buffer;
+    if ('patch' in target) {
+      const patch = doc.patch(target.patch);
+      ({ rect, mask, maskVersion: version } = patch);
+      skip = patch.id;
+      rgb = () => {
+        const out = Buffer.alloc(rect.width * rect.height * 3);
+        for (let i = 0; i < rect.width * rect.height; i++) patch.layer.copy(out, i * 3, i * 4, i * 4 + 3);
+        return out;
+      };
+    } else {
+      const job = this.readyJob(target.job);
+      rect = job.prep.frame.inside;
+      skip = job.replaces && doc.hasPatch(job.replaces.patchId) ? job.replaces.patchId : null;
+      mask = job.mask;
+      version = job.maskRev;
+      rgb = () => {
+        const gen = job.variants[target.n]?.gen;
+        if (!gen) throw new Error('Вариант не готов');
+        return insideOf(job.prep, gen);
+      };
     }
-    return { png: this.patchMaskCache.png, version };
+    const k = Math.min(1, EDIT_PREVIEW_MAX / Math.max(rect.width, rect.height));
+    const scaled = (data: Uint8Array, channels: 1 | 3 | 4) => {
+      const img = sharp(data, { raw: { width: rect.width, height: rect.height, channels } });
+      if (k === 1) return img;
+      return img.resize(Math.max(1, Math.round(rect.width * k)), Math.max(1, Math.round(rect.height * k)), {
+        fit: 'fill',
+        kernel: channels === 1 ? 'linear' : 'lanczos3',
+      });
+    };
+    const jpeg = async (data: Uint8Array) => ({ data: await scaled(data, 3).jpeg({ quality: 90 }).toBuffer(), type: 'image/jpeg', version });
+    const png = async (data: Uint8Array, channels: 1 | 4) => ({ data: await scaled(data, channels).png({ compressionLevel: 2 }).toBuffer(), type: 'image/png', version });
+    if (part === 'layer') return jpeg(rgb());
+    if (part === 'mask') return png(mask, 1);
+    if (part !== 'below' && part !== 'above') throw new Error('Нет такой картинки');
+    const key = `${doc.id}:${skip}:${rect.x},${rect.y},${rect.width},${rect.height}:${doc.layersKey}`;
+    if (this.aroundCache?.key !== key) this.aroundCache = { key, ...doc.regionAround(rect, skip) };
+    return part === 'below' ? jpeg(this.aroundCache.below) : png(this.aroundCache.above, 4);
   }
 
   private requireDoc(): CanvasDocument {
@@ -718,19 +780,30 @@ export class Session {
       if (!ref) throw new Error('Референс не найден — добавьте картинку заново');
       return ref.image;
     });
-    return this.enqueue({ prompt: req.prompt.trim(), model: req.model, size: req.size, variants: req.variants, shapes: req.shapes, area, references });
+    return this.enqueue({
+      prompt: req.prompt.trim(),
+      hide: !!req.hide,
+      model: req.model,
+      size: req.size,
+      variants: req.variants,
+      shapes: req.shapes,
+      area,
+      references,
+    });
   }
 
   /**
-   * «Ещё варианты» принятого слоя: та же задача, маска слоя и его референсы; модель видит холст под слоем, а не его самого.
-   * Нынешний слой становится первым вариантом, чтобы новые было с чем сравнить; «Принять» кладёт выбранный на его место.
+   * «Ещё варианты» принятого слоя: та же задача (или поправленная), маска слоя и его референсы; модель видит холст
+   * под слоем, а не его самого. Нынешний слой становится первым вариантом, чтобы новые было с чем сравнить;
+   * «Принять» кладёт выбранный на его место.
    */
   patchVariants(patchId: string, req: PatchVariantsRequest): string {
     const patch = this.requireDoc().patch(patchId);
     const box = maskBBox(patch.mask, patch.rect.width, patch.rect.height);
     if (!box) throw new Error('Маска слоя пустая: верните кистью то, что нужно перерисовать');
     return this.enqueue({
-      prompt: patch.prompt,
+      prompt: req.prompt?.trim() || patch.prompt,
+      hide: req.hide ?? patch.hide ?? false,
       model: patch.model ?? req.model,
       size: patch.size ?? req.size,
       variants: req.variants,
@@ -742,7 +815,7 @@ export class Session {
   }
 
   private enqueue(
-    task: Pick<Job, 'prompt' | 'model' | 'size' | 'shapes' | 'area' | 'references' | 'replaces'> & { variants: number },
+    task: Pick<Job, 'prompt' | 'hide' | 'model' | 'size' | 'shapes' | 'area' | 'references' | 'replaces'> & { variants: number },
   ): string {
     const doc = this.requireDoc();
     const job: Job = {
@@ -756,6 +829,7 @@ export class Session {
       status: 'queued',
       variantsRequested: Math.min(Math.max(Math.round(task.variants), 1), 4),
       maskUndo: [],
+      maskRev: 0,
       variants: [],
       selected: 0,
       picked: false,
@@ -808,6 +882,7 @@ export class Session {
         crop: current ? (inside) => doc.regionWithout(inside, current.id) : undefined,
         feather: replaces?.feather,
         prompt: job.prompt,
+        guide: guideOf(job.hide),
         style: job.style,
         provider: this.provider(job.model),
         imageSize: job.size,
@@ -819,7 +894,16 @@ export class Session {
       if (current) {
         const gen = layerAsGen(prep, current.rect, current.layer);
         const stats = await measure(prep, gen, prep.modelSize);
-        job.variants.push({ n: 0, status: 'done', current: true, gen, outsideChangedPct: stats.outsideChangedPct, insideChangedPct: stats.insideChangedPct });
+        job.variants.push({
+          n: 0,
+          status: 'done',
+          current: true,
+          gen,
+          outsideChangedPct: stats.outsideChangedPct,
+          insideChangedPct: stats.insideChangedPct,
+          prompt: current.prompt,
+          hide: current.hide ?? false,
+        });
       }
       job.status = 'running';
       this.changed();
@@ -844,23 +928,36 @@ export class Session {
     return { data: Buffer.from(region.buffer, region.byteOffset, region.length), width: area.width, height: area.height, channels: 1, x: area.x, y: area.y };
   }
 
-  private async generate(job: Job, count: number): Promise<void> {
+  /**
+   * Новые варианты с нынешней задачей и показом области задачи. Готовые остаются на холсте, пока идут новые:
+   * их можно сравнивать и принимать. jump — задачу поправили: первый готовый новый вариант сразу на холсте.
+   */
+  private async generate(job: Job, count: number, jump = false): Promise<void> {
     const prep = job.prep;
     if (!prep) throw new Error('Задача ещё не подготовлена');
     const provider = this.provider(job.model);
-    const fresh = Array.from({ length: count }, (_, i): Variant => ({ n: job.variants.length + i, status: 'running' }));
+    const task = { prompt: job.prompt, hide: job.hide };
+    const fresh = Array.from({ length: count }, (_, i): Variant => ({ n: job.variants.length + i, status: 'running', ...task }));
     job.variants.push(...fresh);
-    job.status = 'running';
+    if (!job.variants.some((v) => v.status === 'done')) job.status = 'running';
     job.error = undefined;
     this.changed();
 
+    // Промпт и картинки для модели собираются заново, только если задачу или показ области поправили
+    const ready = (async () => {
+      const guide = guideOf(task.hide);
+      if (prep.request !== task.prompt || prep.guide !== guide) Object.assign(prep, await retarget(prep, { request: task.prompt, guide }));
+      return { prompt: prep.prompt, images: prep.images };
+    })();
+    let shown = false;
     await Promise.all(
       fresh.map(async (v) => {
         try {
+          const input = await ready;
           this.generations++;
           const res = await provider.generate({
-            prompt: prep.prompt,
-            images: prep.images,
+            prompt: input.prompt,
+            images: input.images,
             aspectRatio: prep.frame.aspectRatio,
             imageSize: prep.imageSize,
             signal: job.abort.signal,
@@ -873,8 +970,10 @@ export class Session {
           v.insideChangedPct = stats.insideChangedPct;
           v.status = 'done';
           // Первый готовый новый вариант сразу на холсте, даже если до него был выбран нынешний слой
+          // (или вариант по прежней задаче), — если только пользователь сам не выбрал другой
           const selected = job.variants[job.selected];
-          if (selected?.status !== 'done' || (selected.current && !job.picked)) job.selected = v.n;
+          if (selected?.status !== 'done' || (!job.picked && (selected.current || (jump && !shown)))) job.selected = v.n;
+          shown = true;
         } catch (err) {
           v.status = 'error';
           v.error = message(err);
@@ -895,28 +994,32 @@ export class Session {
     this.changed();
   }
 
-  /** «Ещё варианты»: та же правка, новые генерации к уже имеющимся */
-  async moreVariants(jobId: string, count: number): Promise<void> {
+  /** «Ещё варианты»: та же правка или с поправкой задачи, новые генерации к уже имеющимся */
+  async moreVariants(jobId: string, count: number, change: RedoChange = {}): Promise<void> {
     const job = this.job(jobId);
-    if (job.status === 'running' || job.status === 'preparing' || job.status === 'queued') throw new Error('Задача ещё идёт');
-    if (!job.prep) return this.retry(jobId);
+    const busy = job.status === 'running' || job.status === 'preparing' || job.status === 'queued' || job.variants.some((v) => v.status === 'running');
+    if (busy) throw new Error('Задача ещё идёт');
+    if (!job.prep) return this.retry(jobId, change);
     const n = Math.min(Math.max(Math.round(count), 1), MAX_VARIANTS_PER_JOB - job.variants.length);
     if (n <= 0) throw new Error(`Не больше ${MAX_VARIANTS_PER_JOB} вариантов на правку`);
+    const jump = redo(job, change);
+    if (jump) job.picked = false;
     try {
-      await this.generate(job, n);
+      await this.generate(job, n, jump);
     } finally {
       this.changed();
     }
   }
 
-  /** Задача с ошибкой: начать заново с подготовки куска */
-  retry(jobId: string): void {
+  /** Задача с ошибкой: начать заново с подготовки куска, можно с поправкой задачи */
+  retry(jobId: string, change: RedoChange = {}): void {
     const job = this.job(jobId);
     if (job.status !== 'error') throw new Error('Повторить можно только задачу с ошибкой');
+    redo(job, change);
     job.abort = new AbortController();
     Object.assign(job, { status: 'queued', error: undefined, prep: undefined, mask: undefined, alpha: undefined, variants: [], maskUndo: [], selected: 0, picked: false });
+    job.maskRev++;
     job.layerPngs.clear();
-    job.maskPng = undefined;
     this.changed();
     this.schedule();
   }
@@ -946,7 +1049,8 @@ export class Session {
         layer: buildLayer(job.prep, v.gen, job.alpha),
         mask: job.mask,
         feather: job.prep.feather,
-        prompt: job.prompt,
+        prompt: v.prompt,
+        hide: v.hide,
         jobId: job.id,
         variant: v.n,
         createdAt: new Date().toISOString(),
@@ -968,27 +1072,38 @@ export class Session {
     return next;
   }
 
-  private remask(job: Job & { prep: PreparedEdit; mask: Uint8Array }, mask: Uint8Array): void {
+  private remask(job: Job & { prep: PreparedEdit; mask: Uint8Array; alpha: Float32Array }, mask: Uint8Array, changed?: Rect): void {
     job.maskUndo.push(job.mask);
     if (job.maskUndo.length > MASK_UNDO_LIMIT) job.maskUndo.shift();
-    this.setMask(job, mask);
+    this.setMask(job, mask, changed);
   }
 
-  private setMask(job: Job & { prep: PreparedEdit }, mask: Uint8Array): void {
+  /** Новая маска задачи; changed — участок, вне которого она не менялась: растушёвка пересчитывается только около него */
+  private setMask(job: Job & { prep: PreparedEdit; alpha: Float32Array }, mask: Uint8Array, changed?: Rect): void {
     const { inside } = job.prep.frame;
+    if (changed) {
+      const { rect, alpha } = featherAlphaRegion(mask, inside.width, inside.height, job.prep.feather, changed);
+      // Копия: прежняя альфа может быть альфой подготовки куска
+      const next = new Float32Array(job.alpha);
+      for (let row = 0; row < rect.height; row++) next.set(alpha.subarray(row * rect.width, (row + 1) * rect.width), (rect.y + row) * inside.width + rect.x);
+      job.alpha = next;
+    } else {
+      job.alpha = featherAlpha(mask, inside.width, inside.height, job.prep.feather);
+    }
     job.mask = mask;
-    job.alpha = featherAlpha(mask, inside.width, inside.height, job.prep.feather);
+    job.maskRev++;
     job.rev++;
     job.layerPngs.clear();
-    job.maskPng = undefined;
     this.changed();
   }
 
   /** Дорисовать или стереть маску задачи и перевклеить все варианты */
-  editMask(jobId: string, shapes: MaskShape[]): Promise<void> {
+  editMask(jobId: string, shapes: MaskShape[]): Promise<MaskEditResult> {
     const job = this.readyJob(jobId);
     return this.serial(job, async () => {
-      this.remask(job, await applyShapes(job.mask, job.prep.frame.inside, shapes));
+      const { mask, changed } = await applyShapesRegion(job.mask, job.prep.frame.inside, shapes);
+      if (changed) this.remask(job, mask, changed);
+      return { version: job.maskRev, rev: job.rev };
     });
   }
 
@@ -1061,27 +1176,23 @@ export class Session {
     return png;
   }
 
-  /** Маска задачи для показа поверх холста */
-  async maskPng(jobId: string): Promise<Buffer> {
-    const job = this.readyJob(jobId);
-    const { inside } = job.prep.frame;
-    job.maskPng ??= await maskOverlay(job.mask, inside.width, inside.height);
-    return job.maskPng;
-  }
+}
+
+/** Как показать модели область: стереть, что под маской, или подсветить её поверх куска */
+function guideOf(hide: boolean): Guide {
+  return hide ? 'blank' : 'pair';
+}
+
+/** Поправка задачи перед повтором; true — что-то поменялось */
+function redo(job: Job, change: RedoChange): boolean {
+  const before = `${job.hide}:${job.prompt}`;
+  const prompt = change.prompt?.trim();
+  if (prompt) job.prompt = prompt;
+  if (change.hide !== undefined) job.hide = change.hide;
+  return `${job.hide}:${job.prompt}` !== before;
 }
 
 /** Маска слоя одним каналом на его месте на холсте — так её принимает prepareEdit */
 function layerMask({ mask, rect }: Replaced): RawImage & { x: number; y: number } {
   return { data: Buffer.from(mask.buffer, mask.byteOffset, mask.length), width: rect.width, height: rect.height, channels: 1, x: rect.x, y: rect.y };
-}
-
-/** Маска для показа поверх холста: полупрозрачная голубая заливка */
-function maskOverlay(mask: Uint8Array, width: number, height: number): Promise<Buffer> {
-  const rgba = Buffer.alloc(width * height * 4);
-  for (let i = 0; i < mask.length; i++) {
-    const m = mask[i]!;
-    if (m === 0) continue;
-    rgba.set([40, 140, 255, Math.round(m * 0.45)], i * 4);
-  }
-  return sharp(rgba, { raw: { width, height, channels: 4 } }).png({ compressionLevel: 2 }).toBuffer();
 }

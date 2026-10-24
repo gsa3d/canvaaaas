@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
-import { API_HEADER, type CreateJobRequest, type MaskShape, type PatchVariantsRequest } from '../shared/api.ts';
+import { API_HEADER, type CreateJobRequest, type MaskShape, type MoreVariantsRequest, type PatchVariantsRequest, type RedoChange } from '../shared/api.ts';
 import type { Session } from './session.ts';
 
 export interface ServerOptions {
@@ -209,14 +209,17 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
   route('POST', '/api/history/:id/mask', async (req, res, [id]) => {
     const { shapes } = await readJson<{ shapes: MaskShape[] }>(req);
-    await session.editPatchMask(id!, shapes);
-    json(res, { ok: true });
+    json(res, await session.editPatchMask(id!, shapes));
   });
-  route('GET', '/api/history/:id/mask.png', async (_req, res, [id], url) => {
-    const { png, version } = await session.patchMaskPng(id!);
-    // Запрос мог отстать от мазков: картинку другого состояния маски браузер кэшировать не должен
-    send(res, 200, png, 'image/png', url.searchParams.get('v') === String(version) ? IMMUTABLE : { 'Cache-Control': 'no-store' });
-  });
+  // Картинки для правки маски в браузере. Маска меняется с каждым мазком, поэтому не кэшируются; номер её состояния — в заголовке
+  const editImage = async (res: ServerResponse, image: Promise<{ data: Buffer; type: string; version: number }>) => {
+    const { data, type, version } = await image;
+    send(res, 200, data, type, { 'Cache-Control': 'no-store', [`${API_HEADER}-version`]: String(version) });
+  };
+  route('GET', '/api/history/:id/edit/:part.:ext', (_req, res, [id, part]) => editImage(res, session.maskEditImage({ patch: id! }, part!)));
+  route('GET', '/api/jobs/:id/edit/:part.:ext', (_req, res, [id, part], url) =>
+    editImage(res, session.maskEditImage({ job: id!, n: Number(url.searchParams.get('n') ?? NaN) }, part!)),
+  );
 
   route('POST', '/api/jobs', async (req, res) => {
     const body = await readJson<CreateJobRequest>(req);
@@ -228,13 +231,15 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     json(res, { ok: true });
   });
   route('POST', '/api/jobs/:id/more', async (req, res, [id]) => {
-    const { count } = await readJson<{ count: number }>(req);
-    // Генерация идёт в фоне: прогресс интерфейс видит через события
-    session.moreVariants(id!, count).catch(() => undefined);
+    const { count, ...change } = await readJson<MoreVariantsRequest>(req);
+    // Генерация идёт в фоне: прогресс интерфейс видит через события. Ошибку проверки (задача ещё идёт) — сразу
+    const run = session.moreVariants(id!, count, change);
+    await Promise.race([run, new Promise((r) => setTimeout(r, 0))]);
+    run.catch(() => undefined);
     json(res, { ok: true });
   });
-  route('POST', '/api/jobs/:id/retry', (_req, res, [id]) => {
-    session.retry(id!);
+  route('POST', '/api/jobs/:id/retry', async (req, res, [id]) => {
+    session.retry(id!, await readJson<RedoChange>(req));
     json(res, { ok: true });
   });
   route('POST', '/api/jobs/:id/accept', (_req, res, [id]) => {
@@ -247,8 +252,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
   route('POST', '/api/jobs/:id/mask', async (req, res, [id]) => {
     const { shapes } = await readJson<{ shapes: MaskShape[] }>(req);
-    await session.editMask(id!, shapes);
-    json(res, { ok: true });
+    json(res, await session.editMask(id!, shapes));
   });
   route('POST', '/api/jobs/:id/mask/expand', async (_req, res, [id]) => {
     json(res, { addedPx: await session.expandMask(id!) });
@@ -259,9 +263,6 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
   route('GET', '/api/jobs/:id/layer/:n.png', async (_req, res, [id, n]) => {
     send(res, 200, await session.layerPng(id!, Number(n)), 'image/png', IMMUTABLE);
-  });
-  route('GET', '/api/jobs/:id/mask.png', async (_req, res, [id]) => {
-    send(res, 200, await session.maskPng(id!), 'image/png', IMMUTABLE);
   });
 
   async function serveStatic(res: ServerResponse, pathname: string): Promise<void> {
