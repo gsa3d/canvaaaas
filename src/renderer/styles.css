@@ -317,6 +317,59 @@ input[type='color'] {
   accent-color: var(--accent);
 }
 
+/* Набросок — подсказка модели, а не выделение: отделён от инструментов выделения */
+.rail-sep {
+  width: 24px;
+  height: 1px;
+  margin: 4px 0;
+  background: var(--line);
+}
+
+.sketch-colors {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+button.swatch,
+.swatch {
+  position: relative;
+  min-height: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+button.swatch.active,
+.swatch.active {
+  box-shadow:
+    0 0 0 2px var(--paper),
+    0 0 0 4px var(--accent);
+}
+
+/* Свой цвет: под кружком прячется палитра системы */
+.swatch.custom {
+  background-image: conic-gradient(red, yellow, lime, aqua, blue, magenta, red) !important;
+}
+
+.swatch.custom.active {
+  background-image: none !important;
+}
+
+.swatch.custom input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
 /* ——— Холст ——— */
 
 .stage {
@@ -351,7 +404,8 @@ input[type='color'] {
 }
 
 .osd[data-tool='brush'] *,
-.osd[data-tool='eraser'] * {
+.osd[data-tool='eraser'] *,
+.osd[data-tool='sketch'] * {
   cursor: none !important;
 }
 
@@ -378,6 +432,20 @@ input[type='color'] {
   background: #fff;
   color: var(--accent);
   font-weight: 500;
+}
+
+.stage-banner .help {
+  margin-left: -8px;
+}
+
+.stage-banner button.help-toggle {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.stage-banner button.help-toggle:hover:not(:disabled),
+.stage-banner button.help-toggle.active {
+  color: #fff;
 }
 
 .busy,
@@ -645,6 +713,90 @@ button.swap {
   font-weight: 600;
 }
 
+/* ——— Подсказка «?» ——— */
+
+.help {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+button.help-toggle {
+  min-height: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+button.help-toggle:hover:not(:disabled),
+button.help-toggle.active {
+  border-color: transparent;
+  color: var(--accent);
+}
+
+.help-pop {
+  position: fixed;
+  z-index: 30;
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper-2);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+}
+
+/* ——— Что уже есть в форме ——— */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 2px 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+button.chip-clear {
+  min-height: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-color: transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+}
+
+button.chip-clear:hover:not(:disabled) {
+  border-color: transparent;
+  background: rgba(47, 91, 234, 0.15);
+}
+
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+}
+
 .hint {
   margin: 0;
   color: var(--muted);
@@ -802,6 +954,30 @@ button.redo-toggle.active {
   font-size: 12px;
 }
 
+/* Задача, как её расписал директор: две строки, по щелчку — целиком */
+.directed {
+  margin: 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--accent-soft);
+  color: var(--muted);
+  font-size: 12px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.directed.open {
+  display: block;
+  user-select: text;
+}
+
+.directed-label {
+  color: var(--accent);
+  font-weight: 500;
+}
+
 /* Повтор с поправкой: прежняя задача уже в поле, её остаётся поправить */
 .redo {
   display: flex;
@@ -810,12 +986,17 @@ button.redo-toggle.active {
   cursor: default;
 }
 
-/* Флажок с подписью: у полей ширина 100%, у флажка — своя */
+/* Флажок с подписью и «?»: у полей ширина 100%, у флажка — своя */
 .check {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+}
+
+.check label {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
   cursor: pointer;
 }
 
@@ -922,6 +1103,8 @@ button.layer-icon.active:hover:not(:disabled) {
 }
 
 .size-hint.warn p {
+  display: flex;
+  align-items: center;
   margin: 0;
 }
 

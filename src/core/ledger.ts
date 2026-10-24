@@ -1,8 +1,10 @@
 // Журнал генераций: каждая генерация платная, поэтому каждый вызов модели
-// пишется строкой JSON в generations.jsonl в папке данных приложения.
+// пишется строкой JSON в generations.jsonl в папке данных приложения. Директор тоже тратит подписку —
+// его вызовы пишутся туда же с kind: 'director', но генерациями картинок не считаются.
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import type { PromptDirector } from '../providers/director.ts';
 import type { GenerateRequest, GenerateResult, ImageProvider } from '../providers/types.ts';
 
 export interface LedgerEntry {
@@ -15,6 +17,8 @@ export interface LedgerEntry {
   elapsedMs: number;
   purpose?: string;
   error?: string;
+  /** Вызов директора, а не генерация картинки */
+  kind?: 'director';
 }
 
 export function appDataDir(): string {
@@ -61,6 +65,26 @@ export function withLedger(provider: ImageProvider, purpose?: string): ImageProv
       };
       try {
         const result = await provider.generate(req);
+        await append({ ...base, ok: true, elapsedMs: result.elapsedMs });
+        return result;
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        await append({ ...base, ok: false, elapsedMs: Date.now() - started, error });
+        throw err;
+      }
+    },
+  };
+}
+
+/** То же для директора */
+export function withDirectorLedger(director: PromptDirector, purpose?: string): PromptDirector {
+  return {
+    ...director,
+    async direct(req) {
+      const started = Date.now();
+      const base = { at: new Date().toISOString(), provider: director.id, model: director.model, aspectRatio: '', imageSize: '', purpose, kind: 'director' as const };
+      try {
+        const result = await director.direct(req);
         await append({ ...base, ok: true, elapsedMs: result.elapsedMs });
         return result;
       } catch (err) {

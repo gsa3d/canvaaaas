@@ -6,11 +6,11 @@ import { mockProvider } from '../src/providers/mock.ts';
 
 describe('промпт и референсы', () => {
   it('задача идёт первой, референсы нумеруются после куска, стиль — в конце', () => {
-    const text = buildPrompt('pair', 'соедини рельсы', 'книжная иллюстрация', 2);
+    const text = buildPrompt('pair', 'соедини рельсы', { style: 'книжная иллюстрация', references: 2 });
     expect(text.indexOf('TASK: соедини рельсы')).toBeLessThan(text.indexOf('Image 1'));
     expect(text).toContain('Images 3–4 are reference images');
     expect(text.trim().endsWith('Style of the whole illustration: книжная иллюстрация')).toBe(true);
-    expect(buildPrompt('overlay', 'x', undefined, 1)).toContain('Image 2 is a reference image');
+    expect(buildPrompt('overlay', 'x', { references: 1 })).toContain('Image 2 is a reference image');
     expect(buildPrompt('pair', 'x')).not.toContain('reference');
   });
 

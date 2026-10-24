@@ -16,6 +16,16 @@ export type MaskShape =
   /** softness — доля радиуса кисти, на которой мазок плавно сходит на нет: 0 — жёсткий край, 1 — затухает от середины */
   | { kind: 'stroke'; points: [number, number][]; size: number; softness?: number; erase?: boolean };
 
+/** Штрих наброска для модели в координатах холста: где и каким должно быть то, что описано в задаче; erase — стирает набросок */
+export interface SketchStroke {
+  points: [number, number][];
+  /** Толщина, пиксели холста */
+  size: number;
+  /** #rrggbb */
+  color: string;
+  erase?: boolean;
+}
+
 /** flash и pro — Nano Banana через laozhang.ai по ключу; chatgpt — ChatGPT Images по подписке через Codex CLI */
 export type ModelChoice = 'flash' | 'pro' | 'chatgpt';
 export type SizeChoice = 'auto' | '1K' | '2K' | '4K';
@@ -62,6 +72,8 @@ export interface VariantDto {
   /** С какой задачей и показом области сделан вариант: после повтора с поправкой они у вариантов разные */
   prompt: string;
   hide: boolean;
+  /** Задача, как её расписал директор для этого варианта */
+  directed?: string;
 }
 
 export interface JobDto {
@@ -76,6 +88,14 @@ export interface JobDto {
   createdAt: string;
   /** Сколько референсов ушло с правкой */
   refs: number;
+  /** С правкой ушёл набросок */
+  sketch: boolean;
+  /** Перед генерацией задачу расписывает директор */
+  director: boolean;
+  /** Директор сейчас расписывает задачу */
+  directing: boolean;
+  /** Задача, как её расписал директор, — для следующих вариантов */
+  directed?: string;
   bbox?: RectDto;
   /** Часть куска внутри холста: здесь лежат слой правки и маска */
   inside?: RectDto;
@@ -109,6 +129,10 @@ export interface PatchDto {
   feather: number;
   /** Модель не видела, что было под маской */
   hide?: boolean;
+  /** Задача, как её расписал директор */
+  directed?: string;
+  /** С правкой ушёл набросок */
+  sketch?: boolean;
 }
 
 /** Какие ответы умеет модель — чтобы подсказать про разрешение ещё до генерации */
@@ -149,12 +173,17 @@ export interface CreateJobRequest {
   refs?: string[];
   /** Стереть модели то, что под маской: пусть рисует область заново, а не правит увиденное */
   hide?: boolean;
+  /** Набросок поверх куска: где и каким должно быть то, что в задаче */
+  sketch?: SketchStroke[];
+  /** Перед генерацией ChatGPT расписывает задачу подробнее; задача пользователя остаётся как есть */
+  director?: boolean;
 }
 
-/** Повтор правки с поправкой: другая задача или другой показ области; чего нет — остаётся как было */
+/** Повтор правки с поправкой: другая задача, показ области или директор; чего нет — остаётся как было */
 export interface RedoChange {
   prompt?: string;
   hide?: boolean;
+  director?: boolean;
 }
 
 /** «Ещё варианты» принятого слоя: задача, маска и референсы — слоя, модель и разрешение — слоя, если он их помнит */
@@ -220,6 +249,7 @@ export type AppCommand =
   | 'export'
   | 'undo'
   | 'redo'
+  | 'deselect'
   | 'zoom-fit'
   | 'zoom-100'
   | 'zoom-50'

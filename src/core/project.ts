@@ -2,13 +2,14 @@
 // слои можно скрывать и править их маски, как до сохранения; история отмены начинается заново.
 // Внутри — подпись, длина и JSON-описание, затем PNG подряд: исходник, у каждого слоя — RGBA
 // (ответ модели и растушёванная маска в альфе) и маска до растушёвки; в конце — референсы слоёв,
-// чтобы слой можно было перерисовать ещё раз и после повторного открытия.
+// чтобы слой можно было перерисовать ещё раз и после повторного открытия. Набросок и текст директора — в описании.
 import { extname } from 'node:path';
 import sharp from 'sharp';
 import type { InputImage } from '../providers/types.ts';
-import type { ModelChoice, SizeChoice } from '../shared/api.ts';
+import type { ModelChoice, SizeChoice, SketchStroke } from '../shared/api.ts';
 import { CanvasDocument, type Patch } from './document.ts';
 import type { Rect } from './frame.ts';
+import { checkSketch } from './sketch.ts';
 
 export const PROJECT_EXTENSION = 'caaa';
 const MAGIC = Buffer.from('CAAA\r\n\x1a\n', 'latin1');
@@ -45,6 +46,8 @@ interface Manifest {
     refs?: number[];
     /** Модель не видела, что было под маской */
     hide?: boolean;
+    directed?: string;
+    sketch?: SketchStroke[];
   }[];
   /** Референсы: картинка, которая ушла с несколькими правками, хранится один раз */
   refs?: { mimeType: string; data: Part }[];
@@ -115,6 +118,8 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
       size: p.size,
       refs: p.refs?.map(refIndex),
       hide: p.hide || undefined,
+      directed: p.directed,
+      sketch: p.sketch?.length ? p.sketch : undefined,
     })),
   };
   manifest.refs = refs.map((r) => ({ mimeType: r.mimeType, data: part(r.data) }));
@@ -181,10 +186,22 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       size: l.size && SIZES.includes(l.size) ? l.size : undefined,
       refs: layerRefs,
       hide: l.hide === true || undefined,
+      directed: typeof l.directed === 'string' && l.directed.trim() ? l.directed : undefined,
+      sketch: readSketch(l.sketch),
     };
   });
   const doc = CanvasDocument.restore(name, width, height, base!, patches);
   doc.style = manifest.style ?? '';
   basePngs.set(doc.base, Promise.resolve(Buffer.from(baseBytes)));
   return { doc, density: manifest.density };
+}
+
+/** Набросок слоя; испорченный не мешает открыть проект — слой просто остаётся без него */
+function readSketch(value: unknown): SketchStroke[] | undefined {
+  try {
+    const sketch = checkSketch(value);
+    return sketch.length ? sketch : undefined;
+  } catch {
+    return undefined;
+  }
 }

@@ -106,6 +106,8 @@ function buildMenu(win: BrowserWindow, session: Session): void {
         { role: 'copy', label: 'Копировать' },
         { role: 'paste', label: 'Вставить' },
         { role: 'selectAll', label: 'Выбрать всё' },
+        { type: 'separator' },
+        { ...item('Снять выделение', 'deselect', 'CmdOrCtrl+D'), enabled: hasDoc },
       ],
     },
     {

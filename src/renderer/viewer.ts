@@ -1,11 +1,11 @@
 // Просмотр холста: OpenSeadragon тянет тайлы с сервера, поверх — канвас размером с экран
-// для выделения, контуров задач, курсора кисти и превью правки маски (mask-edit.ts). Фигуры хранятся
-// в координатах холста, поэтому большой canvas в браузере не нужен ни для какой операции.
+// для выделения, наброска для модели, контуров задач, курсора кисти и превью правки маски (mask-edit.ts). Фигуры и штрихи
+// хранятся в координатах холста, поэтому большой canvas в браузере не нужен ни для какой операции.
 import OpenSeadragon from 'openseadragon';
-import type { DocDto, JobDto, MaskEditResult, MaskShape, RectDto } from '../shared/api.ts';
+import type { DocDto, JobDto, MaskEditResult, MaskShape, RectDto, SketchStroke } from '../shared/api.ts';
 import { MaskPreview, type MaskEditView } from './mask-edit.ts';
 
-export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser';
+export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser' | 'sketch';
 
 const ACCENT = '#2F5BEA';
 const ERROR = '#C8431A';
@@ -18,6 +18,8 @@ const SETTLE_TIMEOUT = 5000;
 export interface ViewerHooks {
   /** Фигура выделения */
   onShape(shape: MaskShape): void;
+  /** Штрих наброска для модели */
+  onSketch(stroke: SketchStroke): void;
   /** Мазок по маске слоя или задачи: отправить на сервер */
   onMaskShape(view: MaskEditView, shape: MaskShape): Promise<MaskEditResult>;
   onZoom(percent: number): void;
@@ -31,6 +33,8 @@ interface Draft {
   softness: number;
   /** Мазок сразу виден в превью маски — черновик поверх рисовать не нужно */
   live?: boolean;
+  /** Штрих наброска этим цветом, а не фигура выделения */
+  sketch?: string;
 }
 
 interface Layer {
@@ -42,6 +46,16 @@ type ItemEvent = { item: OpenSeadragon.TiledImage };
 
 function round(v: number): number {
   return Math.round(v * 10) / 10;
+}
+
+/** Линия по точкам; точка — отрезок нулевой длины, со скруглёнными концами он рисуется кружком */
+function linePath(points: [number, number][]): Path2D {
+  const path = new Path2D();
+  const [x0, y0] = points[0]!;
+  path.moveTo(x0, y0);
+  if (points.length === 1) path.lineTo(x0, y0);
+  for (const [x, y] of points.slice(1)) path.lineTo(x, y);
+  return path;
 }
 
 function shapePath(shape: MaskShape | Draft): Path2D {
@@ -69,6 +83,8 @@ export class CanvasView {
   private readonly overlay: HTMLCanvasElement;
   private readonly fill = document.createElement('canvas');
   private readonly edge = document.createElement('canvas');
+  /** Набросок рисуется отдельно: его ластик стирает только набросок */
+  private readonly ink = document.createElement('canvas');
   private readonly hooks: ViewerHooks;
 
   private doc: DocDto | null = null;
@@ -87,6 +103,9 @@ export class CanvasView {
   /** Мягкость края кисти 0..1; действует только при правке маски — выделение всегда с жёстким краем */
   private softness = 0;
   private selection: MaskShape[] = [];
+  private sketch: SketchStroke[] = [];
+  private sketchPx = 10;
+  private sketchColor = '#ff3b30';
   private jobs: JobDto[] = [];
   private numbers = new Map<string, number>();
   private focused: string | null = null;
@@ -111,6 +130,8 @@ export class CanvasView {
       animationTime: 0.35,
       zoomPerScroll: 1.25,
       preserveImageSizeOnResize: true,
+      // Свои клавиши OpenSeadragon (R поворачивает, W/A/S/D двигают, F отражает) спорят с клавишами инструментов
+      keyboardNavEnabled: false,
       gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true, flickEnabled: false },
     });
 
@@ -159,7 +180,7 @@ export class CanvasView {
     container.addEventListener('pointermove', (e) => {
       const r = container.getBoundingClientRect();
       this.cursor = { x: e.clientX - r.left, y: e.clientY - r.top };
-      if (this.tool === 'brush' || this.tool === 'eraser') this.redraw();
+      if (this.tool === 'brush' || this.tool === 'eraser' || this.tool === 'sketch') this.redraw();
     });
     container.addEventListener('pointerleave', () => {
       this.cursor = null;
@@ -350,6 +371,18 @@ export class CanvasView {
     this.redraw();
   }
 
+  setSketch(strokes: SketchStroke[]): void {
+    this.sketch = strokes;
+    this.redraw();
+  }
+
+  /** Толщина штриха наброска на экране и его цвет */
+  setSketchBrush(px: number, color: string): void {
+    this.sketchPx = px;
+    this.sketchColor = color;
+    this.redraw();
+  }
+
   setTool(tool: Tool): void {
     this.tool = tool;
     this.applyCursor();
@@ -427,6 +460,13 @@ export class CanvasView {
     if (tool === 'hand') return;
     const p = this.toImage(position);
     if (!p) return;
+    if (tool === 'sketch') {
+      // Набросок — для новой правки; пока правят маску, кисть меняет маску
+      if (this.maskMode()) return;
+      this.draft = { kind: 'stroke', points: [p], erase: original.altKey, size: round(this.sketchPx / this.scale()), softness: 0, sketch: this.sketchColor };
+      this.redraw();
+      return;
+    }
     const draft: Draft = {
       kind: tool === 'rect' ? 'rect' : tool === 'lasso' ? 'lasso' : 'stroke',
       points: [p],
@@ -462,6 +502,11 @@ export class CanvasView {
     if (!draft) return;
     const erase = draft.erase || undefined;
     const pts = draft.points;
+    if (draft.sketch) {
+      this.redraw();
+      this.hooks.onSketch({ points: pts, size: draft.size, color: draft.sketch, erase });
+      return;
+    }
     const minSize = 3 / this.scale();
     let shape: MaskShape | null = null;
     if (draft.kind === 'rect' && pts.length >= 2) {
@@ -497,7 +542,7 @@ export class CanvasView {
   private resize(): void {
     const dpr = window.devicePixelRatio || 1;
     const { clientWidth: w, clientHeight: h } = this.container;
-    for (const c of [this.overlay, this.fill, this.edge]) {
+    for (const c of [this.overlay, this.fill, this.edge, this.ink]) {
       c.width = Math.round(w * dpr);
       c.height = Math.round(h * dpr);
     }
@@ -575,7 +620,7 @@ export class CanvasView {
     // в превью; черновик — только у прямоугольника и лассо (и пока превью грузится), стирающий — красным
     const maskMode = this.maskMode();
     const shapes: (MaskShape | Draft)[] = maskMode ? [] : [...this.selection];
-    if (this.draft && !this.draft.live) shapes.push(this.draft);
+    if (this.draft && !this.draft.live && !this.draft.sketch) shapes.push(this.draft);
     if (shapes.length) {
       f.setTransform(1, 0, 0, 1, 0, 0);
       f.clearRect(0, 0, this.fill.width, this.fill.height);
@@ -608,6 +653,29 @@ export class CanvasView {
       ctx.drawImage(this.edge, 0, 0);
     }
 
+    // Набросок для модели — своими цветами поверх выделения; при правке маски его не видно, как и выделения
+    const strokes: (SketchStroke | Draft)[] = maskMode ? [] : [...this.sketch];
+    if (this.draft?.sketch) strokes.push(this.draft);
+    if (strokes.length) {
+      const k = this.ink.getContext('2d')!;
+      k.setTransform(1, 0, 0, 1, 0, 0);
+      k.clearRect(0, 0, this.ink.width, this.ink.height);
+      toImage(k);
+      k.lineCap = 'round';
+      k.lineJoin = 'round';
+      for (const stroke of strokes) {
+        k.globalCompositeOperation = stroke.erase ? 'destination-out' : 'source-over';
+        k.strokeStyle = 'color' in stroke ? stroke.color : stroke.sketch!;
+        k.lineWidth = stroke.size;
+        k.stroke(linePath(stroke.points));
+      }
+      k.globalCompositeOperation = 'source-over';
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 0.9;
+      ctx.drawImage(this.ink, 0, 0);
+      ctx.globalAlpha = 1;
+    }
+
     // Области задач с номерами, как в очереди, и границы правимого слоя: за ними маску не расширить
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.font = '600 12px "Golos Text Variable", system-ui, sans-serif';
@@ -633,9 +701,9 @@ export class CanvasView {
     }
     if (this.edit?.view.kind === 'layer') frame(this.edit.view.rect, 'Маска слоя', ACCENT, 2, [6, 4]);
 
-    // Курсор кисти; у мягкой кисти пунктиром — где кончается сплошная середина
+    // Курсор кисти; у мягкой кисти пунктиром — где кончается сплошная середина; у наброска — его цветом
     const tool = this.activeTool();
-    if (this.cursor && (tool === 'brush' || tool === 'eraser')) {
+    if (this.cursor && (tool === 'brush' || tool === 'eraser' || tool === 'sketch')) {
       const circle = (radius: number, dash: number[]) => {
         ctx.beginPath();
         ctx.arc(this.cursor!.x, this.cursor!.y, radius, 0, Math.PI * 2);
@@ -644,12 +712,13 @@ export class CanvasView {
         ctx.strokeStyle = 'rgba(0,0,0,0.55)';
         ctx.stroke();
         ctx.lineWidth = 1.2;
-        ctx.strokeStyle = tool === 'eraser' ? '#fff' : ACCENT;
+        ctx.strokeStyle = tool === 'eraser' ? '#fff' : tool === 'sketch' ? this.sketchColor : ACCENT;
         ctx.stroke();
         ctx.setLineDash([]);
       };
-      const radius = this.brushPx / 2;
+      const radius = (tool === 'sketch' ? this.sketchPx : this.brushPx) / 2;
       circle(radius, []);
+      if (tool === 'sketch') return;
       const soft = maskMode ? this.softness : 0;
       if (soft > 0 && radius * (1 - soft) >= 2) circle(radius * (1 - soft), [3, 3]);
     }

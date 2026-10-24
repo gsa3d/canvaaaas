@@ -10,14 +10,29 @@ import { CanvasDocument, TILE_SIZE, type NewPatch } from '../core/document.ts';
 import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, type ImageFormat } from '../core/image-file.ts';
 import { encodeProject, isProject, isProjectPath, openProject, PROJECT_EXTENSION } from '../core/project.ts';
 import type { RecentFiles } from '../core/recent.ts';
-import { buildLayer, fitGenerated, insideOf, layerAsGen, measure, prepareEdit, retarget, type Guide, type PreparedEdit, type RawImage } from '../core/edit-region.ts';
+import {
+  buildLayer,
+  directorImages,
+  fitGenerated,
+  insideOf,
+  layerAsGen,
+  measure,
+  overviewImage,
+  prepareEdit,
+  retarget,
+  type Guide,
+  type PreparedEdit,
+  type RawImage,
+} from '../core/edit-region.ts';
 import { intersect, type Rect } from '../core/frame.ts';
 import { expandMaskByDiff } from '../core/expand.ts';
-import { readLedger, withLedger } from '../core/ledger.ts';
+import { readLedger, withDirectorLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha, featherAlphaRegion, maskBBox } from '../core/mask.ts';
 import { applyShapes, applyShapesRegion } from '../core/mask-shapes.ts';
 import type { KeyStore } from '../core/secrets.ts';
-import { chatgptCodex, findCodex } from '../providers/chatgpt-codex.ts';
+import { checkSketch } from '../core/sketch.ts';
+import { chatgptCodex, chatgptDirector, findCodex } from '../providers/chatgpt-codex.ts';
+import { mockDirector, type PromptDirector } from '../providers/director.ts';
 import { laozhangGemini } from '../providers/laozhang-gemini.ts';
 import { mockProvider } from '../providers/mock.ts';
 import type { ImageProvider, InputImage } from '../providers/types.ts';
@@ -33,6 +48,7 @@ import {
   type RectDto,
   type RedoChange,
   type SizeChoice,
+  type SketchStroke,
   type StateDto,
 } from '../shared/api.ts';
 
@@ -64,6 +80,8 @@ interface Variant {
   /** С какой задачей и показом области сделан: ими же ляжет слой */
   prompt: string;
   hide: boolean;
+  /** Задача, как её расписал директор */
+  directed?: string;
 }
 
 /** Принятый слой, который правка перерисовывает: маска и место — на момент, когда попросили ещё вариантов */
@@ -92,6 +110,12 @@ interface Job {
   area: RectDto;
   variantsRequested: number;
   references: InputImage[];
+  sketch: SketchStroke[];
+  /** Перед генерацией задачу расписывает директор */
+  director: boolean;
+  /** Что директор написал и для какой задачи (taskKey): та же задача — тот же текст, без нового вызова */
+  directed?: { key: string; text: string };
+  directing: boolean;
   /** Ещё варианты принятого слоя: «Принять» кладёт вариант на его место */
   replaces?: Replaced;
   prep?: PreparedEdit;
@@ -150,6 +174,7 @@ export class Session {
   doc: CanvasDocument | null = null;
   private jobs: Job[] = [];
   private readonly providers = new Map<ModelChoice, ImageProvider>();
+  private directorImpl: PromptDirector | null = null;
   private generations = 0;
   private todayAtStart = 0;
   private readonly listeners = new Set<() => void>();
@@ -194,7 +219,7 @@ export class Session {
     this.codex = findCodex();
     if (this.providerKind !== 'laozhang') return;
     const today = new Date().toISOString().slice(0, 10);
-    this.todayAtStart = (await readLedger()).filter((e) => e.at.startsWith(today)).length;
+    this.todayAtStart = (await readLedger()).filter((e) => e.at.startsWith(today) && e.kind !== 'director').length;
   }
 
   onChange(fn: () => void): () => void {
@@ -231,6 +256,11 @@ export class Session {
       this.providers.set(model, p);
     }
     return p;
+  }
+
+  private director(): PromptDirector {
+    this.directorImpl ??= this.providerKind === 'mock' ? mockDirector({ delayMs: 800 }) : withDirectorLedger(chatgptDirector(), 'ui');
+    return this.directorImpl;
   }
 
   private async apiKey(): Promise<string> {
@@ -292,6 +322,10 @@ export class Session {
         error: j.error,
         createdAt: j.createdAt,
         refs: j.references.length,
+        sketch: j.sketch.length > 0,
+        director: j.director,
+        directing: j.directing,
+        directed: j.director && j.directed?.key === taskKey(j) ? j.directed.text : undefined,
         bbox: j.prep?.bbox ?? j.area,
         inside: j.prep?.frame.inside,
         imageSize: j.prep?.imageSize,
@@ -307,6 +341,7 @@ export class Session {
           current: v.current,
           prompt: v.prompt,
           hide: v.hide,
+          directed: v.directed,
         })),
         selected: j.selected,
         rev: j.rev,
@@ -325,6 +360,8 @@ export class Session {
         model: p.model,
         feather: p.feather,
         hide: p.hide,
+        directed: p.directed,
+        sketch: !!p.sketch?.length,
       })),
       canUndo: doc?.canUndo ?? false,
       canRedo: doc?.canRedo ?? false,
@@ -789,13 +826,15 @@ export class Session {
       shapes: req.shapes,
       area,
       references,
+      sketch: checkSketch(req.sketch),
+      director: !!req.director,
     });
   }
 
   /**
-   * «Ещё варианты» принятого слоя: та же задача (или поправленная), маска слоя и его референсы; модель видит холст
+   * «Ещё варианты» принятого слоя: та же задача (или поправленная), маска слоя, его референсы и набросок; модель видит холст
    * под слоем, а не его самого. Нынешний слой становится первым вариантом, чтобы новые было с чем сравнить;
-   * «Принять» кладёт выбранный на его место.
+   * «Принять» кладёт выбранный на его место. С той же задачей директор не нужен заново: слой помнит его текст.
    */
   patchVariants(patchId: string, req: PatchVariantsRequest): string {
     const patch = this.requireDoc().patch(patchId);
@@ -810,12 +849,17 @@ export class Session {
       shapes: [],
       area: { ...box, x: box.x + patch.rect.x, y: box.y + patch.rect.y },
       references: patch.refs ?? [],
+      sketch: patch.sketch ?? [],
+      director: req.director ?? patch.directed !== undefined,
+      directed: patch.directed ? { key: taskKey({ prompt: patch.prompt, hide: patch.hide ?? false }), text: patch.directed } : undefined,
       replaces: { patchId, mask: patch.mask, rect: patch.rect, feather: patch.feather },
     });
   }
 
   private enqueue(
-    task: Pick<Job, 'prompt' | 'hide' | 'model' | 'size' | 'shapes' | 'area' | 'references' | 'replaces'> & { variants: number },
+    task: Pick<Job, 'prompt' | 'hide' | 'model' | 'size' | 'shapes' | 'area' | 'references' | 'sketch' | 'director' | 'directed' | 'replaces'> & {
+      variants: number;
+    },
   ): string {
     const doc = this.requireDoc();
     const job: Job = {
@@ -828,6 +872,7 @@ export class Session {
       createdAt: new Date().toISOString(),
       status: 'queued',
       variantsRequested: Math.min(Math.max(Math.round(task.variants), 1), 4),
+      directing: false,
       maskUndo: [],
       maskRev: 0,
       variants: [],
@@ -887,6 +932,7 @@ export class Session {
         provider: this.provider(job.model),
         imageSize: job.size,
         references: job.references,
+        sketch: job.sketch,
       });
       job.prep = prep;
       job.mask = prep.insideMask;
@@ -903,6 +949,7 @@ export class Session {
           insideChangedPct: stats.insideChangedPct,
           prompt: current.prompt,
           hide: current.hide ?? false,
+          directed: current.directed,
         });
       }
       job.status = 'running';
@@ -937,17 +984,22 @@ export class Session {
     if (!prep) throw new Error('Задача ещё не подготовлена');
     const provider = this.provider(job.model);
     const task = { prompt: job.prompt, hide: job.hide };
+    const director = job.director;
     const fresh = Array.from({ length: count }, (_, i): Variant => ({ n: job.variants.length + i, status: 'running', ...task }));
     job.variants.push(...fresh);
     if (!job.variants.some((v) => v.status === 'done')) job.status = 'running';
     job.error = undefined;
     this.changed();
 
-    // Промпт и картинки для модели собираются заново, только если задачу или показ области поправили
+    // Директор — один раз на все новые варианты; промпт и картинки для модели собираются заново,
+    // только если задачу, показ области или текст директора поправили
     const ready = (async () => {
       const guide = guideOf(task.hide);
-      if (prep.request !== task.prompt || prep.guide !== guide) Object.assign(prep, await retarget(prep, { request: task.prompt, guide }));
-      return { prompt: prep.prompt, images: prep.images };
+      const directed = director ? await this.direct(job, prep, task) : undefined;
+      if (prep.request !== task.prompt || prep.guide !== guide || prep.directed !== directed) {
+        Object.assign(prep, await retarget(prep, { request: task.prompt, guide, directed }));
+      }
+      return { prompt: prep.prompt, images: prep.images, directed };
     })();
     let shown = false;
     await Promise.all(
@@ -965,6 +1017,7 @@ export class Session {
           const { gen, modelOutput } = await fitGenerated(prep, res.image);
           const stats = await measure(prep, gen, modelOutput);
           v.gen = gen;
+          v.directed = input.directed;
           v.elapsedMs = res.elapsedMs;
           v.outsideChangedPct = stats.outsideChangedPct;
           v.insideChangedPct = stats.insideChangedPct;
@@ -984,6 +1037,35 @@ export class Session {
     const failed = job.variants.find((v) => v.status === 'error');
     job.status = job.variants.some((v) => v.status === 'done') ? 'done' : 'error';
     job.error = job.status === 'error' ? failed?.error : undefined;
+  }
+
+  /** Задача, как её расписал директор; для той же задачи и показа области — прежний текст без нового вызова */
+  private async direct(job: Job, prep: PreparedEdit, task: { prompt: string; hide: boolean }): Promise<string> {
+    const key = taskKey(task);
+    if (job.directed?.key === key) return job.directed.text;
+    const doc = this.doc;
+    job.directing = true;
+    this.changed();
+    try {
+      const overview = doc?.id === job.docId ? await overviewImage(await doc.thumbnail(1024), prep.canvas, prep.frame.rect) : undefined;
+      const res = await this.director().direct({
+        request: task.prompt,
+        style: job.style,
+        hide: task.hide,
+        images: await directorImages(prep, overview),
+        sketch: prep.sketch.length > 0,
+        overview: !!overview,
+        references: prep.references.length,
+        signal: job.abort.signal,
+      });
+      job.directed = { key, text: res.text };
+      return res.text;
+    } catch (err) {
+      throw new Error(`Директор: ${message(err)}`);
+    } finally {
+      job.directing = false;
+      this.changed();
+    }
   }
 
   selectVariant(jobId: string, n: number): void {
@@ -1051,6 +1133,8 @@ export class Session {
         feather: job.prep.feather,
         prompt: v.prompt,
         hide: v.hide,
+        directed: v.directed,
+        sketch: job.sketch.length ? job.sketch : undefined,
         jobId: job.id,
         variant: v.n,
         createdAt: new Date().toISOString(),
@@ -1183,13 +1267,19 @@ function guideOf(hide: boolean): Guide {
   return hide ? 'blank' : 'pair';
 }
 
+/** Что директор получил на вход, кроме картинок: та же задача и показ области — тот же его текст */
+function taskKey(task: { prompt: string; hide: boolean }): string {
+  return `${task.hide}:${task.prompt}`;
+}
+
 /** Поправка задачи перед повтором; true — что-то поменялось */
 function redo(job: Job, change: RedoChange): boolean {
-  const before = `${job.hide}:${job.prompt}`;
+  const before = `${job.director}:${taskKey(job)}`;
   const prompt = change.prompt?.trim();
   if (prompt) job.prompt = prompt;
   if (change.hide !== undefined) job.hide = change.hide;
-  return `${job.hide}:${job.prompt}` !== before;
+  if (change.director !== undefined) job.director = !!change.director;
+  return `${job.director}:${taskKey(job)}` !== before;
 }
 
 /** Маска слоя одним каналом на его месте на холсте — так её принимает prepareEdit */

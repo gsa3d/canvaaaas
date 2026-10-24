@@ -9,7 +9,7 @@ import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { compositeVariant, prepareEdit } from '../src/core/edit-region.ts';
 import { renderMask } from '../src/core/mask-shapes.ts';
-import { agentPrompt, CHATGPT_SIZE, chatgptCodex, describeFailure, scanRollout } from '../src/providers/chatgpt-codex.ts';
+import { agentPrompt, CHATGPT_SIZE, chatgptCodex, chatgptDirector, describeFailure, scanRollout } from '../src/providers/chatgpt-codex.ts';
 
 const FAKE_CODEX = `
 import { appendFileSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -32,6 +32,10 @@ if (mode === 'hang') {
 } else if (mode === 'nologin') {
   process.stderr.write('Error: Not logged in\\n');
   process.exit(1);
+} else if (mode === 'director') {
+  say({ type: 'error', message: 'Reconnecting... 1/5' });
+  say({ type: 'item.completed', item: { id: 'm', type: 'agent_message', text: 'Here it is:\\n<task>Paint a small red boat\\non the water.</task>' } });
+  say({ type: 'turn.completed', usage: {} });
 } else {
   setTimeout(() => {
     const d = new Date();
@@ -168,6 +172,30 @@ describe.skipIf(process.platform === 'win32')('ChatGPT через Codex CLI', ()
       expect(Date.now() - started).toBeGreaterThanOrEqual(800);
     } finally {
       process.env.FAKE_DELAY = '0';
+    }
+  });
+
+  it('директор: тот же Codex без инструмента картинок, картинки по порядку, ответ — текст между тегами', async () => {
+    process.env.FAKE_MODE = 'director';
+    process.env.OPENAI_API_KEY = 'sk-test-not-for-codex';
+    try {
+      const director = chatgptDirector({ codexPath, codexHome });
+      const req = { request: 'лодка', style: 'акварель', hide: false, sketch: false, overview: false, references: 0, images: [await jpeg('#fff'), await jpeg('#f0f')] };
+      const res = await director.direct(req);
+      expect(res.text).toBe('Paint a small red boat on the water.');
+      const run = JSON.parse(await readFile(log(), 'utf8'));
+      expect(run.args.slice(0, 2)).toEqual(['exec', '--json']);
+      expect(run.args).toContain('--ignore-user-config');
+      expect(run.args.join(' ')).not.toContain('image_generation');
+      expect(run.imageBytes).toHaveLength(2);
+      expect(run.apiKey).toBeNull();
+      expect(run.input).toContain("Artist's task: лодка");
+      expect(existsSync(run.args[run.args.indexOf('--cd') + 1])).toBe(false);
+
+      process.env.FAKE_MODE = 'nologin';
+      await expect(director.direct(req)).rejects.toThrow(/не вошёл в ChatGPT/);
+    } finally {
+      delete process.env.OPENAI_API_KEY;
     }
   });
 

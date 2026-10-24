@@ -10,6 +10,7 @@ import {
   IconEye,
   IconEyeOff,
   IconHandStop,
+  IconHelpCircle,
   IconLasso,
   IconMarquee2,
   IconMask,
@@ -18,12 +19,14 @@ import {
   IconPhotoPlus,
   IconPlus,
   IconRefresh,
+  IconScribble,
   IconTrash,
   IconX,
   type Icon,
 } from '@tabler/icons-preact';
 import type { ComponentChildren } from 'preact';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { createPortal } from 'preact/compat';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { adviseSize, intersect, type ModelOutputs, type SizeAdvice } from '../core/frame.ts';
 import {
   CANVAS_PRESETS,
@@ -41,6 +44,7 @@ import {
   type RecentDto,
   type RedoChange,
   type SizeChoice,
+  type SketchStroke,
   type StateDto,
 } from '../shared/api.ts';
 import { getState, post, subscribe, upload, uploadReference } from './api.ts';
@@ -146,6 +150,7 @@ const TOOL_ICONS: Record<Tool, Icon> = {
   lasso: IconLasso,
   brush: IconBrush,
   eraser: IconEraser,
+  sketch: IconScribble,
 };
 
 const TOOLS: { id: Tool; label: string; key: string }[] = [
@@ -153,8 +158,12 @@ const TOOLS: { id: Tool; label: string; key: string }[] = [
   { id: 'lasso', label: 'Лассо', key: 'L' },
   { id: 'brush', label: 'Кисть', key: 'B' },
   { id: 'eraser', label: 'Ластик', key: 'E' },
+  { id: 'sketch', label: 'Набросок для модели, Alt стирает', key: 'S' },
   { id: 'hand', label: 'Рука (или зажать пробел)', key: 'H' },
 ];
+
+/** Цвета наброска под рукой; любой другой — из палитры */
+const SKETCH_COLORS = ['#ff3b30', '#1e88ff', '#22b14c', '#111111', '#ffffff'];
 
 const MODELS: { id: ModelChoice; label: string; tag: string }[] = [
   { id: 'flash', label: 'Nano Banana 2', tag: '' },
@@ -164,6 +173,11 @@ const MODELS: { id: ModelChoice; label: string; tag: string }[] = [
 
 /** Nano Banana идёт через laozhang.ai по ключу, ChatGPT — по подписке через Codex, ключ ему не нужен */
 const needsKey = (model: ModelChoice) => model !== 'chatgpt';
+
+/** Что сейчас с задачей: директор расписывает её до генерации */
+function jobStatus(job: JobDto): string {
+  return job.directing ? 'Директор думает' : STATUS[job.status];
+}
 
 const STATUS: Record<JobDto['status'], string> = {
   queued: 'Ждёт очереди',
@@ -180,9 +194,15 @@ export function App() {
   /** Мягкость края кисти при правке маски, 0..1 */
   const [softness, setSoftness] = useState(0.5);
   const [selection, setSelection] = useState<MaskShape[]>([]);
+  /** Набросок для модели к новой правке */
+  const [sketch, setSketch] = useState<SketchStroke[]>([]);
+  const [sketchSize, setSketchSize] = useState(10);
+  const [sketchColor, setSketchColor] = useState(SKETCH_COLORS[0]!);
   const [prompt, setPrompt] = useState('');
   /** Стереть модели то, что под выделением */
   const [hide, setHide] = useState(false);
+  /** Перед генерацией ChatGPT расписывает задачу */
+  const [director, setDirector] = useState(false);
   const [model, setModel] = useState<ModelChoice>('flash');
   const [size, setSize] = useState<SizeChoice>('auto');
   const [variants, setVariants] = useState(2);
@@ -207,6 +227,9 @@ export function App() {
   const nextNumber = useRef(1);
   const refreshSeq = useRef(0);
   const onShape = useRef<(shape: MaskShape) => void>(() => undefined);
+  const onSketch = useRef<(stroke: SketchStroke) => void>(() => undefined);
+  /** В каком порядке в форму новой правки ложились фигуры выделения и штрихи наброска — ⌘Z убирает последнее */
+  const formOrder = useRef<('shape' | 'sketch')[]>([]);
   const onMaskShape = useRef<(view: MaskEditView, shape: MaskShape) => Promise<MaskEditResult>>(() => Promise.reject(new Error('Нет правки маски')));
   const styleTimer = useRef<number | undefined>(undefined);
   const toastTimer = useRef<number | undefined>(undefined);
@@ -237,6 +260,7 @@ export function App() {
   useEffect(() => {
     viewRef.current = new CanvasView(stageRef.current!, {
       onShape: (shape) => onShape.current(shape),
+      onSketch: (stroke) => onSketch.current(stroke),
       onMaskShape: (view, shape) => onMaskShape.current(view, shape),
       onZoom: setZoom,
     });
@@ -256,6 +280,8 @@ export function App() {
   useEffect(() => {
     setStyleDraft(doc?.style ?? '');
     setSelection([]);
+    setSketch([]);
+    formOrder.current = [];
     setMaskJob(null);
     setMaskLayer(null);
   }, [doc?.id]);
@@ -270,6 +296,8 @@ export function App() {
   const maskEditKey = JSON.stringify(maskEdit);
   useEffect(() => viewRef.current?.setMaskEdit(maskEdit), [maskEditKey]);
   useEffect(() => viewRef.current?.setSelection(selection), [selection]);
+  useEffect(() => viewRef.current?.setSketch(sketch), [sketch]);
+  useEffect(() => viewRef.current?.setSketchBrush(sketchSize, sketchColor), [sketchSize, sketchColor]);
   useEffect(() => viewRef.current?.setTool(tool), [tool]);
   useEffect(() => viewRef.current?.setBrush(brush, softness), [brush, softness]);
 
@@ -280,7 +308,28 @@ export function App() {
     return () => window.clearInterval(t);
   }, [anyRunning]);
 
-  onShape.current = (shape) => setSelection((s) => [...s, shape]);
+  onShape.current = (shape) => {
+    formOrder.current.push('shape');
+    setSelection((s) => [...s, shape]);
+  };
+  onSketch.current = (stroke) => {
+    formOrder.current.push('sketch');
+    setSketch((s) => [...s, stroke]);
+  };
+  const clearSelection = () => {
+    formOrder.current = formOrder.current.filter((k) => k !== 'shape');
+    setSelection([]);
+  };
+  const clearSketch = () => {
+    formOrder.current = formOrder.current.filter((k) => k !== 'sketch');
+    setSketch([]);
+  };
+  /** ⌘Z в форме новой правки: последняя фигура или последний штрих наброска */
+  const undoForm = () => {
+    const last = formOrder.current.pop() ?? (selection.length ? 'shape' : 'sketch');
+    if (last === 'sketch') setSketch((s) => s.slice(0, -1));
+    else setSelection((s) => s.slice(0, -1));
+  };
   onMaskShape.current = (view, shape) =>
     post<MaskEditResult>(view.kind === 'job' ? `/api/jobs/${view.target}/mask` : `/api/history/${view.target}/mask`, { shapes: [shape] }).catch(
       (err: unknown) => {
@@ -292,7 +341,10 @@ export function App() {
   const maskChanged = () => viewRef.current?.maskChanged();
 
   const hasSelection = selection.some((s) => !s.erase);
+  const hasSketch = sketch.some((s) => !s.erase);
   const canGenerate = !!doc && hasSelection && prompt.trim().length > 0 && !maskJob && !maskLayer;
+  // Директор идёт через Codex; у подставной модели — подставной директор
+  const canDirect = state?.provider === 'mock' || !!state?.codex;
   // У ChatGPT одно разрешение — его выбирает сама модель
   const sizeFor = (m: ModelChoice): SizeChoice => (m === 'chatgpt' ? 'auto' : size);
   const sizeAdvice = doc && state && hasSelection ? adviseSelection(doc, selection, state.models[model], sizeFor(model)) : null;
@@ -304,9 +356,21 @@ export function App() {
       return;
     }
     try {
-      const { id } = await post<{ id: string }>('/api/jobs', { shapes: selection, prompt, variants, model, size: sizeFor(model), refs, hide });
-      // Форма — для следующей области: задача, референсы и скрытие у неё свои; модель, разрешение и число вариантов остаются
+      const { id } = await post<{ id: string }>('/api/jobs', {
+        shapes: selection,
+        prompt,
+        variants,
+        model,
+        size: sizeFor(model),
+        refs,
+        hide,
+        sketch: hasSketch ? sketch : undefined,
+        director: director && canDirect,
+      });
+      // Форма — для следующей области: задача, набросок, референсы и скрытие у неё свои; модель, разрешение, число вариантов и директор остаются
       setSelection([]);
+      setSketch([]);
+      formOrder.current = [];
       setPrompt('');
       setRefs([]);
       setHide(false);
@@ -319,7 +383,7 @@ export function App() {
   // Правки маски слоя — обычные шаги истории документа, поэтому в режиме маски слоя ⌘Z отменяет их
   const undo = () => {
     if (maskJob) post(`/api/jobs/${maskJob}/mask/undo`).then(maskChanged, fail);
-    else if (selection.length && !maskLayer) setSelection((s) => s.slice(0, -1));
+    else if ((selection.length || sketch.length) && !maskLayer) undoForm();
     else if (state?.canUndo) post('/api/history/undo').then(maskChanged, fail);
   };
   const redo = () => {
@@ -404,6 +468,9 @@ export function App() {
         if (editing) document.execCommand('redo');
         else redo();
         break;
+      case 'deselect':
+        clearSelection();
+        break;
       case 'zoom-fit':
         view?.fit();
         break;
@@ -473,7 +540,7 @@ export function App() {
       else if (dialog) setDialog(null);
       else if (maskJob) setMaskJob(null);
       else if (maskLayer) setMaskLayer(null);
-      else setSelection([]);
+      else clearSelection();
       (document.activeElement as HTMLElement | null)?.blur();
       return;
     }
@@ -485,6 +552,7 @@ export function App() {
         o: 'open',
         n: 'new',
         s: 'save',
+        d: 'deselect',
         '0': 'zoom-fit',
         '1': 'zoom-100',
         '2': 'zoom-50',
@@ -513,6 +581,7 @@ export function App() {
     if (e.code === 'BracketLeft' || e.code === 'BracketRight') {
       const up = e.code === 'BracketRight';
       if (e.shiftKey) setSoftness((v) => Math.min(1, Math.max(0, Math.round((v + (up ? -0.25 : 0.25)) * 4) / 4)));
+      else if (tool === 'sketch') setSketchSize((b) => (up ? Math.min(120, Math.round(b * 1.25) + 1) : Math.max(2, Math.round(b / 1.25))));
       else setBrush((b) => (up ? Math.min(400, Math.round(b * 1.25)) : Math.max(4, Math.round(b / 1.25))));
     }
     const focused = jobs.find((j) => j.id === focusJob);
@@ -637,7 +706,7 @@ export function App() {
                 class="ghost icon"
                 title="Отменить (⌘Z)"
                 aria-label="Отменить"
-                disabled={!state?.canUndo && !selection.length && !maskJob}
+                disabled={!state?.canUndo && !selection.length && !sketch.length && !maskJob}
                 onClick={undo}
               >
                 <IconArrowBackUp size={20} stroke={STROKE} />
@@ -696,19 +765,53 @@ export function App() {
       <nav class="rail" aria-label="Инструменты">
         {TOOLS.map((t) => {
           const ToolIcon = TOOL_ICONS[t.id];
-          return (
+          // Набросок — подсказка модели к новой правке, а не выделение: отдельно от инструментов выделения
+          const button = (
             <button
               key={t.id}
               class={tool === t.id ? 'tool active' : 'tool'}
-              title={`${t.label} (${t.key})`}
+              title={t.id === 'sketch' && (maskJob || maskLayer) ? 'Набросок — только для новой правки' : `${t.label} (${t.key})`}
               aria-label={t.label}
               aria-pressed={tool === t.id}
+              disabled={t.id === 'sketch' && !!(maskJob || maskLayer)}
               onClick={() => setTool(t.id)}
             >
               <ToolIcon size={22} stroke={STROKE} />
             </button>
           );
+          return t.id === 'sketch' ? [<span class="rail-sep" key="sep" />, button] : button;
         })}
+        {tool === 'sketch' && (
+          <>
+            <label class="brush-size" title="Толщина наброска на экране ([ и ])">
+              <input
+                type="range"
+                min={2}
+                max={120}
+                value={sketchSize}
+                aria-label="Толщина наброска"
+                onInput={(e) => setSketchSize(Number(e.currentTarget.value))}
+              />
+              <span>{sketchSize}</span>
+            </label>
+            <div class="sketch-colors" role="radiogroup" aria-label="Цвет наброска">
+              {SKETCH_COLORS.map((c) => (
+                <button
+                  key={c}
+                  role="radio"
+                  aria-checked={sketchColor === c}
+                  aria-label={c}
+                  class={sketchColor === c ? 'swatch active' : 'swatch'}
+                  style={{ background: c }}
+                  onClick={() => setSketchColor(c)}
+                />
+              ))}
+              <label class={SKETCH_COLORS.includes(sketchColor) ? 'swatch custom' : 'swatch custom active'} title="Другой цвет" style={{ background: sketchColor }}>
+                <input type="color" value={sketchColor} aria-label="Другой цвет наброска" onInput={(e) => setSketchColor(e.currentTarget.value)} />
+              </label>
+            </div>
+          </>
+        )}
         {(tool === 'brush' || tool === 'eraser') && (
           <label class="brush-size" title="Размер кисти на экране ([ и ])">
             <input type="range" min={4} max={400} value={brush} aria-label="Размер кисти" onInput={(e) => setBrush(Number(e.currentTarget.value))} />
@@ -736,13 +839,15 @@ export function App() {
         <div ref={stageRef} class="osd" />
         {maskJob && (
           <div class="stage-banner">
-            Правка маски задачи #{numbers.current.get(maskJob)}: кисть и фигуры добавляют, ластик и Alt стирают.
+            Маска задачи #{numbers.current.get(maskJob)}
+            <Help>Кисть и фигуры добавляют к маске, ластик и Alt стирают. Мягкость кисти — ⇧[ и ⇧].</Help>
             <button onClick={() => setMaskJob(null)}>Готово</button>
           </div>
         )}
         {editedLayer && (
           <div class="stage-banner">
-            Маска слоя «{short(editedLayer.prompt)}»: ластик и Alt скрывают, кисть и фигуры возвращают.
+            Маска слоя «{short(editedLayer.prompt)}»
+            <Help>Ластик и Alt скрывают часть слоя, кисть и фигуры возвращают её — и за краем прежнего выделения. ⌘Z отменяет мазок.</Help>
             <button onClick={() => setMaskLayer(null)}>Готово</button>
           </div>
         )}
@@ -755,10 +860,7 @@ export function App() {
         {state && !state.hasKey && needsKey(model) && (
           <section class="panel notice">
             <h2>Нужен ключ laozhang.ai</h2>
-            <p class="hint">
-              Без него Nano Banana не работает. Ключ вводится один раз в настройках (⌘,) и хранится на этом компьютере. ChatGPT Images
-              ключ не нужен: он идёт по подписке ChatGPT — выберите его в «Модели».
-            </p>
+            <p class="hint">Без него не работает Nano Banana. ChatGPT Images идёт по подписке, ключ ему не нужен.</p>
             <button class="primary" onClick={() => setDialog('settings')}>
               Открыть настройки
             </button>
@@ -770,7 +872,7 @@ export function App() {
               <h2>Стиль документа</h2>
               <textarea
                 rows={2}
-                placeholder="Добавляется к каждой правке: например, «книжная иллюстрация, тёплый вечерний свет»"
+                placeholder="Например: книжная иллюстрация, тёплый вечерний свет"
                 value={styleDraft}
                 onInput={(e) => {
                   setStyleDraft(e.currentTarget.value);
@@ -789,19 +891,27 @@ export function App() {
                 void addReferences(e.dataTransfer?.files ?? []);
               }}
             >
-              <h2>Новая правка</h2>
-              <p class={hasSelection ? 'hint ok' : 'hint'}>
-                {hasSelection
-                  ? `Фигур в выделении: ${selection.length}. Esc сбрасывает выделение, ⌘Z убирает последнюю фигуру.`
-                  : 'Выделите область на холсте: прямоугольник, лассо или кисть. Alt стирает лишнее.'}
-              </p>
-              <textarea
-                rows={3}
-                placeholder="Опишите, что должно получиться: «рельсы на мосту продолжают колею слева, без разрыва»"
-                value={prompt}
-                onInput={(e) => setPrompt(e.currentTarget.value)}
-              />
-              <HideOption checked={hide} onChange={setHide} />
+              <h2>
+                Новая правка
+                <Help>
+                  Выделите область прямоугольником (R), лассо (L) или кистью (B), с Alt — вычесть из выделения. Набросок (S) — подсказка
+                  модели: где и каким должно быть то, что в задаче; с Alt он стирается. ⌘Z убирает последнее, ⌘D снимает выделение, ⌘↵ —
+                  сгенерировать.
+                </Help>
+              </h2>
+              {(selection.length > 0 || sketch.length > 0) && (
+                <div class="chips">
+                  {selection.length > 0 && (
+                    <Chip icon={IconMarquee2} label="Выделение" clear="Снять выделение (⌘D)" onClear={clearSelection} />
+                  )}
+                  {sketch.length > 0 && <Chip icon={IconScribble} label="Набросок" clear="Стереть набросок" onClear={clearSketch} />}
+                </div>
+              )}
+              <textarea rows={3} placeholder="Что должно получиться" value={prompt} onInput={(e) => setPrompt(e.currentTarget.value)} />
+              <div class="checks">
+                <HideOption checked={hide} onChange={setHide} />
+                <DirectorOption checked={director && canDirect} disabled={!canDirect} onChange={setDirector} />
+              </div>
               <div class="refs">
                 {refs.map((id) => (
                   <figure class="ref">
@@ -860,82 +970,81 @@ export function App() {
               </button>
             </section>
 
-            <section class="panel">
-              <h2>
-                Очередь <span class="dim">{jobs.length || ''}</span>
-              </h2>
-              {!jobs.length && <p class="hint">Здесь появятся правки, пока вы их не примете или не отклоните.</p>}
-              {sortedJobs.map((job) => (
-                <JobCard
-                  key={job.id}
-                  job={job}
-                  replacing={job.replaces === undefined ? undefined : (layers.find((p) => p.id === job.replaces) ?? null)}
-                  number={numbers.current.get(job.id) ?? 0}
-                  focused={job.id === focusJob}
-                  maskMode={job.id === maskJob}
-                  variants={variants}
-                  onFocus={() => focus(job)}
-                  onSwitch={(dir) => switchVariant(job, dir)}
-                  onMaskMode={() => {
-                    setMaskJob(maskJob === job.id ? null : job.id);
-                    setMaskLayer(null);
-                    setFocusJob(job.id);
-                    if (tool === 'hand') setTool('brush');
-                  }}
-                  onRedo={(change) => {
-                    if (needsKey(job.model) && !state?.hasKey) setDialog('settings');
-                    else redoJob(job, change).catch(fail);
-                  }}
-                  onAction={(action) => {
-                    if (action === 'expand') {
-                      post<{ addedPx: number }>(`/api/jobs/${job.id}/mask/expand`)
-                        .then(({ addedPx }) => {
-                          if (addedPx) maskChanged();
-                          const area = job.inside ? job.inside.width * job.inside.height : 1;
-                          notify(
-                            addedPx
-                              ? `Маска выросла на ${((100 * addedPx) / area).toFixed(1)}% куска`
-                              : 'За краем выделения модель ничего не дорисовала',
-                            false,
-                          );
-                        })
-                        .catch(fail);
-                      return;
-                    }
-                    const path = { accept: 'accept', discard: 'discard', retry: 'retry', more: 'more', undoMask: 'mask/undo' }[action];
-                    if (action === 'accept' || action === 'discard') setMaskJob(null);
-                    post(`/api/jobs/${job.id}/${path}`, action === 'more' ? { count: variants } : undefined)
-                      .then(() => action === 'undoMask' && maskChanged())
-                      .catch(fail);
-                  }}
-                />
-              ))}
-            </section>
-
-            <section class="panel">
-              <h2>Слои</h2>
-              {!layers.length && (
-                <p class="hint">
-                  Принятые правки ложатся слоями поверх исходника. Глаз скрывает слой, маска стирает его часть или возвращает обратно,
-                  стрелки по кругу генерируют ещё варианты той же правки, а карандаш — с поправленной задачей.
-                </p>
-              )}
-              <ol class="layers">
-                {[...layers].reverse().map((p) => (
-                  <LayerItem
-                    key={p.id}
-                    patch={p}
-                    maskMode={p.id === maskLayer}
+            {jobs.length > 0 && (
+              <section class="panel">
+                <h2>
+                  Очередь <span class="dim">{jobs.length}</span>
+                </h2>
+                {sortedJobs.map((job) => (
+                  <JobCard
+                    key={job.id}
+                    job={job}
+                    canDirect={canDirect}
+                    replacing={job.replaces === undefined ? undefined : (layers.find((p) => p.id === job.replaces) ?? null)}
+                    number={numbers.current.get(job.id) ?? 0}
+                    focused={job.id === focusJob}
+                    maskMode={job.id === maskJob}
                     variants={variants}
-                    onToggle={() => post(`/api/history/${p.id}/toggle`).catch(fail)}
-                    onShow={() => viewRef.current?.showRect(p.rect)}
-                    onMask={() => editLayerMask(p)}
-                    onVariants={(change) => void layerVariants(p, change)}
-                    onDelete={() => deleteLayer(p)}
+                    onFocus={() => focus(job)}
+                    onSwitch={(dir) => switchVariant(job, dir)}
+                    onMaskMode={() => {
+                      setMaskJob(maskJob === job.id ? null : job.id);
+                      setMaskLayer(null);
+                      setFocusJob(job.id);
+                      if (tool === 'hand' || tool === 'sketch') setTool('brush');
+                    }}
+                    onRedo={(change) => {
+                      if (needsKey(job.model) && !state?.hasKey) setDialog('settings');
+                      else redoJob(job, change).catch(fail);
+                    }}
+                    onAction={(action) => {
+                      if (action === 'expand') {
+                        post<{ addedPx: number }>(`/api/jobs/${job.id}/mask/expand`)
+                          .then(({ addedPx }) => {
+                            if (addedPx) maskChanged();
+                            const area = job.inside ? job.inside.width * job.inside.height : 1;
+                            notify(
+                              addedPx
+                                ? `Маска выросла на ${((100 * addedPx) / area).toFixed(1)}% куска`
+                                : 'За краем выделения модель ничего не дорисовала',
+                              false,
+                            );
+                          })
+                          .catch(fail);
+                        return;
+                      }
+                      const path = { accept: 'accept', discard: 'discard', retry: 'retry', more: 'more', undoMask: 'mask/undo' }[action];
+                      if (action === 'accept' || action === 'discard') setMaskJob(null);
+                      post(`/api/jobs/${job.id}/${path}`, action === 'more' ? { count: variants } : undefined)
+                        .then(() => action === 'undoMask' && maskChanged())
+                        .catch(fail);
+                    }}
                   />
                 ))}
-              </ol>
-            </section>
+              </section>
+            )}
+
+            {layers.length > 0 && (
+              <section class="panel">
+                <h2>Слои</h2>
+                <ol class="layers">
+                  {[...layers].reverse().map((p) => (
+                    <LayerItem
+                      key={p.id}
+                      patch={p}
+                      canDirect={canDirect}
+                      maskMode={p.id === maskLayer}
+                      variants={variants}
+                      onToggle={() => post(`/api/history/${p.id}/toggle`).catch(fail)}
+                      onShow={() => viewRef.current?.showRect(p.rect)}
+                      onMask={() => editLayerMask(p)}
+                      onVariants={(change) => void layerVariants(p, change)}
+                      onDelete={() => deleteLayer(p)}
+                    />
+                  ))}
+                </ol>
+              </section>
+            )}
           </>
         )}
       </aside>
@@ -1002,6 +1111,8 @@ type JobAction = 'accept' | 'discard' | 'retry' | 'more' | 'expand' | 'undoMask'
 
 function JobCard(props: {
   job: JobDto;
+  /** Директор доступен: есть Codex */
+  canDirect: boolean;
   /** Слой, который заменит принятый вариант; null — его уже удалили */
   replacing?: PatchDto | null;
   number: number;
@@ -1025,6 +1136,8 @@ function JobCard(props: {
   const replacing = props.replacing;
   // Вариант сделан не с той задачей, что сейчас в карточке: после повтора с поправкой
   const otherTask = selected && (selected.prompt !== job.prompt || selected.hide !== job.hide) ? selected : null;
+  // Текст директора — того варианта, что на холсте; пока вариантов нет — для следующих
+  const directed = (selected?.status === 'done' ? selected.directed : undefined) ?? job.directed;
   // Поправить задачу можно, когда новых вариантов не ждём
   const canRedo = (job.status === 'done' && running === 0) || job.status === 'error';
   useEffect(() => {
@@ -1034,6 +1147,8 @@ function JobCard(props: {
     <RedoForm
       prompt={job.prompt}
       hide={job.hide}
+      director={job.director}
+      canDirect={props.canDirect}
       variants={props.variants}
       onCancel={() => setRedoing(false)}
       onSubmit={(change) => {
@@ -1063,21 +1178,28 @@ function JobCard(props: {
           </button>
         )}
       </header>
+      {directed && !redoing && <Directed text={directed} />}
       {redoForm}
       <p class="job-status">
-        {STATUS[job.status]}
+        {jobStatus(job)}
         {job.status === 'running' && `, готово ${done.length} из ${job.variants.length}`}
         {busy && `, ${clock(Date.now() - Date.parse(job.createdAt))}`}
         {job.status === 'done' && running > 0 && `, ещё ${running} в работе`}
         {job.modelSize && <span class="dim">, {[job.imageSize, MODELS.find((m) => m.id === job.model)?.tag].filter(Boolean).join(' ')}</span>}
         {job.refs > 0 && <span class="dim">, референсов: {job.refs}</span>}
+        {job.sketch && <span class="dim">, с наброском</span>}
         {job.hide && <span class="dim">, под маской стёрто</span>}
       </p>
       {replacing !== undefined && (
         <p class="hint">
-          {replacing
-            ? 'Ещё варианты слоя: модель видит холст под ним. Принятый вариант ляжет на место слоя, «Отклонить» оставит слой как был.'
-            : 'Слой удалили: принятый вариант ляжет новым слоем.'}
+          {replacing ? (
+            <>
+              Замена слоя
+              <Help>Модель видит холст под слоем. Принятый вариант ляжет на место слоя, «Отклонить» оставит слой как был.</Help>
+            </>
+          ) : (
+            'Слой удалён: вариант ляжет новым слоем'
+          )}
         </p>
       )}
       {job.error && <p class="job-error">{job.error}</p>}
@@ -1108,8 +1230,8 @@ function JobCard(props: {
           )}
           {selected?.insideChangedPct !== undefined && selected.insideChangedPct < 2 && (
             <p class="job-warning">
-              В этом варианте модель почти ничего не изменила. Опишите, что должно получиться, а не что исправить, или выделите
-              область поменьше.
+              Модель почти ничего не изменила
+              <Help>Опишите, что должно получиться, а не что исправить, или выделите область поменьше.</Help>
             </p>
           )}
           <div class="row">
@@ -1157,6 +1279,7 @@ function JobCard(props: {
 
 function LayerItem(props: {
   patch: PatchDto;
+  canDirect: boolean;
   maskMode: boolean;
   /** Сколько вариантов сгенерировать */
   variants: number;
@@ -1181,7 +1304,7 @@ function LayerItem(props: {
       >
         {patch.active ? <IconEye size={18} stroke={STROKE} /> : <IconEyeOff size={18} stroke={STROKE} />}
       </button>
-      <button class="link" onClick={props.onShow} title="Показать на холсте">
+      <button class="link" onClick={props.onShow} title={patch.directed ? `Показать на холсте\n\nДиректор: ${patch.directed}` : 'Показать на холсте'}>
         {patch.prompt}
       </button>
       <span class="dim">{time}</span>
@@ -1220,6 +1343,8 @@ function LayerItem(props: {
           <RedoForm
             prompt={patch.prompt}
             hide={patch.hide ?? false}
+            director={patch.directed !== undefined}
+            canDirect={props.canDirect}
             variants={props.variants}
             onCancel={() => setRedoing(false)}
             onSubmit={(change) => {
@@ -1236,22 +1361,146 @@ function LayerItem(props: {
 /** Флажок «скрыть от модели то, что под маской» */
 function HideOption(props: { checked: boolean; onChange: (checked: boolean) => void }) {
   return (
-    <label
-      class="check"
-      title="Модель получит кусок, где выделенная область стёрта, и нарисует её с нуля, не держась за то, что там было. Подходит, чтобы заменить предмет, а не поправить его"
-    >
-      <input type="checkbox" checked={props.checked} onChange={(e) => props.onChange(e.currentTarget.checked)} />
-      Скрыть от модели то, что под маской
-    </label>
+    <span class="check">
+      <label>
+        <input type="checkbox" checked={props.checked} onChange={(e) => props.onChange(e.currentTarget.checked)} />
+        Скрыть от модели, что под маской
+      </label>
+      <Help>Модель получит кусок, где область залита серым, и нарисует её с нуля, не держась за то, что там было. Подходит, чтобы заменить предмет, а не поправить его.</Help>
+    </span>
   );
 }
 
-/** Повтор правки с поправкой: задача и скрытие под маской; ⌘↵ — сгенерировать, Esc — передумать */
-function RedoForm(props: { prompt: string; hide: boolean; variants: number; onSubmit: (change: RedoChange) => void; onCancel: () => void }) {
+/** Флажок директора: ChatGPT расписывает задачу перед генерацией */
+function DirectorOption(props: { checked: boolean; disabled: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <span class="check">
+      <label title={props.disabled ? 'Директор работает через Codex, а он не найден' : undefined}>
+        <input type="checkbox" checked={props.checked} disabled={props.disabled} onChange={(e) => props.onChange(e.currentTarget.checked)} />
+        Директор
+      </label>
+      <Help>
+        Перед генерацией ChatGPT смотрит на кусок, набросок, задачу и стиль документа и расписывает задачу для модели подробно. Модель
+        получает оба текста; ваша задача остаётся как есть, текст директора — в карточке под ней. Идёт по подписке ChatGPT через Codex,
+        добавляет около минуты.
+      </Help>
+    </span>
+  );
+}
+
+/** Задача, как её расписал директор: две строки, по щелчку — целиком */
+function Directed(props: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <p
+      class={open ? 'directed open' : 'directed'}
+      title={open ? undefined : 'Показать целиком'}
+      onClick={(e) => {
+        e.stopPropagation();
+        setOpen((v) => !v);
+      }}
+    >
+      <span class="directed-label">Директор</span> {props.text}
+    </p>
+  );
+}
+
+/** Плашка «что уже есть в форме» с крестиком, который это убирает */
+function Chip(props: { icon: Icon; label: string; clear: string; onClear: () => void }) {
+  const ChipIcon = props.icon;
+  return (
+    <span class="chip">
+      <ChipIcon size={14} stroke={STROKE} aria-hidden="true" />
+      {props.label}
+      <button class="chip-clear" title={props.clear} aria-label={props.clear} onClick={props.onClear}>
+        <IconX size={12} stroke={2.25} />
+      </button>
+    </span>
+  );
+}
+
+/**
+ * Значок «?» рядом с элементом: пояснение открывается по щелчку и закрывается щелчком мимо или Esc.
+ * Окно — в body и fixed: его не обрезает прокрутка боковой панели, и transform баннера не сдвигает.
+ */
+function Help(props: { children: ComponentChildren }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const root = useRef<HTMLSpanElement>(null);
+  const pop = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: Event) => {
+      const target = e.target as Node;
+      if (!root.current?.contains(target) && !pop.current?.contains(target)) setOpen(false);
+    };
+    // Esc закрывает подсказку и дальше не идёт: иначе он сбросил бы выделение
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      setOpen(false);
+    };
+    const scroll = () => setOpen(false);
+    window.addEventListener('pointerdown', away, true);
+    window.addEventListener('keydown', esc, true);
+    window.addEventListener('scroll', scroll, true);
+    return () => {
+      window.removeEventListener('pointerdown', away, true);
+      window.removeEventListener('keydown', esc, true);
+      window.removeEventListener('scroll', scroll, true);
+    };
+  }, [open]);
+  // Под значком, но в пределах окна
+  useLayoutEffect(() => {
+    if (!open || !root.current || !pop.current) return;
+    const anchor = root.current.getBoundingClientRect();
+    const { width, height } = pop.current.getBoundingClientRect();
+    const left = Math.min(Math.max(8, anchor.left + anchor.width / 2 - width / 2), window.innerWidth - width - 8);
+    const below = anchor.bottom + 6;
+    setPos({ left, top: below + height > window.innerHeight - 8 ? Math.max(8, anchor.top - height - 6) : below });
+  }, [open]);
+  return (
+    <span class="help" ref={root}>
+      <button
+        type="button"
+        class={open ? 'help-toggle active' : 'help-toggle'}
+        aria-label="Подсказка"
+        aria-expanded={open}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setPos(null);
+          setOpen((v) => !v);
+        }}
+      >
+        <IconHelpCircle size={15} stroke={STROKE} />
+      </button>
+      {open &&
+        createPortal(
+          <span ref={pop} class="help-pop" role="tooltip" style={pos ? { left: `${pos.left}px`, top: `${pos.top}px` } : { visibility: 'hidden' }}>
+            {props.children}
+          </span>,
+          document.body,
+        )}
+    </span>
+  );
+}
+
+/** Повтор правки с поправкой: задача, скрытие под маской и директор; ⌘↵ — сгенерировать, Esc — передумать */
+function RedoForm(props: {
+  prompt: string;
+  hide: boolean;
+  director: boolean;
+  canDirect: boolean;
+  variants: number;
+  onSubmit: (change: RedoChange) => void;
+  onCancel: () => void;
+}) {
   const [prompt, setPrompt] = useState(props.prompt);
   const [hide, setHide] = useState(props.hide);
+  const [director, setDirector] = useState(props.director);
   const submit = () => {
-    if (prompt.trim()) props.onSubmit({ prompt: prompt.trim(), hide });
+    if (prompt.trim()) props.onSubmit({ prompt: prompt.trim(), hide, director: director && props.canDirect });
   };
   return (
     <form
@@ -1274,7 +1523,10 @@ function RedoForm(props: { prompt: string; hide: boolean; variants: number; onSu
       }}
     >
       <textarea rows={3} autoFocus value={prompt} aria-label="Поправленная задача" onInput={(e) => setPrompt(e.currentTarget.value)} />
-      <HideOption checked={hide} onChange={setHide} />
+      <div class="checks">
+        <HideOption checked={hide} onChange={setHide} />
+        <DirectorOption checked={director && props.canDirect} disabled={!props.canDirect} onChange={setDirector} />
+      </div>
       <div class="row">
         <button type="submit" class="primary" disabled={!prompt.trim()} title="⌘↵">
           Сгенерировать {props.variants} {plural(props.variants, 'вариант', 'варианта', 'вариантов')}
@@ -1303,13 +1555,15 @@ function SizeHint(props: { advice: SizeAdvice; auto: boolean; sizes: string[]; o
     return (
       <div class="size-hint warn">
         <p>
-          Разрешения не хватает: кусок с контекстом {piece}, а {label} вернёт {output.width}×{output.height} — детализация упадёт в{' '}
-          {scale.toFixed(1).replace('.', ',')} раза.{' '}
-          {!better
-            ? 'Это наибольшее разрешение модели: выделите область поменьше или правьте её по частям.'
-            : props.advice.beyond
-              ? `Даже ${better} будет мало${slow(better)}: лучше выделить область поменьше.`
-              : `Хватит ${better}${slow(better)}.`}
+          Мало разрешения: детали упадут в {scale.toFixed(1).replace('.', ',')} раза
+          <Help>
+            Кусок с контекстом {piece}, а {label} вернёт {output.width}×{output.height}.{' '}
+            {!better
+              ? 'Это наибольшее разрешение модели: выделите область поменьше или правьте её по частям.'
+              : props.advice.beyond
+                ? `Даже ${better} будет мало${slow(better)}: лучше выделить область поменьше.`
+                : `Хватит ${better}${slow(better)}.`}
+          </Help>
         </p>
         {better && pick(better)}
       </div>
@@ -1319,16 +1573,18 @@ function SizeHint(props: { advice: SizeAdvice; auto: boolean; sizes: string[]; o
     return (
       <div class="size-hint warn">
         <p>
-          Разрешение с запасом: куску {piece} хватит {enough}. {label} не добавит деталей — ответ всё равно уменьшится до размера куска
-          {imageSize === '4K' ? ', а ждать его 4–5 минут' : ''}.
+          С запасом: хватит {enough}
+          <Help>
+            Кусок {piece}. {label} не добавит деталей — ответ всё равно уменьшится до размера куска{imageSize === '4K' ? ', а ждать его 4–5 минут' : ''}.
+          </Help>
         </p>
         {pick(enough)}
       </div>
     );
   }
   return (
-    <p class="hint size-hint">
-      Кусок с контекстом {piece} → ответ модели {output.width}×{output.height}, {label}
+    <p class="hint size-hint" title="Кусок с контекстом → ответ модели">
+      {piece} → {output.width}×{output.height}, {label}
     </p>
   );
 }
@@ -1361,9 +1617,7 @@ function SettingsDialog(props: {
         <h2 id="settings-title">Настройки</h2>
         <h3>Ключ laozhang.ai</h3>
         <p>
-          {props.hasKey
-            ? 'Ключ сохранён. Чтобы заменить его, вставьте новый.'
-            : 'Без ключа генерация не работает. Вставьте ключ из личного кабинета laozhang.ai.'}
+          {props.hasKey ? 'Ключ сохранён.' : 'Нужен для Nano Banana. Он есть в личном кабинете laozhang.ai.'}
         </p>
         <form
           onSubmit={(e) => {
@@ -1380,10 +1634,7 @@ function SettingsDialog(props: {
             value={value}
             onInput={(e) => setValue(e.currentTarget.value)}
           />
-          <p class="hint">
-            {mac ? 'Хранится в Связке ключей macOS.' : 'Хранится на этом компьютере в зашифрованном виде.'} Обратно в окно
-            приложения ключ не попадает и отправляется только в laozhang.ai.
-          </p>
+          <p class="hint">{mac ? 'Хранится в Связке ключей macOS' : 'Хранится на этом компьютере зашифрованным'} и уходит только в laozhang.ai.</p>
           <div class="row">
             <button class="primary" type="submit" disabled={!value.trim() || saving}>
               Сохранить ключ
@@ -1406,16 +1657,13 @@ function SettingsDialog(props: {
         <h3>ChatGPT Images по подписке</h3>
         {props.codex ? (
           <>
-            <p>
-              Ключ не нужен: картинки рисует Codex от имени вашего аккаунта ChatGPT и тратит лимит подписки. Вход — тот же, что у Codex в
-              приложении ChatGPT.
-            </p>
+            <p>Картинки и директор идут через Codex по подписке ChatGPT, ключ не нужен.</p>
             <p class="hint">
-              Codex: <code>{props.codex}</code>. Если генерация пишет, что вход не выполнен, войдите в Codex в приложении ChatGPT.
+              Codex: <code>{props.codex}</code>. Если пишет, что вход не выполнен, войдите в Codex в приложении ChatGPT.
             </p>
           </>
         ) : (
-          <p>Не найден Codex CLI. Установите приложение ChatGPT (в нём есть Codex) или Codex CLI и войдите в свой аккаунт ChatGPT.</p>
+          <p>Не найден Codex. Установите приложение ChatGPT (Codex в нём есть) или Codex CLI и войдите в ChatGPT.</p>
         )}
       </div>
     </div>
@@ -1517,10 +1765,7 @@ function StartScreen(props: { recent: RecentDto[]; onOpen: () => void; onOpenRec
           <header class="start-head">
             <div>
               <h1>Откройте картинку</h1>
-              <p class="hint">
-                PNG, JPEG, WebP или TIFF любого размера либо проект canvaaaas (.caaa) со слоями. Всё вне выделенных областей останется
-                нетронутым.
-              </p>
+              <p class="hint">PNG, JPEG, WebP, TIFF или проект .caaa</p>
             </div>
             <button class="primary" onClick={props.onOpen}>
               Открыть…
@@ -1544,7 +1789,7 @@ function StartScreen(props: { recent: RecentDto[]; onOpen: () => void; onOpenRec
               ))}
             </ul>
           ) : (
-            <p class="hint">Здесь появятся файлы, которые вы открывали и сохраняли.</p>
+            <p class="hint">Пока пусто</p>
           )}
         </section>
         <section class="start-new">

@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { InputImage } from '../providers/types.ts';
-import type { ModelChoice, SizeChoice } from '../shared/api.ts';
+import type { ModelChoice, SizeChoice, SketchStroke } from '../shared/api.ts';
 import { applyLayer, type RawImage, type RawRegion } from './edit-region.ts';
 import { intersect, type Rect } from './frame.ts';
 import { encodeImage } from './image-file.ts';
@@ -39,6 +39,9 @@ export interface Patch {
   refs?: InputImage[];
   /** Модель не видела, что было под маской: область ей стёрли */
   hide?: boolean;
+  /** Задача, как её расписал директор: с ней же идут «Ещё варианты» с той же задачей */
+  directed?: string;
+  sketch?: SketchStroke[];
 }
 
 interface Level {

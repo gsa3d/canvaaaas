@@ -4,12 +4,14 @@
 // В JSON-событиях `codex exec` генерации картинки нет, поэтому ошибку инструмента (например, лимит подписки)
 // ищем в журнале сессии $CODEX_HOME/sessions/ГГГГ/ММ/ДД/rollout-…-<id сессии>.jsonl.
 // Размер ответа инструменту не задаётся: модель отдаёт около 1,57 Мп в пропорциях первой картинки.
+// Тот же Codex без инструмента картинок — директор: агент смотрит на кусок и расписывает задачу текстом.
 import { spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, extname, join } from 'node:path';
-import { ProviderError, type GenerateRequest, type GenerateResult, type ImageProvider, type Size } from './types.ts';
+import { directorPrompt, parseDirector, type PromptDirector } from './director.ts';
+import { ProviderError, type GenerateRequest, type GenerateResult, type ImageProvider, type InputImage, type Size } from './types.ts';
 
 /** Площадь ответа: 1254×1254, 1448×1086, 1484×1060 — модель держит её и подстраивает стороны под пропорции */
 const OUTPUT_AREA = 1254 * 1254;
@@ -63,6 +65,33 @@ export function findCodex(env: NodeJS.ProcessEnv = process.env): string | null {
 
 export function codexHomeDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.CODEX_HOME || join(homedir(), '.codex');
+}
+
+function requireCodex(path: string | undefined): string {
+  const bin = path ?? findCodex();
+  if (!bin) {
+    throw new ProviderError('Не найден Codex CLI, через который идёт ChatGPT по подписке. Установите приложение ChatGPT (в нём есть Codex) или Codex CLI.');
+  }
+  return bin;
+}
+
+/** Окружение codex: с ключом API в нём Codex платил бы по API, а не по подписке */
+function codexEnv(codexHome: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome };
+  delete env.OPENAI_API_KEY;
+  delete env.CODEX_API_KEY;
+  return env;
+}
+
+/** Картинки во временную папку по порядку: 1.jpg, 2.jpg… */
+async function writeImages(dir: string, images: InputImage[]): Promise<string[]> {
+  const paths: string[] = [];
+  for (const [i, img] of images.entries()) {
+    const path = join(dir, `${i + 1}${img.mimeType === 'image/png' ? '.png' : img.mimeType === 'image/webp' ? '.webp' : '.jpg'}`);
+    await writeFile(path, img.data);
+    paths.push(path);
+  }
+  return paths;
 }
 
 function ratioOf(aspectRatio: string): number {
@@ -325,22 +354,12 @@ export function chatgptCodex(opts: ChatgptCodexOptions = {}): ImageProvider {
 
     generate(req: GenerateRequest): Promise<GenerateResult> {
       return limit(async () => {
-        const bin = opts.codexPath ?? findCodex();
-        if (!bin) {
-          throw new ProviderError(
-            'Не найден Codex CLI, через который идёт ChatGPT по подписке. Установите приложение ChatGPT (в нём есть Codex) или Codex CLI.',
-          );
-        }
+        const bin = requireCodex(opts.codexPath);
         const codexHome = opts.codexHome ?? codexHomeDir();
         const agentModel = opts.agentModel ?? process.env.CANVAAAAS_CODEX_MODEL;
         const dir = await mkdtemp(join(tmpdir(), 'canvaaaas-chatgpt-'));
         try {
-          const paths: string[] = [];
-          for (const [i, img] of req.images.entries()) {
-            const path = join(dir, `${i + 1}${img.mimeType === 'image/png' ? '.png' : img.mimeType === 'image/webp' ? '.webp' : '.jpg'}`);
-            await writeFile(path, img.data);
-            paths.push(path);
-          }
+          const paths = await writeImages(dir, req.images);
           const out = outputSize(req.aspectRatio, req.imageSize);
           const prompt = `${req.prompt}\n\nReturn a single image with the same ${req.aspectRatio} aspect ratio and framing as image 1 (${out.width}×${out.height} px).`;
           const args = [
@@ -361,15 +380,10 @@ export function chatgptCodex(opts: ChatgptCodexOptions = {}): ImageProvider {
             // Агент сразу видит картинки и не тратит шаги на их просмотр; промпт идёт через stdin
             ...paths.flatMap((p) => ['--image', p]),
           ];
-          // С ключом API в окружении Codex платил бы по API, а не по подписке
-          const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome };
-          delete env.OPENAI_API_KEY;
-          delete env.CODEX_API_KEY;
-
           const started = new Date();
           let run: CodexRun;
           try {
-            run = await runCodex(bin, args, agentPrompt(prompt, paths), { cwd: dir, env, signal: req.signal, timeoutMs });
+            run = await runCodex(bin, args, agentPrompt(prompt, paths), { cwd: dir, env: codexEnv(codexHome), signal: req.signal, timeoutMs });
           } catch (err) {
             throw new ProviderError(`Не удалось запустить Codex (${bin}): ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -401,6 +415,63 @@ export function chatgptCodex(opts: ChatgptCodexOptions = {}): ImageProvider {
             throw new ProviderError(`Codex не вошёл в ChatGPT: войдите в Codex в приложении ChatGPT или в Терминале командой «${bin} login». (${said})`);
           }
           throw new ProviderError(`ChatGPT не вернул картинку: ${said}`, { retryable: rollout.failures.length === 0 });
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      }, req.signal);
+    },
+  };
+}
+
+/**
+ * Директор на ChatGPT по подписке: тот же Codex, но без инструмента картинок — агент смотрит на кусок и отвечает текстом.
+ * Рассуждает чуть дольше, чем при генерации картинки: здесь ответ и есть его работа.
+ */
+export function chatgptDirector(opts: ChatgptCodexOptions = {}): PromptDirector {
+  const timeoutMs = opts.timeoutMs ?? 180_000;
+  const limit = limiter(opts.parallel ?? 2);
+  return {
+    id: 'chatgpt-director',
+    model: 'chatgpt',
+    direct(req) {
+      return limit(async () => {
+        const bin = requireCodex(opts.codexPath);
+        const codexHome = opts.codexHome ?? codexHomeDir();
+        const agentModel = opts.agentModel ?? process.env.CANVAAAAS_CODEX_MODEL;
+        const dir = await mkdtemp(join(tmpdir(), 'canvaaaas-director-'));
+        try {
+          const paths = await writeImages(dir, req.images);
+          const args = [
+            'exec',
+            '--json',
+            '--skip-git-repo-check',
+            '--ignore-user-config',
+            '--sandbox',
+            'read-only',
+            '--cd',
+            dir,
+            '-c',
+            'model_reasoning_effort="medium"',
+            ...(agentModel ? ['--model', agentModel] : []),
+            ...paths.flatMap((p) => ['--image', p]),
+          ];
+          const started = Date.now();
+          let run: CodexRun;
+          try {
+            run = await runCodex(bin, args, directorPrompt(req), { cwd: dir, env: codexEnv(codexHome), signal: req.signal, timeoutMs });
+          } catch (err) {
+            throw new ProviderError(`Не удалось запустить Codex (${bin}): ${err instanceof Error ? err.message : String(err)}`);
+          }
+          if (run.aborted) throw new ProviderError('Генерация отменена');
+          if (run.timedOut) throw new ProviderError(`ChatGPT не ответил за ${Math.round(timeoutMs / 60_000)} мин`, { retryable: true });
+          // Ошибки бывают и у удачного ответа (переподключение): ответ агента главнее
+          const message = run.messages.at(-1);
+          if (message) return { text: parseDirector(message), elapsedMs: Date.now() - started };
+          const said = run.errors.map(clean).join(' — ') || lastLines(run.stderr) || `codex завершился с кодом ${run.code}`;
+          if (LOGIN_HINT.test(said) || LOGIN_HINT.test(run.stderr)) {
+            throw new ProviderError(`Codex не вошёл в ChatGPT: войдите в Codex в приложении ChatGPT или в Терминале командой «${bin} login». (${said})`);
+          }
+          throw new ProviderError(`ChatGPT не ответил: ${said}`, { retryable: true });
         } finally {
           await rm(dir, { recursive: true, force: true });
         }

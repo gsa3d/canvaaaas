@@ -2,8 +2,10 @@
 // к размеру куска и вклеиваем по маске с растушёвкой. Где маска = 0, пиксели не меняются.
 import sharp from 'sharp';
 import type { GenerateResult, ImageProvider, InputImage, Size } from '../providers/types.ts';
+import type { SketchStroke } from '../shared/api.ts';
 import { AUTO_SIZE_CAP, chooseImageSize, computeFrame, FRAME_CONTEXT, frameScale, intersect, SCALE_WARN, type Frame, type Rect } from './frame.ts';
 import { blankOut, featherAlpha, highlight, insideDistance, maskBBox } from './mask.ts';
+import { drawSketch, sketchTouches } from './sketch.ts';
 
 /**
  * Как показать модели, что менять:
@@ -52,6 +54,8 @@ export interface EditRegionOptions {
   guide?: Guide;
   /** Картинки-референсы (персонаж, стиль): уходят модели после куска */
   references?: InputImage[];
+  /** Набросок художника: после куска модель получает его же с наброском поверх */
+  sketch?: SketchStroke[];
   /**
    * Пиксели части куска внутри холста, если они не те, что в image: так слой перерисовывают
    * по холсту под ним, а не по собственному неудачному результату
@@ -71,11 +75,15 @@ export interface PreparedEdit {
   scale: number;
   feather: number;
   warnings: string[];
-  /** Задача пользователя, стиль, показ области и референсы — из них собраны prompt и images */
+  /** Задача пользователя, стиль, показ области, набросок и референсы — из них собраны prompt и images */
   request: string;
+  /** Задача, как её расписал директор: модель получает её вместе со словами пользователя */
+  directed?: string;
   style?: string;
   guide: Guide;
   references: InputImage[];
+  /** Пустой, если наброска нет или он мимо куска */
+  sketch: SketchStroke[];
   prompt: string;
   images: InputImage[];
   /** Исходный кусок в размере рамки, RGB — для вклейки и сравнения */
@@ -112,10 +120,22 @@ export interface CompositedVariant {
 
 const DEFAULTS = { ...FRAME_CONTEXT, feather: 24, imageSize: 'auto', maxAutoSize: AUTO_SIZE_CAP, guide: 'pair' as Guide };
 
-export function buildPrompt(guide: Guide, request: string, style?: string, references = 0): string {
+export interface PromptParts {
+  /** Общий стиль документа */
+  style?: string;
+  /** Сколько референсов идёт после куска */
+  references?: number;
+  /** После куска идёт он же с наброском художника */
+  sketch?: boolean;
+  /** Задача, как её расписал директор; тогда request — слова художника, они идут следом как мерило */
+  directed?: string;
+}
+
+export function buildPrompt(guide: Guide, request: string, parts: PromptParts = {}): string {
   // Задача — первой и как обязательная: с осторожной формулировкой («верни картинку 1, всё сохрани»)
   // модель на расплывчатых запросах возвращала кусок почти без изменений. Сохранность всего вне маски
   // обеспечивает вклейка, поэтому модели можно смело перерисовывать область целиком.
+  const { style, references = 0, sketch = false, directed } = parts;
   const where: Record<Guide, string> = {
     pair: 'Image 1 is a crop of a larger illustration. Image 2 is the same crop with the area to edit tinted magenta and outlined. Apply the task to that area of image 1 and return the edited crop.',
     overlay:
@@ -126,7 +146,8 @@ export function buildPrompt(guide: Guide, request: string, style?: string, refer
   const lines = [
     'Edit this illustration. Carry out the task clearly and completely.',
     '',
-    `TASK: ${request.trim()}`,
+    `TASK: ${(directed ?? request).trim()}`,
+    ...(directed ? [`(The artist's own words: "${request.trim()}". The task above spells them out; where the two disagree, follow the artist's words.)`] : []),
     '',
     where[guide],
     '- Inside the area: make the change fully and visibly; redraw whatever is needed there.',
@@ -134,8 +155,15 @@ export function buildPrompt(guide: Guide, request: string, style?: string, refer
     '- Match the existing style, line work, lighting and perspective so the edit blends in seamlessly.',
     `- Do not draw ${guide === 'blank' ? 'any' : 'the magenta tint, the outline or any'} borders, text or watermarks.`,
   ];
+  // Картинки по порядку: кусок (у pair — ещё он же с подсветкой), кусок с наброском, референсы
+  const crops = guide === 'pair' ? 2 : 1;
+  if (sketch) {
+    lines.push(
+      `- Image ${crops + 1} is the same crop with the artist's rough sketch drawn over it: it shows where the task goes and its rough shape, size and pose. Follow it for placement and proportions, but draw properly in the illustration's style; its colors are only a hint, and no sketch strokes may remain.`,
+    );
+  }
   if (references > 0) {
-    const first = guide === 'pair' ? 3 : 2;
+    const first = crops + (sketch ? 1 : 0) + 1;
     const range = references === 1 ? `Image ${first} is a reference image` : `Images ${first}–${first + references - 1} are reference images`;
     lines.push(`- ${range} from the artist: use them as visual reference for what the task mentions (characters, objects, style); do not copy their framing or paste them in whole.`);
   }
@@ -220,15 +248,12 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
   const scale = frameScale(rect, modelSize);
 
   const warnings: string[] = [];
+  // Что с этим делать, интерфейс подсказывает ещё до генерации — здесь только факт
   if (scale > SCALE_WARN) {
-    const lastSize = provider.imageSizes[provider.imageSizes.length - 1];
-    warnings.push(
-      `Кусок ${rect.width}×${rect.height} больше ответа модели ${modelSize.width}×${modelSize.height} в ${scale.toFixed(1)} раза — детализация упадёт. ` +
-        (imageSize === lastSize ? 'Выделите область поменьше.' : `Выделите область поменьше или возьмите разрешение ${lastSize}.`),
-    );
+    warnings.push(`Кусок ${rect.width}×${rect.height} больше ответа ${modelSize.width}×${modelSize.height} в ${scale.toFixed(1).replace('.', ',')} раза — детализация упадёт`);
   }
   if (inside.width < rect.width || inside.height < rect.height) {
-    warnings.push('Кусок выходит за край холста, недостающее достроено отражением.');
+    warnings.push('Кусок выходит за край холста: недостающее достроено отражением');
   }
 
   // Исходный кусок; поля за холстом — отражение
@@ -262,7 +287,12 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
   }
   const alpha = featherAlpha(insideMask, inside.width, inside.height, feather);
   const references = opts.references ?? [];
-  const images = await guideImages(frameRgb, insideMask, frame, modelSize, guide);
+  let sketch = opts.sketch ?? [];
+  if (sketch.length && !sketchTouches(sketch, rect)) {
+    warnings.push('Набросок не задевает кусок — модель его не увидит');
+    sketch = [];
+  }
+  const images = await guideImages(frameRgb, insideMask, frame, modelSize, guide, sketch);
 
   return {
     provider,
@@ -279,7 +309,8 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
     style: opts.style,
     guide,
     references,
-    prompt: buildPrompt(guide, opts.prompt, opts.style, references.length),
+    sketch,
+    prompt: buildPrompt(guide, opts.prompt, { style: opts.style, references: references.length, sketch: sketch.length > 0 }),
     images: [...images, ...references],
     frameRgb,
     insideMask,
@@ -289,8 +320,8 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
   };
 }
 
-/** То, что увидит модель: кусок и маска в размере её ответа, показанные по guide */
-async function guideImages(frameRgb: Buffer, insideMask: Uint8Array, frame: Frame, modelSize: Size, guide: Guide): Promise<InputImage[]> {
+/** То, что увидит модель: кусок и маска в размере её ответа, показанные по guide, и кусок с наброском, если он есть */
+async function guideImages(frameRgb: Buffer, insideMask: Uint8Array, frame: Frame, modelSize: Size, guide: Guide, sketch: SketchStroke[]): Promise<InputImage[]> {
   const { rect, inside } = frame;
   const frameMask = Buffer.alloc(rect.width * rect.height);
   pasteRect(frameMask, rect.width, { ...inside, x: inside.x - rect.x, y: inside.y - rect.y }, 1, Buffer.from(insideMask));
@@ -312,20 +343,58 @@ async function guideImages(frameRgb: Buffer, insideMask: Uint8Array, frame: Fram
     data: await sharp(rgb, { raw: { width: mw, height: mh, channels: 3 } }).jpeg({ quality: 92 }).toBuffer(),
     mimeType: 'image/jpeg',
   });
-  return guide === 'pair'
-    ? [await jpeg(modelRgb), await jpeg(highlight(modelRgb, modelMask, mw, mh))]
-    : guide === 'overlay'
-      ? [await jpeg(highlight(modelRgb, modelMask, mw, mh))]
-      : [await jpeg(blankOut(modelRgb, modelMask, mw, mh))];
+  // Набросок рисуется поверх того куска, который модель правит
+  const first = guide === 'pair' ? modelRgb : guide === 'overlay' ? highlight(modelRgb, modelMask, mw, mh) : blankOut(modelRgb, modelMask, mw, mh);
+  const images = [await jpeg(first)];
+  if (guide === 'pair') images.push(await jpeg(highlight(modelRgb, modelMask, mw, mh)));
+  if (sketch.length) images.push(await jpeg(await drawSketch(first, modelSize, rect, sketch)));
+  return images;
+}
+
+/** Картинки директору — не больше этого по большей стороне: ему нужно понять кусок, а не разглядеть пиксели */
+const DIRECTOR_SIZE = 1280;
+
+/**
+ * Что видит директор: чистый кусок, он же с подсветкой области, с наброском, если он есть, весь холст (overview) и референсы.
+ * Кусок он видит всегда, даже если модели его скроют: так ему понятнее, что вокруг и что заменить.
+ */
+export async function directorImages(prep: PreparedEdit, overview?: InputImage): Promise<InputImage[]> {
+  const k = Math.min(1, DIRECTOR_SIZE / Math.max(prep.modelSize.width, prep.modelSize.height));
+  const size = { width: Math.max(1, Math.round(prep.modelSize.width * k)), height: Math.max(1, Math.round(prep.modelSize.height * k)) };
+  const crop = await guideImages(prep.frameRgb, prep.insideMask, prep.frame, size, 'pair', prep.sketch);
+  return [...crop, ...(overview ? [overview] : []), ...prep.references];
+}
+
+/** Весь холст в уменьшенной копии thumb с рамкой куска rect — чтобы директор видел, что это за картина и где кусок */
+export async function overviewImage(thumb: Buffer, canvas: Size, rect: Rect): Promise<InputImage> {
+  const { width = 1, height = 1 } = await sharp(thumb).metadata();
+  const k = width / canvas.width;
+  const line = Math.max(2, Math.round(Math.max(width, height) / 300));
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
+    `<rect x="${rect.x * k}" y="${rect.y * k}" width="${rect.width * k}" height="${rect.height * k}" fill="none" stroke="#ff00ff" stroke-width="${line}"/></svg>`;
+  return { data: await sharp(thumb).composite([{ input: Buffer.from(svg), left: 0, top: 0 }]).jpeg({ quality: 85 }).toBuffer(), mimeType: 'image/jpeg' };
 }
 
 /**
- * Та же правка с другой задачей или другим показом области (например, со стёртым под маской): кусок, маска
- * и разрешение прежние, заново собираются только промпт и картинки для модели.
+ * Та же правка с другой задачей, другим показом области (например, со стёртым под маской) или задачей, расписанной
+ * директором: кусок, маска, набросок и разрешение прежние, заново собираются только промпт и картинки для модели.
  */
-export async function retarget(prep: PreparedEdit, change: { request: string; guide: Guide }): Promise<Pick<PreparedEdit, 'request' | 'guide' | 'prompt' | 'images'>> {
-  const images = change.guide === prep.guide ? prep.images : [...(await guideImages(prep.frameRgb, prep.insideMask, prep.frame, prep.modelSize, change.guide)), ...prep.references];
-  return { ...change, prompt: buildPrompt(change.guide, change.request, prep.style, prep.references.length), images };
+export async function retarget(
+  prep: PreparedEdit,
+  change: { request: string; guide: Guide; directed?: string },
+): Promise<Pick<PreparedEdit, 'request' | 'guide' | 'directed' | 'prompt' | 'images'>> {
+  const images =
+    change.guide === prep.guide
+      ? prep.images
+      : [...(await guideImages(prep.frameRgb, prep.insideMask, prep.frame, prep.modelSize, change.guide, prep.sketch)), ...prep.references];
+  const prompt = buildPrompt(change.guide, change.request, {
+    style: prep.style,
+    references: prep.references.length,
+    sketch: prep.sketch.length > 0,
+    directed: change.directed,
+  });
+  return { request: change.request, guide: change.guide, directed: change.directed, prompt, images };
 }
 
 // Насколько ответ модели отличается от исходного куска там, где менять было нельзя
