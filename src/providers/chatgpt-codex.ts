@@ -4,13 +4,13 @@
 // В JSON-событиях `codex exec` генерации картинки нет, поэтому ошибку инструмента (например, лимит подписки)
 // ищем в журнале сессии $CODEX_HOME/sessions/ГГГГ/ММ/ДД/rollout-…-<id сессии>.jsonl.
 // Размер ответа инструменту не задаётся: модель отдаёт около 1,57 Мп в пропорциях первой картинки.
-// Тот же Codex без инструмента картинок — директор: агент смотрит на кусок и расписывает задачу текстом.
+// Тот же Codex без инструмента картинок — директор и критик: агент смотрит на кусок и отвечает текстом.
 import { spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, extname, join } from 'node:path';
-import { directorPrompt, parseDirector, type PromptDirector } from './director.ts';
+import { criticPrompt, directorPrompt, parseCritic, parseDirector, type PromptDirector } from './director.ts';
 import { ProviderError, type GenerateRequest, type GenerateResult, type ImageProvider, type InputImage, type Size } from './types.ts';
 
 /** Площадь ответа: 1254×1254, 1448×1086, 1484×1060 — модель держит её и подстраивает стороны под пропорции */
@@ -424,58 +424,66 @@ export function chatgptCodex(opts: ChatgptCodexOptions = {}): ImageProvider {
 }
 
 /**
- * Директор на ChatGPT по подписке: тот же Codex, но без инструмента картинок — агент смотрит на кусок и отвечает текстом.
+ * Директор и критик на ChatGPT по подписке: тот же Codex, но без инструмента картинок — агент смотрит на картинки и отвечает текстом.
  * Рассуждает чуть дольше, чем при генерации картинки: здесь ответ и есть его работа.
  */
 export function chatgptDirector(opts: ChatgptCodexOptions = {}): PromptDirector {
   const timeoutMs = opts.timeoutMs ?? 180_000;
   const limit = limiter(opts.parallel ?? 2);
+  /** Последний ответ агента на prompt с картинками */
+  const ask = (prompt: string, images: InputImage[], signal?: AbortSignal) =>
+    limit(async () => {
+      const bin = requireCodex(opts.codexPath);
+      const codexHome = opts.codexHome ?? codexHomeDir();
+      const agentModel = opts.agentModel ?? process.env.CANVAAAAS_CODEX_MODEL;
+      const dir = await mkdtemp(join(tmpdir(), 'canvaaaas-director-'));
+      try {
+        const paths = await writeImages(dir, images);
+        const args = [
+          'exec',
+          '--json',
+          '--skip-git-repo-check',
+          '--ignore-user-config',
+          '--sandbox',
+          'read-only',
+          '--cd',
+          dir,
+          '-c',
+          'model_reasoning_effort="medium"',
+          ...(agentModel ? ['--model', agentModel] : []),
+          ...paths.flatMap((p) => ['--image', p]),
+        ];
+        const started = Date.now();
+        let run: CodexRun;
+        try {
+          run = await runCodex(bin, args, prompt, { cwd: dir, env: codexEnv(codexHome), signal, timeoutMs });
+        } catch (err) {
+          throw new ProviderError(`Не удалось запустить Codex (${bin}): ${err instanceof Error ? err.message : String(err)}`);
+        }
+        if (run.aborted) throw new ProviderError('Генерация отменена');
+        if (run.timedOut) throw new ProviderError(`ChatGPT не ответил за ${Math.round(timeoutMs / 60_000)} мин`, { retryable: true });
+        // Ошибки бывают и у удачного ответа (переподключение): ответ агента главнее
+        const message = run.messages.at(-1);
+        if (message) return { message, elapsedMs: Date.now() - started };
+        const said = run.errors.map(clean).join(' — ') || lastLines(run.stderr) || `codex завершился с кодом ${run.code}`;
+        if (LOGIN_HINT.test(said) || LOGIN_HINT.test(run.stderr)) {
+          throw new ProviderError(`Codex не вошёл в ChatGPT: войдите в Codex в приложении ChatGPT или в Терминале командой «${bin} login». (${said})`);
+        }
+        throw new ProviderError(`ChatGPT не ответил: ${said}`, { retryable: true });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }, signal);
   return {
     id: 'chatgpt-director',
     model: 'chatgpt',
-    direct(req) {
-      return limit(async () => {
-        const bin = requireCodex(opts.codexPath);
-        const codexHome = opts.codexHome ?? codexHomeDir();
-        const agentModel = opts.agentModel ?? process.env.CANVAAAAS_CODEX_MODEL;
-        const dir = await mkdtemp(join(tmpdir(), 'canvaaaas-director-'));
-        try {
-          const paths = await writeImages(dir, req.images);
-          const args = [
-            'exec',
-            '--json',
-            '--skip-git-repo-check',
-            '--ignore-user-config',
-            '--sandbox',
-            'read-only',
-            '--cd',
-            dir,
-            '-c',
-            'model_reasoning_effort="medium"',
-            ...(agentModel ? ['--model', agentModel] : []),
-            ...paths.flatMap((p) => ['--image', p]),
-          ];
-          const started = Date.now();
-          let run: CodexRun;
-          try {
-            run = await runCodex(bin, args, directorPrompt(req), { cwd: dir, env: codexEnv(codexHome), signal: req.signal, timeoutMs });
-          } catch (err) {
-            throw new ProviderError(`Не удалось запустить Codex (${bin}): ${err instanceof Error ? err.message : String(err)}`);
-          }
-          if (run.aborted) throw new ProviderError('Генерация отменена');
-          if (run.timedOut) throw new ProviderError(`ChatGPT не ответил за ${Math.round(timeoutMs / 60_000)} мин`, { retryable: true });
-          // Ошибки бывают и у удачного ответа (переподключение): ответ агента главнее
-          const message = run.messages.at(-1);
-          if (message) return { text: parseDirector(message), elapsedMs: Date.now() - started };
-          const said = run.errors.map(clean).join(' — ') || lastLines(run.stderr) || `codex завершился с кодом ${run.code}`;
-          if (LOGIN_HINT.test(said) || LOGIN_HINT.test(run.stderr)) {
-            throw new ProviderError(`Codex не вошёл в ChatGPT: войдите в Codex в приложении ChatGPT или в Терминале командой «${bin} login». (${said})`);
-          }
-          throw new ProviderError(`ChatGPT не ответил: ${said}`, { retryable: true });
-        } finally {
-          await rm(dir, { recursive: true, force: true });
-        }
-      }, req.signal);
+    async direct(req) {
+      const { message, elapsedMs } = await ask(directorPrompt(req), req.images, req.signal);
+      return { text: parseDirector(message), elapsedMs };
+    },
+    async review(req) {
+      const { message, elapsedMs } = await ask(criticPrompt(req), req.images, req.signal);
+      return { ...parseCritic(message), elapsedMs };
     },
   };
 }

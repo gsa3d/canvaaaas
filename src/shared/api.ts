@@ -74,6 +74,11 @@ export interface VariantDto {
   hide: boolean;
   /** Задача, как её расписал директор для этого варианта */
   directed?: string;
+  /** Шаг с критиком: вариант исправляет вариант base по этим замечаниям */
+  fixes?: string;
+  base?: number;
+  /** Что критик сказал о варианте: done — готово, text — почему или что исправить, по строке на замечание */
+  critique?: { done: boolean; text: string };
 }
 
 export interface JobDto {
@@ -94,6 +99,10 @@ export interface JobDto {
   director: boolean;
   /** Директор сейчас расписывает задачу */
   directing: boolean;
+  /** Критик сейчас смотрит вариант */
+  reviewing: boolean;
+  /** Идут шаги с критиком: какой сейчас генерируется (0 — ещё ни один) и сколько их самое большее */
+  chain?: { step: number; steps: number };
   /** Задача, как её расписал директор, — для следующих вариантов */
   directed?: string;
   bbox?: RectDto;
@@ -166,6 +175,7 @@ export interface StateDto {
 export interface CreateJobRequest {
   shapes: MaskShape[];
   prompt: string;
+  /** Сколько вариантов; с директором — сколько шагов с критиком самое большее */
   variants: number;
   model: ModelChoice;
   size: SizeChoice;
@@ -175,7 +185,10 @@ export interface CreateJobRequest {
   hide?: boolean;
   /** Набросок поверх куска: где и каким должно быть то, что в задаче */
   sketch?: SketchStroke[];
-  /** Перед генерацией ChatGPT расписывает задачу подробнее; задача пользователя остаётся как есть */
+  /**
+   * Перед генерацией ChatGPT расписывает задачу подробнее; задача пользователя остаётся как есть.
+   * Варианты тогда идут шагами: критик смотрит каждый и говорит, что исправить в следующем
+   */
   director?: boolean;
 }
 
@@ -193,7 +206,7 @@ export interface PatchVariantsRequest extends RedoChange {
   size: SizeChoice;
 }
 
-/** «Ещё варианты» задачи в очереди, можно с поправкой */
+/** «Ещё варианты» задачи в очереди, можно с поправкой; с директором — ещё шаги от выбранного варианта */
 export interface MoreVariantsRequest extends RedoChange {
   count: number;
 }

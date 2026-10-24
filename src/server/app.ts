@@ -242,6 +242,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     session.retry(id!, await readJson<RedoChange>(req));
     json(res, { ok: true });
   });
+  route('POST', '/api/jobs/:id/stop', (_req, res, [id]) => {
+    session.stop(id!);
+    json(res, { ok: true });
+  });
   route('POST', '/api/jobs/:id/accept', (_req, res, [id]) => {
     session.accept(id!);
     json(res, { ok: true });

@@ -114,7 +114,8 @@ describe('Директор', () => {
     const job = () => s.state().jobs.find((j) => j.id === id)!;
     await until(() => job().directing);
     expect(job().status).toBe('running');
-    await until(() => job().status === 'done');
+    // Один шаг, затем критик смотрит его
+    await until(() => job().status === 'done' && !job().chain);
     expect(job()).toMatchObject({ director: true, sketch: true });
     expect(job().directed).toMatch(/лодка.*#1/);
     expect(job().variants[0]!.directed).toBe(job().directed);
@@ -154,6 +155,7 @@ describe('Директор', () => {
       id: 'failing',
       model: 'x',
       direct: () => Promise.reject(new Error('Codex не вошёл в ChatGPT')),
+      review: () => Promise.reject(new Error('Codex не вошёл в ChatGPT')),
     };
     (s as unknown as { directorImpl: PromptDirector }).directorImpl = failing;
     const id = s.createJob({ shapes: [{ kind: 'rect', x: 100, y: 100, width: 120, height: 80 }], prompt: 'дом', variants: 2, model: 'flash', size: 'auto', director: true });

@@ -36,6 +36,9 @@ if (mode === 'hang') {
   say({ type: 'error', message: 'Reconnecting... 1/5' });
   say({ type: 'item.completed', item: { id: 'm', type: 'agent_message', text: 'Here it is:\\n<task>Paint a small red boat\\non the water.</task>' } });
   say({ type: 'turn.completed', usage: {} });
+} else if (mode === 'critic') {
+  say({ type: 'item.completed', item: { id: 'm', type: 'agent_message', text: '<fix>\\n- Make the boat smaller.\\n- Shadow to the left.\\n</fix>' } });
+  say({ type: 'turn.completed', usage: {} });
 } else {
   setTimeout(() => {
     const d = new Date();
@@ -175,7 +178,7 @@ describe.skipIf(process.platform === 'win32')('ChatGPT через Codex CLI', ()
     }
   });
 
-  it('директор: тот же Codex без инструмента картинок, картинки по порядку, ответ — текст между тегами', async () => {
+  it('директор и критик: тот же Codex без инструмента картинок, картинки по порядку, ответ — текст между тегами', async () => {
     process.env.FAKE_MODE = 'director';
     process.env.OPENAI_API_KEY = 'sk-test-not-for-codex';
     try {
@@ -191,6 +194,14 @@ describe.skipIf(process.platform === 'win32')('ChatGPT через Codex CLI', ()
       expect(run.apiKey).toBeNull();
       expect(run.input).toContain("Artist's task: лодка");
       expect(existsSync(run.args[run.args.indexOf('--cd') + 1])).toBe(false);
+
+      process.env.FAKE_MODE = 'critic';
+      const review = await director.review({ request: 'лодка', hide: false, mustFix: false, sketch: false, overview: false, references: 0, images: [await jpeg('#fff'), await jpeg('#f0f'), await jpeg('#00f')] });
+      expect(review).toMatchObject({ done: false, text: '- Make the boat smaller.\n- Shadow to the left.' });
+      const critic = JSON.parse(await readFile(log(), 'utf8'));
+      expect(critic.imageBytes).toHaveLength(3);
+      expect(critic.input).toContain('- Image 3: the same crop after the edit.');
+      expect(critic.args.join(' ')).not.toContain('image_generation');
 
       process.env.FAKE_MODE = 'nologin';
       await expect(director.direct(req)).rejects.toThrow(/не вошёл в ChatGPT/);

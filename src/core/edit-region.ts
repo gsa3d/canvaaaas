@@ -129,6 +129,8 @@ export interface PromptParts {
   sketch?: boolean;
   /** Задача, как её расписал директор; тогда request — слова художника, они идут следом как мерило */
   directed?: string;
+  /** Шаг с критиком: в области уже прежняя попытка, модель исправляет в ней эти замечания */
+  fixes?: string;
 }
 
 export function buildPrompt(guide: Guide, request: string, parts: PromptParts = {}): string {
@@ -136,21 +138,27 @@ export function buildPrompt(guide: Guide, request: string, parts: PromptParts = 
   // модель на расплывчатых запросах возвращала кусок почти без изменений. Сохранность всего вне маски
   // обеспечивает вклейка, поэтому модели можно смело перерисовывать область целиком.
   const { style, references = 0, sketch = false, directed } = parts;
+  const fixes = parts.fixes?.trim();
   const where: Record<Guide, string> = {
-    pair: 'Image 1 is a crop of a larger illustration. Image 2 is the same crop with the area to edit tinted magenta and outlined. Apply the task to that area of image 1 and return the edited crop.',
+    pair: `Image 1 is a crop of a larger illustration. Image 2 is the same crop with the area to edit tinted magenta and outlined. Apply the ${fixes ? 'fixes' : 'task'} to that area of image 1 and return the edited crop.`,
     overlay:
       'The image is a crop of a larger illustration; the area to edit is tinted magenta and outlined. Apply the task to that area and return the edited crop with the magenta tint and outline completely gone.',
     blank:
       'The image is a crop of a larger illustration; the area to edit is painted flat gray, and what was there is hidden on purpose. Paint that area anew following the task and the surroundings, and return the crop with the gray area fully painted, no gray patch left.',
   };
   const lines = [
-    'Edit this illustration. Carry out the task clearly and completely.',
+    fixes
+      ? 'Revise this illustration: the area already holds an attempt at the task below. Make every fix listed and keep what already works.'
+      : 'Edit this illustration. Carry out the task clearly and completely.',
     '',
     `TASK: ${(directed ?? request).trim()}`,
     ...(directed ? [`(The artist's own words: "${request.trim()}". The task above spells them out; where the two disagree, follow the artist's words.)`] : []),
+    ...(fixes ? ['', 'FIX:', fixes] : []),
     '',
     where[guide],
-    '- Inside the area: make the change fully and visibly; redraw whatever is needed there.',
+    fixes
+      ? '- Inside the area: make the fixes fully and visibly; leave the rest of the attempt as it is.'
+      : '- Inside the area: make the change fully and visibly; redraw whatever is needed there.',
     '- Outside the area: keep the picture as it is, with the same framing and scale, so the edit lines up with its surroundings.',
     '- Match the existing style, line work, lighting and perspective so the edit blends in seamlessly.',
     `- Do not draw ${guide === 'blank' ? 'any' : 'the magenta tint, the outline or any'} borders, text or watermarks.`,
@@ -351,18 +359,72 @@ async function guideImages(frameRgb: Buffer, insideMask: Uint8Array, frame: Fram
   return images;
 }
 
-/** Картинки директору — не больше этого по большей стороне: ему нужно понять кусок, а не разглядеть пиксели */
+/** Картинки директору и критику — не больше этого по большей стороне: им нужно понять кусок, а не разглядеть пиксели */
 const DIRECTOR_SIZE = 1280;
+
+function directorSize(prep: PreparedEdit): Size {
+  const k = Math.min(1, DIRECTOR_SIZE / Math.max(prep.modelSize.width, prep.modelSize.height));
+  return { width: Math.max(1, Math.round(prep.modelSize.width * k)), height: Math.max(1, Math.round(prep.modelSize.height * k)) };
+}
 
 /**
  * Что видит директор: чистый кусок, он же с подсветкой области, с наброском, если он есть, весь холст (overview) и референсы.
  * Кусок он видит всегда, даже если модели его скроют: так ему понятнее, что вокруг и что заменить.
  */
 export async function directorImages(prep: PreparedEdit, overview?: InputImage): Promise<InputImage[]> {
-  const k = Math.min(1, DIRECTOR_SIZE / Math.max(prep.modelSize.width, prep.modelSize.height));
-  const size = { width: Math.max(1, Math.round(prep.modelSize.width * k)), height: Math.max(1, Math.round(prep.modelSize.height * k)) };
-  const crop = await guideImages(prep.frameRgb, prep.insideMask, prep.frame, size, 'pair', prep.sketch);
+  const crop = await guideImages(prep.frameRgb, prep.insideMask, prep.frame, directorSize(prep), 'pair', prep.sketch);
   return [...crop, ...(overview ? [overview] : []), ...prep.references];
+}
+
+/**
+ * Что видит критик: кусок до правки, он же с подсветкой области mask, кусок после правки (after — в размере рамки, RGB),
+ * до правки с наброском, весь холст и референсы.
+ */
+export async function criticImages(prep: PreparedEdit, after: Buffer, mask: Uint8Array, overview?: InputImage): Promise<InputImage[]> {
+  const size = directorSize(prep);
+  const { rect } = prep.frame;
+  const [clean, marked, ...sketched] = await guideImages(prep.frameRgb, mask, prep.frame, size, 'pair', prep.sketch);
+  const result: InputImage = {
+    data: await sharp(after, { raw: { width: rect.width, height: rect.height, channels: 3 } })
+      .resize(size.width, size.height, { fit: 'fill', kernel: 'lanczos3' })
+      .jpeg({ quality: 92 })
+      .toBuffer(),
+    mimeType: 'image/jpeg',
+  };
+  return [clean!, marked!, result, ...sketched, ...(overview ? [overview] : []), ...prep.references];
+}
+
+/** Кусок, каким он станет с вариантом: ответ модели по растушёванной маске поверх исходного, в размере рамки, RGB */
+export function blendFrame(prep: PreparedEdit, gen: Buffer, alpha: Float32Array): Buffer {
+  const { rect, inside } = prep.frame;
+  const out = Buffer.from(prep.frameRgb);
+  for (let y = 0; y < inside.height; y++) {
+    for (let x = 0; x < inside.width; x++) {
+      const a = alpha[y * inside.width + x]!;
+      if (a === 0) continue;
+      const i = ((y + inside.y - rect.y) * rect.width + x + inside.x - rect.x) * 3;
+      for (let c = 0; c < 3; c++) out[i + c] = Math.round(out[i + c]! + (gen[i + c]! - out[i + c]!) * a);
+    }
+  }
+  return out;
+}
+
+/**
+ * Шаг с критиком: модель получает кусок с прежней попыткой (ответ gen, вклеенный по маске) и исправляет в ней замечания fixes.
+ * Область ей всегда видна, даже если первый шаг шёл со скрытым под маской: исправлять надо то, что уже нарисовано.
+ * Задача — как сейчас в prep (слова художника и текст директора), кусок, набросок и референсы прежние.
+ */
+export async function revise(prep: PreparedEdit, gen: Buffer, alpha: Float32Array, mask: Uint8Array, fixes: string): Promise<{ prompt: string; images: InputImage[] }> {
+  const attempt = blendFrame(prep, gen, alpha);
+  const images = [...(await guideImages(attempt, mask, prep.frame, prep.modelSize, 'pair', prep.sketch)), ...prep.references];
+  const prompt = buildPrompt('pair', prep.request, {
+    style: prep.style,
+    references: prep.references.length,
+    sketch: prep.sketch.length > 0,
+    directed: prep.directed,
+    fixes,
+  });
+  return { prompt, images };
 }
 
 /** Весь холст в уменьшенной копии thumb с рамкой куска rect — чтобы директор видел, что это за картина и где кусок */

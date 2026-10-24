@@ -11,7 +11,9 @@ import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, t
 import { encodeProject, isProject, isProjectPath, openProject, PROJECT_EXTENSION } from '../core/project.ts';
 import type { RecentFiles } from '../core/recent.ts';
 import {
+  blendFrame,
   buildLayer,
+  criticImages,
   directorImages,
   fitGenerated,
   insideOf,
@@ -20,6 +22,7 @@ import {
   overviewImage,
   prepareEdit,
   retarget,
+  revise,
   type Guide,
   type PreparedEdit,
   type RawImage,
@@ -82,6 +85,17 @@ interface Variant {
   hide: boolean;
   /** Задача, как её расписал директор */
   directed?: string;
+  /** Шаг с критиком: исправляет вариант base по этим замечаниям */
+  fixes?: string;
+  base?: number;
+  /** Что критик сказал о варианте и при какой маске задачи (maskRev) смотрел */
+  critique?: Critique;
+}
+
+interface Critique {
+  done: boolean;
+  text: string;
+  maskRev: number;
 }
 
 /** Принятый слой, который правка перерисовывает: маска и место — на момент, когда попросили ещё вариантов */
@@ -116,6 +130,10 @@ interface Job {
   /** Что директор написал и для какой задачи (taskKey): та же задача — тот же текст, без нового вызова */
   directed?: { key: string; text: string };
   directing: boolean;
+  /** Критик смотрит вариант */
+  reviewing: boolean;
+  /** Идут шаги с критиком */
+  chain?: { step: number; steps: number };
   /** Ещё варианты принятого слоя: «Принять» кладёт вариант на его место */
   replaces?: Replaced;
   prep?: PreparedEdit;
@@ -219,7 +237,7 @@ export class Session {
     this.codex = findCodex();
     if (this.providerKind !== 'laozhang') return;
     const today = new Date().toISOString().slice(0, 10);
-    this.todayAtStart = (await readLedger()).filter((e) => e.at.startsWith(today) && e.kind !== 'director').length;
+    this.todayAtStart = (await readLedger()).filter((e) => e.at.startsWith(today) && !e.kind).length;
   }
 
   onChange(fn: () => void): () => void {
@@ -325,6 +343,8 @@ export class Session {
         sketch: j.sketch.length > 0,
         director: j.director,
         directing: j.directing,
+        reviewing: j.reviewing,
+        chain: j.chain && { ...j.chain },
         directed: j.director && j.directed?.key === taskKey(j) ? j.directed.text : undefined,
         bbox: j.prep?.bbox ?? j.area,
         inside: j.prep?.frame.inside,
@@ -342,6 +362,9 @@ export class Session {
           prompt: v.prompt,
           hide: v.hide,
           directed: v.directed,
+          fixes: v.fixes,
+          base: v.base,
+          critique: v.critique && { done: v.critique.done, text: v.critique.text },
         })),
         selected: j.selected,
         rev: j.rev,
@@ -873,6 +896,7 @@ export class Session {
       status: 'queued',
       variantsRequested: Math.min(Math.max(Math.round(task.variants), 1), 4),
       directing: false,
+      reviewing: false,
       maskUndo: [],
       maskRev: 0,
       variants: [],
@@ -978,28 +1002,28 @@ export class Session {
   /**
    * Новые варианты с нынешней задачей и показом области задачи. Готовые остаются на холсте, пока идут новые:
    * их можно сравнивать и принимать. jump — задачу поправили: первый готовый новый вариант сразу на холсте.
+   * С директором варианты идут не разом, а шагами с критиком (refine).
    */
   private async generate(job: Job, count: number, jump = false): Promise<void> {
     const prep = job.prep;
     if (!prep) throw new Error('Задача ещё не подготовлена');
+    if (job.director) return this.refine(job, prep, count);
     const provider = this.provider(job.model);
     const task = { prompt: job.prompt, hide: job.hide };
-    const director = job.director;
     const fresh = Array.from({ length: count }, (_, i): Variant => ({ n: job.variants.length + i, status: 'running', ...task }));
     job.variants.push(...fresh);
     if (!job.variants.some((v) => v.status === 'done')) job.status = 'running';
     job.error = undefined;
     this.changed();
 
-    // Директор — один раз на все новые варианты; промпт и картинки для модели собираются заново,
-    // только если задачу, показ области или текст директора поправили
+    // Промпт и картинки для модели собираются заново, только если задачу или показ области поправили
+    // (или прежние варианты шли с директором)
     const ready = (async () => {
       const guide = guideOf(task.hide);
-      const directed = director ? await this.direct(job, prep, task) : undefined;
-      if (prep.request !== task.prompt || prep.guide !== guide || prep.directed !== directed) {
-        Object.assign(prep, await retarget(prep, { request: task.prompt, guide, directed }));
+      if (prep.request !== task.prompt || prep.guide !== guide || prep.directed !== undefined) {
+        Object.assign(prep, await retarget(prep, { request: task.prompt, guide }));
       }
-      return { prompt: prep.prompt, images: prep.images, directed };
+      return { prompt: prep.prompt, images: prep.images };
     })();
     let shown = false;
     await Promise.all(
@@ -1017,7 +1041,6 @@ export class Session {
           const { gen, modelOutput } = await fitGenerated(prep, res.image);
           const stats = await measure(prep, gen, modelOutput);
           v.gen = gen;
-          v.directed = input.directed;
           v.elapsedMs = res.elapsedMs;
           v.outsideChangedPct = stats.outsideChangedPct;
           v.insideChangedPct = stats.insideChangedPct;
@@ -1039,15 +1062,125 @@ export class Session {
     job.error = job.status === 'error' ? failed?.error : undefined;
   }
 
+  /**
+   * Шаги с директором и критиком. Директор расписывает задачу, модель делает вариант, критик смотрит его и говорит,
+   * что исправить, — следующий шаг исправляет это в нём же. И так, пока критик не скажет «готово» или шаги не кончатся;
+   * последний шаг критик тоже смотрит: его замечания видны в карточке и пригодятся, если попросят ещё шагов.
+   * Каждый шаг — вариант: его можно выбрать и принять, пока идут следующие. С той же задачей шаги продолжают
+   * выбранный вариант, с поправленной (или в новой задаче) — начинают с исходного куска.
+   */
+  private async refine(job: Job, prep: PreparedEdit, steps: number): Promise<void> {
+    const provider = this.provider(job.model);
+    const task = { prompt: job.prompt, hide: job.hide };
+    // «Остановить» обрывает этот сигнал, но не задачу: готовые шаги остаются
+    const { signal } = job.abort;
+    const selected = job.variants[job.selected];
+    let base = selected?.status === 'done' && taskKey(selected) === taskKey(task) ? selected : undefined;
+    // Ещё шаги от готового варианта художник просит сам: «готово» от критика тут не ответ
+    let mustFix = base !== undefined;
+    let made = 0;
+    let step: Variant | undefined;
+    if (!job.variants.some((v) => v.status === 'done')) job.status = 'running';
+    job.error = undefined;
+    job.picked = false;
+    job.chain = { step: 0, steps };
+    this.changed();
+    try {
+      const directed = await this.direct(job, prep, task);
+      const guide = guideOf(task.hide);
+      if (prep.request !== task.prompt || prep.guide !== guide || prep.directed !== directed) {
+        Object.assign(prep, await retarget(prep, { request: task.prompt, guide, directed }));
+      }
+      for (;;) {
+        let fixes: string | undefined;
+        if (base) {
+          const verdict = await this.review(job, prep, base, { directed, mustFix, signal });
+          mustFix = false;
+          if (verdict.done || made === steps) break;
+          fixes = verdict.text;
+        }
+        if (signal.aborted || job.variants.length >= MAX_VARIANTS_PER_JOB) break;
+        step = { n: job.variants.length, status: 'running', ...task, directed, fixes, base: base?.n };
+        job.variants.push(step);
+        job.chain.step = ++made;
+        this.changed();
+        const input = base?.gen && fixes ? await revise(prep, base.gen, job.alpha!, job.mask!, fixes) : { prompt: prep.prompt, images: prep.images };
+        if (signal.aborted) break;
+        this.generations++;
+        const res = await provider.generate({ ...input, aspectRatio: prep.frame.aspectRatio, imageSize: prep.imageSize, signal });
+        const { gen, modelOutput } = await fitGenerated(prep, res.image);
+        const stats = await measure(prep, gen, modelOutput);
+        Object.assign(step, { gen, elapsedMs: res.elapsedMs, outsideChangedPct: stats.outsideChangedPct, insideChangedPct: stats.insideChangedPct, status: 'done' });
+        // Новый шаг сразу на холсте, если пользователь, пока шли шаги, сам не выбрал другой вариант
+        if (!job.picked || job.variants[job.selected]?.status !== 'done') job.selected = step.n;
+        job.status = 'done';
+        base = step;
+        step = undefined;
+        this.changed();
+      }
+    } catch (err) {
+      if (!signal.aborted) {
+        if (step) Object.assign(step, { status: 'error', error: message(err) });
+        job.error = step && steps > 1 ? `Шаг ${made}: ${message(err)}` : message(err);
+      }
+    } finally {
+      // Остановленный шаг не нужен: это всегда последний вариант
+      if (step?.status === 'running' && job.variants.at(-1) === step) job.variants.pop();
+      job.chain = undefined;
+      job.status = job.variants.some((v) => v.status === 'done') ? 'done' : 'error';
+      if (job.status === 'error') job.error ??= 'Шаги остановлены';
+      this.changed();
+    }
+  }
+
+  /** Что критик говорит о варианте; тот же ответ при той же маске не спрашивается заново — если подходит («готово» не подходит, когда нужны замечания) */
+  private async review(job: Job, prep: PreparedEdit, v: Variant, opts: { directed: string; mustFix: boolean; signal: AbortSignal }): Promise<Critique> {
+    const { directed, mustFix, signal } = opts;
+    const cached = v.critique;
+    if (cached && cached.maskRev === job.maskRev && !(mustFix && cached.done)) return cached;
+    if (!v.gen || !job.alpha || !job.mask) throw new Error('Вариант не готов');
+    job.reviewing = true;
+    this.changed();
+    try {
+      const maskRev = job.maskRev;
+      const overview = await this.overview(job, prep);
+      const res = await this.director().review({
+        request: v.prompt,
+        directed,
+        style: job.style,
+        hide: v.hide,
+        fixes: v.fixes,
+        mustFix,
+        images: await criticImages(prep, blendFrame(prep, v.gen, job.alpha), job.mask, overview),
+        sketch: prep.sketch.length > 0,
+        overview: !!overview,
+        references: prep.references.length,
+        signal,
+      });
+      v.critique = { done: res.done, text: res.text, maskRev };
+      return v.critique;
+    } catch (err) {
+      throw new Error(`Критик: ${message(err)}`);
+    } finally {
+      job.reviewing = false;
+      this.changed();
+    }
+  }
+
+  /** Весь холст с рамкой куска — директору и критику; null, если документ уже другой */
+  private async overview(job: Job, prep: PreparedEdit): Promise<InputImage | undefined> {
+    const doc = this.doc;
+    return doc?.id === job.docId ? overviewImage(await doc.thumbnail(1024), prep.canvas, prep.frame.rect) : undefined;
+  }
+
   /** Задача, как её расписал директор; для той же задачи и показа области — прежний текст без нового вызова */
   private async direct(job: Job, prep: PreparedEdit, task: { prompt: string; hide: boolean }): Promise<string> {
     const key = taskKey(task);
     if (job.directed?.key === key) return job.directed.text;
-    const doc = this.doc;
     job.directing = true;
     this.changed();
     try {
-      const overview = doc?.id === job.docId ? await overviewImage(await doc.thumbnail(1024), prep.canvas, prep.frame.rect) : undefined;
+      const overview = await this.overview(job, prep);
       const res = await this.director().direct({
         request: task.prompt,
         style: job.style,
@@ -1079,7 +1212,8 @@ export class Session {
   /** «Ещё варианты»: та же правка или с поправкой задачи, новые генерации к уже имеющимся */
   async moreVariants(jobId: string, count: number, change: RedoChange = {}): Promise<void> {
     const job = this.job(jobId);
-    const busy = job.status === 'running' || job.status === 'preparing' || job.status === 'queued' || job.variants.some((v) => v.status === 'running');
+    const busy =
+      job.status === 'running' || job.status === 'preparing' || job.status === 'queued' || !!job.chain || job.variants.some((v) => v.status === 'running');
     if (busy) throw new Error('Задача ещё идёт');
     if (!job.prep) return this.retry(jobId, change);
     const n = Math.min(Math.max(Math.round(count), 1), MAX_VARIANTS_PER_JOB - job.variants.length);
@@ -1104,6 +1238,14 @@ export class Session {
     job.layerPngs.clear();
     this.changed();
     this.schedule();
+  }
+
+  /** Остановить шаги с критиком: готовые варианты остаются, идущий шаг отменяется */
+  stop(jobId: string): void {
+    const job = this.job(jobId);
+    if (!job.chain) return;
+    job.abort.abort();
+    job.abort = new AbortController();
   }
 
   /** Убрать задачу: отклонить варианты или отменить генерацию */

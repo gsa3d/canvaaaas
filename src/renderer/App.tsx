@@ -58,6 +58,16 @@ function plural(n: number, one: string, few: string, many: string): string {
   return many;
 }
 
+/** Сколько сгенерировать: варианты разом или, с директором, шаги с критиком */
+function countText(director: boolean, n: number): string {
+  return `${n} ${director ? plural(n, 'шаг', 'шага', 'шагов') : plural(n, 'вариант', 'варианта', 'вариантов')}`;
+}
+
+/** Надпись кнопки генерации */
+function generateText(director: boolean, n: number): string {
+  return director ? `Сгенерировать в ${countText(true, n)}` : `Сгенерировать ${countText(false, n)}`;
+}
+
 function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
@@ -176,7 +186,10 @@ const needsKey = (model: ModelChoice) => model !== 'chatgpt';
 
 /** Что сейчас с задачей: директор расписывает её до генерации */
 function jobStatus(job: JobDto): string {
-  return job.directing ? 'Директор думает' : STATUS[job.status];
+  if (job.directing) return 'Директор думает';
+  if (job.reviewing) return 'Критик смотрит';
+  if (job.chain?.step) return `Шаг ${job.chain.step} из ${job.chain.steps}`;
+  return STATUS[job.status];
 }
 
 const STATUS: Record<JobDto['status'], string> = {
@@ -206,6 +219,8 @@ export function App() {
   const [model, setModel] = useState<ModelChoice>('flash');
   const [size, setSize] = useState<SizeChoice>('auto');
   const [variants, setVariants] = useState(2);
+  /** Сколько шагов с критиком, когда включён директор */
+  const [steps, setSteps] = useState(3);
   const [focusJob, setFocusJob] = useState<string | null>(null);
   const [maskJob, setMaskJob] = useState<string | null>(null);
   /** Слой, маску которого сейчас правят */
@@ -345,6 +360,9 @@ export function App() {
   const canGenerate = !!doc && hasSelection && prompt.trim().length > 0 && !maskJob && !maskLayer;
   // Директор идёт через Codex; у подставной модели — подставной директор
   const canDirect = state?.provider === 'mock' || !!state?.codex;
+  // С директором правка идёт шагами с критиком, а не вариантами разом
+  const stepwise = director && canDirect;
+  const countFor = (withDirector: boolean) => (withDirector ? steps : variants);
   // У ChatGPT одно разрешение — его выбирает сама модель
   const sizeFor = (m: ModelChoice): SizeChoice => (m === 'chatgpt' ? 'auto' : size);
   const sizeAdvice = doc && state && hasSelection ? adviseSelection(doc, selection, state.models[model], sizeFor(model)) : null;
@@ -359,13 +377,13 @@ export function App() {
       const { id } = await post<{ id: string }>('/api/jobs', {
         shapes: selection,
         prompt,
-        variants,
+        variants: countFor(stepwise),
         model,
         size: sizeFor(model),
         refs,
         hide,
         sketch: hasSketch ? sketch : undefined,
-        director: director && canDirect,
+        director: stepwise,
       });
       // Форма — для следующей области: задача, набросок, референсы и скрытие у неё свои; модель, разрешение, число вариантов и директор остаются
       setSelection([]);
@@ -643,9 +661,11 @@ export function App() {
     if (r) viewRef.current?.showRect(r);
   };
 
-  /** Ещё варианты задачи в очереди, можно с поправкой; с ошибкой до подготовки куска — начать её заново */
+  /** Ещё варианты (с директором — шаги) задачи в очереди, можно с поправкой; с ошибкой до подготовки куска — начать её заново */
   const redoJob = (job: JobDto, change: RedoChange = {}) =>
-    job.inside ? post(`/api/jobs/${job.id}/more`, { count: variants, ...change }) : post(`/api/jobs/${job.id}/retry`, change);
+    job.inside
+      ? post(`/api/jobs/${job.id}/more`, { count: countFor(change.director ?? job.director), ...change })
+      : post(`/api/jobs/${job.id}/retry`, change);
 
   // Ещё варианты принятого слоя, можно с поправкой: если они уже в очереди — туда же, а не второй задачей на тот же слой
   const layerVariants = async (patch: PatchDto, change: RedoChange = {}) => {
@@ -662,7 +682,8 @@ export function App() {
         else notify('Варианты этого слоя уже генерируются', false);
         return;
       }
-      const { id } = await post<{ id: string }>(`/api/history/${patch.id}/variants`, { variants, model, size: sizeFor(model), ...change });
+      const count = countFor(change.director ?? patch.directed !== undefined);
+      const { id } = await post<{ id: string }>(`/api/history/${patch.id}/variants`, { variants: count, model, size: sizeFor(model), ...change });
       setFocusJob(id);
       viewRef.current?.showRect(patch.rect);
     } catch (err) {
@@ -953,8 +974,11 @@ export function App() {
                   )}
                 </label>
                 <label>
-                  Варианты
-                  <select value={variants} onChange={(e) => setVariants(Number(e.currentTarget.value))}>
+                  {stepwise ? 'Шаги' : 'Варианты'}
+                  <select
+                    value={countFor(stepwise)}
+                    onChange={(e) => (stepwise ? setSteps : setVariants)(Number(e.currentTarget.value))}
+                  >
                     {[1, 2, 3, 4].map((n) => (
                       <option value={n}>{n}</option>
                     ))}
@@ -966,7 +990,7 @@ export function App() {
                 <SizeHint advice={sizeAdvice} auto={sizeFor(model) === 'auto'} sizes={state!.models[model].imageSizes} onSize={setSize} />
               )}
               <button class="primary" disabled={!canGenerate} onClick={generate} title="⌘↵">
-                Сгенерировать {variants} {plural(variants, 'вариант', 'варианта', 'вариантов')}
+                {generateText(stepwise, countFor(stepwise))}
               </button>
             </section>
 
@@ -985,6 +1009,7 @@ export function App() {
                     focused={job.id === focusJob}
                     maskMode={job.id === maskJob}
                     variants={variants}
+                    steps={steps}
                     onFocus={() => focus(job)}
                     onSwitch={(dir) => switchVariant(job, dir)}
                     onMaskMode={() => {
@@ -1013,9 +1038,9 @@ export function App() {
                           .catch(fail);
                         return;
                       }
-                      const path = { accept: 'accept', discard: 'discard', retry: 'retry', more: 'more', undoMask: 'mask/undo' }[action];
+                      const path = { accept: 'accept', discard: 'discard', retry: 'retry', more: 'more', stop: 'stop', undoMask: 'mask/undo' }[action];
                       if (action === 'accept' || action === 'discard') setMaskJob(null);
-                      post(`/api/jobs/${job.id}/${path}`, action === 'more' ? { count: variants } : undefined)
+                      post(`/api/jobs/${job.id}/${path}`, action === 'more' ? { count: countFor(job.director) } : undefined)
                         .then(() => action === 'undoMask' && maskChanged())
                         .catch(fail);
                     }}
@@ -1035,6 +1060,7 @@ export function App() {
                       canDirect={canDirect}
                       maskMode={p.id === maskLayer}
                       variants={variants}
+                      steps={steps}
                       onToggle={() => post(`/api/history/${p.id}/toggle`).catch(fail)}
                       onShow={() => viewRef.current?.showRect(p.rect)}
                       onMask={() => editLayerMask(p)}
@@ -1107,7 +1133,7 @@ export function App() {
   );
 }
 
-type JobAction = 'accept' | 'discard' | 'retry' | 'more' | 'expand' | 'undoMask';
+type JobAction = 'accept' | 'discard' | 'retry' | 'more' | 'stop' | 'expand' | 'undoMask';
 
 function JobCard(props: {
   job: JobDto;
@@ -1118,8 +1144,9 @@ function JobCard(props: {
   number: number;
   focused: boolean;
   maskMode: boolean;
-  /** Сколько вариантов сгенерировать */
+  /** Сколько вариантов сгенерировать; с директором — сколько шагов */
   variants: number;
+  steps: number;
   onFocus: () => void;
   onSwitch: (dir: number) => void;
   onMaskMode: () => void;
@@ -1138,8 +1165,10 @@ function JobCard(props: {
   const otherTask = selected && (selected.prompt !== job.prompt || selected.hide !== job.hide) ? selected : null;
   // Текст директора — того варианта, что на холсте; пока вариантов нет — для следующих
   const directed = (selected?.status === 'done' ? selected.directed : undefined) ?? job.directed;
+  const critique = selected?.status === 'done' ? selected.critique : undefined;
+  const count = job.director ? props.steps : props.variants;
   // Поправить задачу можно, когда новых вариантов не ждём
-  const canRedo = (job.status === 'done' && running === 0) || job.status === 'error';
+  const canRedo = ((job.status === 'done' && running === 0) || job.status === 'error') && !job.chain;
   useEffect(() => {
     if (!canRedo) setRedoing(false);
   }, [canRedo]);
@@ -1150,6 +1179,7 @@ function JobCard(props: {
       director={job.director}
       canDirect={props.canDirect}
       variants={props.variants}
+      steps={props.steps}
       onCancel={() => setRedoing(false)}
       onSubmit={(change) => {
         setRedoing(false);
@@ -1166,7 +1196,7 @@ function JobCard(props: {
         {canRedo && (
           <button
             class={redoing ? 'icon redo-toggle active' : 'icon redo-toggle'}
-            title={`Поправить задачу и сгенерировать ещё ${props.variants} ${plural(props.variants, 'вариант', 'варианта', 'вариантов')}`}
+            title={`Поправить задачу и сгенерировать ещё ${countText(job.director, count)}`}
             aria-label="Поправить задачу"
             aria-pressed={redoing}
             onClick={(e) => {
@@ -1178,13 +1208,14 @@ function JobCard(props: {
           </button>
         )}
       </header>
-      {directed && !redoing && <Directed text={directed} />}
+      {directed && !redoing && <Note label="Директор" text={directed} />}
+      {critique && !redoing && <Note label={critique.done ? 'Критик: готово' : 'Критик'} text={critique.text} />}
       {redoForm}
       <p class="job-status">
         {jobStatus(job)}
-        {job.status === 'running' && `, готово ${done.length} из ${job.variants.length}`}
-        {busy && `, ${clock(Date.now() - Date.parse(job.createdAt))}`}
-        {job.status === 'done' && running > 0 && `, ещё ${running} в работе`}
+        {job.status === 'running' && !job.chain && `, готово ${done.length} из ${job.variants.length}`}
+        {(busy || job.chain) && `, ${clock(Date.now() - Date.parse(job.createdAt))}`}
+        {job.status === 'done' && running > 0 && !job.chain && `, ещё ${running} в работе`}
         {job.modelSize && <span class="dim">, {[job.imageSize, MODELS.find((m) => m.id === job.model)?.tag].filter(Boolean).join(' ')}</span>}
         {job.refs > 0 && <span class="dim">, референсов: {job.refs}</span>}
         {job.sketch && <span class="dim">, с наброском</span>}
@@ -1239,9 +1270,19 @@ function JobCard(props: {
               {!replacing ? 'Принять' : selected?.current ? 'Оставить этот' : 'Заменить слой'}
             </button>
             <button onClick={() => props.onAction('discard')}>Отклонить</button>
-            <button onClick={() => props.onAction('more')} disabled={running > 0}>
-              Ещё варианты
-            </button>
+            {job.chain ? (
+              <button title="Готовые шаги останутся" onClick={() => props.onAction('stop')}>
+                Остановить
+              </button>
+            ) : (
+              <button
+                onClick={() => props.onAction('more')}
+                disabled={running > 0}
+                title={job.director ? `Ещё ${countText(true, count)} от этого варианта` : `Ещё ${countText(false, count)}`}
+              >
+                {job.director ? 'Ещё шаги' : 'Ещё варианты'}
+              </button>
+            )}
           </div>
           <div class="row mask-row">
             <button class={props.maskMode ? 'active' : ''} aria-pressed={props.maskMode} onClick={props.onMaskMode}>
@@ -1281,8 +1322,9 @@ function LayerItem(props: {
   patch: PatchDto;
   canDirect: boolean;
   maskMode: boolean;
-  /** Сколько вариантов сгенерировать */
+  /** Сколько вариантов сгенерировать; с директором — сколько шагов */
   variants: number;
+  steps: number;
   onToggle: () => void;
   onShow: () => void;
   onMask: () => void;
@@ -1293,6 +1335,9 @@ function LayerItem(props: {
   const { patch } = props;
   const [redoing, setRedoing] = useState(false);
   const time = new Date(patch.createdAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  // Слой с директором и перерисовывается шагами с критиком, начиная с него самого
+  const director = patch.directed !== undefined;
+  const count = countText(director, director ? props.steps : props.variants);
   return (
     <li class={[patch.active ? '' : 'off', props.maskMode ? 'editing' : ''].filter(Boolean).join(' ')}>
       <button
@@ -1320,7 +1365,7 @@ function LayerItem(props: {
       </button>
       <button
         class="layer-icon"
-        title={`Ещё ${props.variants} ${plural(props.variants, 'вариант', 'варианта', 'вариантов')} этой правки: та же задача и маска; выбранный заменит слой`}
+        title={`Ещё ${count} этой правки: та же задача и маска; выбранный заменит слой`}
         aria-label="Ещё варианты слоя"
         onClick={() => props.onVariants()}
       >
@@ -1328,7 +1373,7 @@ function LayerItem(props: {
       </button>
       <button
         class={redoing ? 'layer-icon active' : 'layer-icon'}
-        title={`Ещё ${props.variants} ${plural(props.variants, 'вариант', 'варианта', 'вариантов')} с поправленной задачей; выбранный заменит слой`}
+        title={`Ещё ${count} с поправленной задачей; выбранный заменит слой`}
         aria-label="Перерисовать слой с поправкой"
         aria-pressed={redoing}
         onClick={() => setRedoing((v) => !v)}
@@ -1343,9 +1388,10 @@ function LayerItem(props: {
           <RedoForm
             prompt={patch.prompt}
             hide={patch.hide ?? false}
-            director={patch.directed !== undefined}
+            director={director}
             canDirect={props.canDirect}
             variants={props.variants}
+            steps={props.steps}
             onCancel={() => setRedoing(false)}
             onSubmit={(change) => {
               setRedoing(false);
@@ -1381,15 +1427,17 @@ function DirectorOption(props: { checked: boolean; disabled: boolean; onChange: 
       </label>
       <Help>
         Перед генерацией ChatGPT смотрит на кусок, набросок, задачу и стиль документа и расписывает задачу для модели подробно. Модель
-        получает оба текста; ваша задача остаётся как есть, текст директора — в карточке под ней. Идёт по подписке ChatGPT через Codex,
-        добавляет около минуты.
+        получает оба текста; ваша задача остаётся как есть, текст директора — в карточке под ней. Правка идёт шагами: после каждого
+        критик (тот же ChatGPT) смотрит результат и говорит, что исправить, и следующий шаг исправляет это. Шаги кончаются, когда
+        критик доволен или их число вышло; каждый шаг остаётся вариантом. Директор и критик идут по подписке ChatGPT через Codex,
+        каждый добавляет около минуты.
       </Help>
     </span>
   );
 }
 
-/** Задача, как её расписал директор: две строки, по щелчку — целиком */
-function Directed(props: { text: string }) {
+/** Текст директора или замечания критика: две строки, по щелчку — целиком */
+function Note(props: { label: string; text: string }) {
   const [open, setOpen] = useState(false);
   return (
     <p
@@ -1400,7 +1448,7 @@ function Directed(props: { text: string }) {
         setOpen((v) => !v);
       }}
     >
-      <span class="directed-label">Директор</span> {props.text}
+      <span class="directed-label">{props.label}</span> {props.text}
     </p>
   );
 }
@@ -1493,6 +1541,7 @@ function RedoForm(props: {
   director: boolean;
   canDirect: boolean;
   variants: number;
+  steps: number;
   onSubmit: (change: RedoChange) => void;
   onCancel: () => void;
 }) {
@@ -1529,7 +1578,7 @@ function RedoForm(props: {
       </div>
       <div class="row">
         <button type="submit" class="primary" disabled={!prompt.trim()} title="⌘↵">
-          Сгенерировать {props.variants} {plural(props.variants, 'вариант', 'варианта', 'вариантов')}
+          {director && props.canDirect ? generateText(true, props.steps) : generateText(false, props.variants)}
         </button>
         <button type="button" onClick={props.onCancel}>
           Отмена

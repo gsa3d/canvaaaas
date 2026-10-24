@@ -1,6 +1,6 @@
 // Журнал генераций: каждая генерация платная, поэтому каждый вызов модели
-// пишется строкой JSON в generations.jsonl в папке данных приложения. Директор тоже тратит подписку —
-// его вызовы пишутся туда же с kind: 'director', но генерациями картинок не считаются.
+// пишется строкой JSON в generations.jsonl в папке данных приложения. Директор и критик тоже тратят подписку —
+// их вызовы пишутся туда же с kind: 'director' и 'critic', но генерациями картинок не считаются.
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -17,8 +17,8 @@ export interface LedgerEntry {
   elapsedMs: number;
   purpose?: string;
   error?: string;
-  /** Вызов директора, а не генерация картинки */
-  kind?: 'director';
+  /** Вызов директора или критика, а не генерация картинки */
+  kind?: 'director' | 'critic';
 }
 
 export function appDataDir(): string {
@@ -76,22 +76,24 @@ export function withLedger(provider: ImageProvider, purpose?: string): ImageProv
   };
 }
 
-/** То же для директора */
+/** То же для директора и критика */
 export function withDirectorLedger(director: PromptDirector, purpose?: string): PromptDirector {
+  const logged = async <T extends { elapsedMs: number }>(kind: 'director' | 'critic', call: () => Promise<T>): Promise<T> => {
+    const started = Date.now();
+    const base = { at: new Date().toISOString(), provider: director.id, model: director.model, aspectRatio: '', imageSize: '', purpose, kind };
+    try {
+      const result = await call();
+      await append({ ...base, ok: true, elapsedMs: result.elapsedMs });
+      return result;
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      await append({ ...base, ok: false, elapsedMs: Date.now() - started, error });
+      throw err;
+    }
+  };
   return {
     ...director,
-    async direct(req) {
-      const started = Date.now();
-      const base = { at: new Date().toISOString(), provider: director.id, model: director.model, aspectRatio: '', imageSize: '', purpose, kind: 'director' as const };
-      try {
-        const result = await director.direct(req);
-        await append({ ...base, ok: true, elapsedMs: result.elapsedMs });
-        return result;
-      } catch (err) {
-        const error = err instanceof Error ? err.message : String(err);
-        await append({ ...base, ok: false, elapsedMs: Date.now() - started, error });
-        throw err;
-      }
-    },
+    direct: (req) => logged('director', () => director.direct(req)),
+    review: (req) => logged('critic', () => director.review(req)),
   };
 }

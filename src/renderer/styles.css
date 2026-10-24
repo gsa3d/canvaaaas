@@ -961,6 +961,8 @@ button.redo-toggle.active {
   border-left: 2px solid var(--accent-soft);
   color: var(--muted);
   font-size: 12px;
+  /* Замечания критика — по строке на каждое */
+  white-space: pre-line;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
