@@ -2,6 +2,7 @@ import {
   IconArrowBackUp,
   IconArrowForwardUp,
   IconArrowsExchange,
+  IconArrowsMove,
   IconBlur,
   IconBrush,
   IconChevronLeft,
@@ -22,6 +23,7 @@ import {
   IconPlus,
   IconRefresh,
   IconScribble,
+  IconStackPop,
   IconTrash,
   IconX,
   type Icon,
@@ -53,7 +55,7 @@ import {
   type StateDto,
 } from '../shared/api.ts';
 import { getState, post, subscribe, upload, uploadReference } from './api.ts';
-import { CanvasView, type MaskEditView, type MaskRef, type PickEvent, type Tool } from './viewer.ts';
+import { CanvasView, type MaskEditView, type MaskRef, type Movable, type PickEvent, type Tool } from './viewer.ts';
 
 /** Объект, выделенный инструментом «Объект»: его уровни и подсказки, по которым он найден */
 interface Pick {
@@ -177,6 +179,7 @@ const STROKE = 1.75;
 
 const TOOL_ICONS: Record<Tool, Icon> = {
   object: IconClick,
+  move: IconArrowsMove,
   hand: IconHandStop,
   rect: IconMarquee2,
   lasso: IconLasso,
@@ -187,6 +190,7 @@ const TOOL_ICONS: Record<Tool, Icon> = {
 
 const TOOLS: { id: Tool; label: string; key: string }[] = [
   { id: 'object', label: 'Объект', key: 'W' },
+  { id: 'move', label: 'Сдвинуть отделённый объект', key: 'V' },
   { id: 'rect', label: 'Прямоугольник', key: 'R' },
   { id: 'lasso', label: 'Лассо', key: 'L' },
   { id: 'brush', label: 'Кисть', key: 'B' },
@@ -269,6 +273,7 @@ export function App() {
   const onShape = useRef<(shape: MaskShape) => void>(() => undefined);
   const onSketch = useRef<(stroke: SketchStroke) => void>(() => undefined);
   const onPick = useRef<(event: PickEvent) => void>(() => undefined);
+  const onMove = useRef<(id: string, dx: number, dy: number) => Promise<number>>(() => Promise.reject(new Error('Нет документа')));
   /** Как найдена каждая фигура инструмента «Объект» в выделении */
   const picks = useRef(new WeakMap<MaskShape, Pick>());
   /** Выделение на этот миг: щелчки «Объектом» идут по очереди и не ждут перерисовки */
@@ -313,6 +318,7 @@ export function App() {
       onSketch: (stroke) => onSketch.current(stroke),
       onMaskShape: (view, shape) => onMaskShape.current(view, shape),
       onPick: (event) => onPick.current(event),
+      onMove: (id, dx, dy) => onMove.current(id, dx, dy),
       onZoom: setZoom,
     });
     refresh();
@@ -365,6 +371,10 @@ export function App() {
       return next.length === sel.length && next.every((s, i) => s === sel[i]) ? sel : next;
     });
   }, [objectsKey]);
+  // Отделённые объекты, которые видно, — их можно сдвинуть; снизу вверх, как слои
+  const movable: Movable[] = layers.flatMap((p) => (p.lifted && p.active && p.object && objects.some((o) => o.id === p.object) ? [{ id: p.object, layer: p.id, rect: p.rect }] : []));
+  const movableKey = JSON.stringify(movable);
+  useEffect(() => viewRef.current?.setMovable(movable), [movableKey]);
   const lit = objects.find((o) => o.id === litObject);
   useEffect(() => viewRef.current?.setHighlight(lit ? objectShape(lit) : null), [lit?.id, lit?.rev]);
   useEffect(() => viewRef.current?.setBrush(brush, softness), [brush, softness]);
@@ -507,6 +517,36 @@ export function App() {
     }
   };
   const selectedObjects = new Set(selection.flatMap((s) => (s.kind === 'mask' && s.id.startsWith('obj:') && !s.erase ? [s.id.slice(4)] : [])));
+  /** Объект в выделении один и он отделён — отделять нечего */
+  const selectedLifted = selection.length === 1 && selectedObjects.size === 1 && objects.some((o) => selectedObjects.has(o.id) && o.layer);
+  /**
+   * Отделить объект: модель дорисует фон под ним, а сам он ляжет своим слоем — его можно сдвигать.
+   * Без объекта — то, что выделено: сначала оно сохраняется объектом
+   */
+  const detach = async (o?: ObjectDto) => {
+    if (!doc) return;
+    if (needsKey(model) && !state?.hasKey) {
+      setDialog('settings');
+      return;
+    }
+    try {
+      const only = selection.length === 1 && selectedObjects.size === 1 ? [...selectedObjects][0] : undefined;
+      const id = o?.id ?? only ?? (await post<{ id: string }>('/api/objects', { shapes: selection })).id;
+      const { id: job } = await post<{ id: string }>(`/api/objects/${id}/detach`, { variants, model, size: sizeFor(model) });
+      if (!o) clearSelection();
+      setFocusJob(job);
+    } catch (err) {
+      fail(err);
+    }
+  };
+  onMove.current = (id, dx, dy) =>
+    post<{ rev: number }>(`/api/objects/${id}/move`, { dx, dy }).then(
+      (r) => r.rev,
+      (err: unknown) => {
+        fail(err);
+        throw err;
+      },
+    );
   const clearSketch = () => {
     formOrder.current = formOrder.current.filter((k) => k !== 'sketch');
     setSketch([]);
@@ -869,8 +909,9 @@ export function App() {
   };
 
   const deleteLayer = (patch: PatchDto) => {
+    const name = patch.lifted ? objects.find((o) => o.id === patch.object)?.name : undefined;
     post(`/api/history/${patch.id}/delete`)
-      .then(() => notify(`Слой «${short(patch.prompt)}» удалён. ⌘Z вернёт его`, false))
+      .then(() => notify(name ? `Объект «${short(name)}» убран с холста. ⌘Z вернёт его` : `Слой «${short(patch.prompt)}» удалён. ⌘Z вернёт его`, false))
       .catch(fail);
   };
 
@@ -965,7 +1006,7 @@ export function App() {
           const ToolIcon = TOOL_ICONS[t.id];
           // Набросок — подсказка модели к новой правке, а не выделение: отдельно от инструментов выделения
           // Набросок и «Объект» — для новой правки, не для правки маски
-          const formOnly = (t.id === 'sketch' || t.id === 'object') && !!(maskJob || maskLayer);
+          const formOnly = (t.id === 'sketch' || t.id === 'object' || t.id === 'move') && !!(maskJob || maskLayer);
           const button = (
             <button
               key={t.id}
@@ -1125,6 +1166,11 @@ export function App() {
                       <IconCubePlus size={15} stroke={STROKE} />
                     </button>
                   )}
+                  {hasSelection && !selectedLifted && (
+                    <button class="chip-action" title="Отделить: фон под ним дорисует модель" aria-label="Отделить объект" onClick={() => void detach()}>
+                      <IconStackPop size={15} stroke={STROKE} />
+                    </button>
+                  )}
                   {sketch.length > 0 && <Chip icon={IconScribble} label="Набросок" clear="Стереть набросок" onClear={clearSketch} />}
                 </div>
               )}
@@ -1205,6 +1251,7 @@ export function App() {
                     job={job}
                     canDirect={canDirect}
                     replacing={job.replaces === undefined ? undefined : (layers.find((p) => p.id === job.replaces) ?? null)}
+                    detaching={job.detach && (objects.find((o) => o.id === job.detach)?.name ?? null)}
                     number={numbers.current.get(job.id) ?? 0}
                     focused={job.id === focusJob}
                     maskMode={job.id === maskJob}
@@ -1241,7 +1288,11 @@ export function App() {
                       const path = { accept: 'accept', discard: 'discard', retry: 'retry', more: 'more', stop: 'stop', undoMask: 'mask/undo' }[action];
                       if (action === 'accept' || action === 'discard') setMaskJob(null);
                       post(`/api/jobs/${job.id}/${path}`, action === 'more' ? { count: countFor(job.director) } : undefined)
-                        .then(() => action === 'undoMask' && maskChanged())
+                        .then(() => {
+                          if (action === 'undoMask') maskChanged();
+                          // Отделённый объект сразу можно тянуть
+                          if (action === 'accept' && job.detach) setTool('move');
+                        })
                         .catch(fail);
                     }}
                   />
@@ -1252,14 +1303,18 @@ export function App() {
             {objects.length > 0 && (
               <ObjectsPanel
                 objects={objects}
+                layers={layers}
+                detaching={new Set(jobs.flatMap((j) => (j.detach ? [j.detach] : [])))}
                 selected={selectedObjects}
                 following={!!segment?.following}
                 onSelect={selectObject}
                 onHover={(o) => setLitObject(o?.id ?? null)}
                 onRename={(o, name) => post(`/api/objects/${o.id}/rename`, { name }).catch(fail)}
+                onDetach={(o) => void detach(o)}
+                onToggle={(o) => o.layer && post(`/api/history/${o.layer}/toggle`).catch(fail)}
                 onDelete={(o) =>
                   post(`/api/objects/${o.id}/delete`)
-                    .then(() => notify(`Объект «${short(o.name)}» удалён. ⌘Z вернёт его`, false))
+                    .then(() => notify(`Объект «${short(o.name)}» ${o.layer ? 'убран с холста' : 'удалён'}. ⌘Z вернёт его`, false))
                     .catch(fail)
                 }
               />
@@ -1358,6 +1413,8 @@ function JobCard(props: {
   canDirect: boolean;
   /** Слой, который заменит принятый вариант; null — его уже удалили */
   replacing?: PatchDto | null;
+  /** Задача отделяет этот объект (имя); null — объекта уже нет */
+  detaching?: string | null;
   number: number;
   focused: boolean;
   maskMode: boolean;
@@ -1438,6 +1495,18 @@ function JobCard(props: {
         {job.sketch && <span class="dim">, с наброском</span>}
         {job.hide && <span class="dim">, под маской стёрто</span>}
       </p>
+      {props.detaching !== undefined && (
+        <p class="hint">
+          {props.detaching === null ? (
+            'Объекта уже нет'
+          ) : (
+            <>
+              Отделить «{short(props.detaching)}»
+              <Help>Варианты — фон под объектом. Выбранный ляжет под него, а объект — своим слоем сверху: его можно сдвигать (V), скрывать и удалять.</Help>
+            </>
+          )}
+        </p>
+      )}
       {replacing !== undefined && (
         <p class="hint">
           {replacing ? (
@@ -1484,7 +1553,7 @@ function JobCard(props: {
           )}
           <div class="row">
             <button class="primary" onClick={() => props.onAction('accept')}>
-              {!replacing ? 'Принять' : selected?.current ? 'Оставить этот' : 'Заменить слой'}
+              {props.detaching ? 'Отделить' : !replacing ? 'Принять' : selected?.current ? 'Оставить этот' : 'Заменить слой'}
             </button>
             <button onClick={() => props.onAction('discard')}>Отклонить</button>
             {job.chain ? (
@@ -1571,9 +1640,14 @@ function LayerItem(props: {
       <button
         class="link"
         onClick={props.onShow}
-        title={['Показать на холсте', props.object && `Объект: ${props.object}`, patch.directed && `\nДиректор: ${patch.directed}`].filter(Boolean).join('\n')}
+        title={
+          patch.lifted
+            ? 'Отделённый объект: сдвигать — V'
+            : ['Показать на холсте', props.object && `Объект: ${props.object}`, patch.directed && `\nДиректор: ${patch.directed}`].filter(Boolean).join('\n')
+        }
       >
-        {patch.prompt}
+        {patch.lifted && <IconStackPop size={14} stroke={STROKE} class="layer-kind" aria-label="Отделённый объект" />}
+        {(patch.lifted && props.object) || patch.prompt}
       </button>
       <span class="dim">{time}</span>
       <button
@@ -1586,24 +1660,34 @@ function LayerItem(props: {
       >
         <IconMask size={18} stroke={STROKE} />
       </button>
+      {/* Отделённый объект перерисовывают правкой объекта: выделить его и написать задачу */}
+      {!patch.lifted && (
+        <>
+          <button
+            class="layer-icon"
+            title={`Ещё ${count} этой правки: та же задача и маска; выбранный заменит слой`}
+            aria-label="Ещё варианты слоя"
+            onClick={() => props.onVariants()}
+          >
+            <IconRefresh size={18} stroke={STROKE} />
+          </button>
+          <button
+            class={redoing ? 'layer-icon active' : 'layer-icon'}
+            title={`Ещё ${count} с поправленной задачей; выбранный заменит слой`}
+            aria-label="Перерисовать слой с поправкой"
+            aria-pressed={redoing}
+            onClick={() => setRedoing((v) => !v)}
+          >
+            <IconPencil size={18} stroke={STROKE} />
+          </button>
+        </>
+      )}
       <button
-        class="layer-icon"
-        title={`Ещё ${count} этой правки: та же задача и маска; выбранный заменит слой`}
-        aria-label="Ещё варианты слоя"
-        onClick={() => props.onVariants()}
+        class="layer-icon delete"
+        title={patch.lifted ? 'Убрать объект с холста — под ним фон (⌘Z вернёт)' : 'Удалить слой (⌘Z вернёт его)'}
+        aria-label="Удалить слой"
+        onClick={props.onDelete}
       >
-        <IconRefresh size={18} stroke={STROKE} />
-      </button>
-      <button
-        class={redoing ? 'layer-icon active' : 'layer-icon'}
-        title={`Ещё ${count} с поправленной задачей; выбранный заменит слой`}
-        aria-label="Перерисовать слой с поправкой"
-        aria-pressed={redoing}
-        onClick={() => setRedoing((v) => !v)}
-      >
-        <IconPencil size={18} stroke={STROKE} />
-      </button>
-      <button class="layer-icon delete" title="Удалить слой (⌘Z вернёт его)" aria-label="Удалить слой" onClick={props.onDelete}>
         <IconTrash size={18} stroke={STROKE} />
       </button>
       {redoing && (
@@ -1648,13 +1732,21 @@ function SegmentBanner(props: { segment: StateDto['segment']; onError: (err: unk
 /** Объекты деревом: крупный объект и его части. Щелчок — выделить, ⌘ или Shift — добавить к выделению, двойной щелчок — переименовать */
 function ObjectsPanel(props: {
   objects: ObjectDto[];
+  /** Слои: виден ли отделённый объект */
+  layers: PatchDto[];
+  /** Объекты, которые сейчас отделяются */
+  detaching: Set<string>;
   selected: Set<string>;
   following: boolean;
   onSelect: (o: ObjectDto, add: boolean) => void;
   onHover: (o: ObjectDto | null) => void;
   onRename: (o: ObjectDto, name: string) => void;
+  onDetach: (o: ObjectDto) => void;
+  /** Скрыть или показать отделённый объект */
+  onToggle: (o: ObjectDto) => void;
   onDelete: (o: ObjectDto) => void;
 }) {
+  const shown = new Set(props.layers.filter((p) => p.active).map((p) => p.id));
   const [editing, setEditing] = useState<string | null>(null);
   const ids = new Set(props.objects.map((o) => o.id));
   const children = new Map<string | undefined, ObjectDto[]>();
@@ -1666,7 +1758,7 @@ function ObjectsPanel(props: {
     (children.get(parent) ?? []).map((o) => (
       <Fragment key={o.id}>
         <li
-          class={[props.selected.has(o.id) ? 'selected' : '', o.lost ? 'lost' : ''].filter(Boolean).join(' ')}
+          class={[props.selected.has(o.id) ? 'selected' : '', o.lost ? 'lost' : '', o.layer && !shown.has(o.layer) ? 'off' : ''].filter(Boolean).join(' ')}
           style={{ paddingLeft: `${2 + depth * 16}px` }}
           onPointerEnter={() => props.onHover(o)}
           onPointerLeave={() => props.onHover(null)}
@@ -1689,7 +1781,33 @@ function ObjectsPanel(props: {
               {o.name}
             </button>
           )}
-          <button class="layer-icon delete" title="Удалить объект — пиксели останутся (⌘Z вернёт его)" aria-label="Удалить объект" onClick={() => props.onDelete(o)}>
+          {o.layer ? (
+            <button
+              class="layer-icon"
+              title={shown.has(o.layer) ? 'Скрыть объект' : 'Показать объект'}
+              aria-label="Показывать объект"
+              aria-pressed={shown.has(o.layer)}
+              onClick={() => props.onToggle(o)}
+            >
+              {shown.has(o.layer) ? <IconEye size={18} stroke={STROKE} /> : <IconEyeOff size={18} stroke={STROKE} />}
+            </button>
+          ) : (
+            <button
+              class="layer-icon detach"
+              title={props.detaching.has(o.id) ? 'Уже отделяется' : 'Отделить: фон под ним дорисует модель'}
+              aria-label="Отделить объект"
+              disabled={props.detaching.has(o.id)}
+              onClick={() => props.onDetach(o)}
+            >
+              <IconStackPop size={18} stroke={STROKE} />
+            </button>
+          )}
+          <button
+            class="layer-icon delete"
+            title={o.layer ? 'Убрать с холста — под ним фон (⌘Z вернёт)' : 'Удалить объект — пиксели останутся (⌘Z вернёт его)'}
+            aria-label="Удалить объект"
+            onClick={() => props.onDelete(o)}
+          >
             <IconTrash size={18} stroke={STROKE} />
           </button>
         </li>
@@ -1705,7 +1823,8 @@ function ObjectsPanel(props: {
           Объект — имя и маска. Выделите его инструментом «Объект» (W): щелчок — предмет под курсором, щелчок туда же или [ и ] — мельче
           или крупнее, Shift — добавить к нему место, Alt — убрать, ⌘ — ещё один предмет, рамка — предмет внутри неё. ⌘J сохраняет
           выделение объектом; объект из нескольких — выделить их с ⌘ (на холсте или в списке) и ⌘J. После правки маски объектов
-          пересчитываются сами.
+          пересчитываются сами. «Отделить» — модель дорисует фон под объектом, а сам он станет слоем: его можно сдвигать (V), скрывать,
+          стирать часть ластиком по маске слоя и убирать с холста.
         </Help>
       </h2>
       <ol class="objects">{tree(undefined, 0)}</ol>

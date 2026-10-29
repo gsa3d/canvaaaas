@@ -8,6 +8,7 @@ import { extname, join, resolve, sep } from 'node:path';
 import {
   API_HEADER,
   type CreateJobRequest,
+  type DetachRequest,
   type MaskShape,
   type MoreVariantsRequest,
   type PatchVariantsRequest,
@@ -226,6 +227,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     send(res, 200, data, type, { 'Cache-Control': 'no-store', [`${API_HEADER}-version`]: String(version) });
   };
   route('GET', '/api/history/:id/edit/:part.:ext', (_req, res, [id, part]) => editImage(res, session.maskEditImage({ patch: id! }, part!)));
+  // Отделённый объект картинкой — для превью сдвига; маска слоя меняется, поэтому не кэшируется
+  route('GET', '/api/history/:id/cutout.png', async (_req, res, [id]) => {
+    send(res, 200, await session.cutoutPng(id!), 'image/png', { 'Cache-Control': 'no-store' });
+  });
   route('GET', '/api/jobs/:id/edit/:part.:ext', (_req, res, [id, part], url) =>
     editImage(res, session.maskEditImage({ job: id!, n: Number(url.searchParams.get('n') ?? NaN) }, part!)),
   );
@@ -278,6 +283,15 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   route('POST', '/api/objects/:id/delete', async (_req, res, [id]) => {
     await session.deleteObject(id!);
     json(res, { ok: true });
+  });
+  route('POST', '/api/objects/:id/detach', async (req, res, [id]) => {
+    const body = await readJson<DetachRequest>(req);
+    json(res, { id: session.detachObject(id!, body) });
+  });
+  route('POST', '/api/objects/:id/move', async (req, res, [id]) => {
+    const { dx, dy } = await readJson<{ dx: number; dy: number }>(req);
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new HttpError(400, 'Нет сдвига');
+    json(res, await session.moveObject(id!, dx, dy));
   });
 
   route('POST', '/api/jobs', async (req, res) => {

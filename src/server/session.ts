@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import sharp from 'sharp';
-import { CanvasDocument, TILE_SIZE, type DocObject, type NewPatch } from '../core/document.ts';
+import { CanvasDocument, TILE_SIZE, type DocObject, type NewPatch, type Patch } from '../core/document.ts';
 import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, type ImageFormat } from '../core/image-file.ts';
 import { encodeProject, isProject, isProjectPath, openProject, PROJECT_EXTENSION } from '../core/project.ts';
 import type { RecentFiles } from '../core/recent.ts';
@@ -32,7 +32,7 @@ import { expandMaskByDiff } from '../core/expand.ts';
 import { readLedger, withDirectorLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha, featherAlphaRegion, maskBBox } from '../core/mask.ts';
 import { applyShapes, applyShapesRegion, type MaskLookup } from '../core/mask-shapes.ts';
-import { placeObject, removeObject, trim } from '../core/objects.ts';
+import { descendants, dilate, placeObject, removeObject, trim } from '../core/objects.ts';
 import type { Bitmap } from '../core/segment.ts';
 import type { KeyStore } from '../core/secrets.ts';
 import { checkSketch } from '../core/sketch.ts';
@@ -46,6 +46,7 @@ import {
   MAX_REFERENCES,
   shapesBBox,
   type CreateJobRequest,
+  type DetachRequest,
   type JobDto,
   type MaskEditResult,
   type MaskShape,
@@ -68,6 +69,16 @@ const REFERENCES_KEPT = 30;
 const REFERENCE_SIZE = 1536;
 /** Картинки для правки маски в браузере — не больше этого по большей стороне */
 const EDIT_PREVIEW_MAX = 2560;
+/** Задача модели, когда объект отделяют: на его месте — то, что вокруг */
+const FILL_TASK = 'Пустое место: продолжить то, что вокруг (землю, стены, фон), как будто здесь ничего не стояло. Нового предмета не рисовать.';
+/** Слой отделённого объекта берёт пиксели чуть шире маски, чтобы контур не обрезался, и гаснет к краю на столько же */
+const LIFT_GROW = 2;
+const LIFT_FEATHER = 2;
+
+/** Насколько шире объекта модель дорисовывает фон: контур и сглаживание вокруг него тоже уходят */
+function fillGrow(rect: Rect): number {
+  return Math.min(40, Math.max(6, Math.round(0.02 * Math.max(rect.width, rect.height))));
+}
 
 interface Reference {
   image: InputImage;
@@ -129,6 +140,10 @@ interface Job {
   bitmaps: Map<string, Bitmap>;
   /** Выделение — это сохранённый объект: слой правки его помнит */
   object?: string;
+  /** Объект отделён, и его слой лежал здесь: принятая правка ляжет в этот слой, туда, куда его с тех пор сдвинули */
+  lifted?: { rect: Rect };
+  /** Отделить этот объект: варианты — фон под ним */
+  detach?: string;
   /** Границы выделения — известны сразу, ещё до подготовки куска */
   area: RectDto;
   variantsRequested: number;
@@ -386,6 +401,7 @@ export class Session {
         feather: j.prep?.feather,
         canUndoMask: j.maskUndo.length > 0,
         replaces: j.replaces?.patchId,
+        detach: j.detach,
       })),
       history: (doc?.patches ?? []).map((p) => ({
         id: p.id,
@@ -400,8 +416,17 @@ export class Session {
         directed: p.directed,
         sketch: !!p.sketch?.length,
         object: p.object,
+        lifted: p.lifted,
       })),
-      objects: (doc?.objects ?? []).map((o) => ({ id: o.id, name: o.name, rect: o.rect, parent: o.parent, rev: o.version, lost: o.lost })),
+      objects: (doc?.objects ?? []).map((o) => ({
+        id: o.id,
+        name: o.name,
+        rect: o.rect,
+        parent: o.parent,
+        rev: o.version,
+        lost: o.lost,
+        layer: liftedLayer(doc!, o.id)?.id,
+      })),
       segment: this.segmentation.state(),
       canUndo: doc?.canUndo ?? false,
       canRedo: doc?.canRedo ?? false,
@@ -744,10 +769,14 @@ export class Session {
     });
   }
 
-  /** Удалить слой: обычный шаг истории, ⌘Z его возвращает */
+  /** Удалить слой: обычный шаг истории, ⌘Z его возвращает. Слой отделённого объекта уходит вместе с объектом */
   removePatch(patchId: string): Promise<void> {
     return this.serialDoc((doc) => {
-      doc.removePatch(patchId);
+      const patch = doc.patch(patchId);
+      doc.batch(() => {
+        doc.removePatch(patchId);
+        if (patch.lifted && patch.object && doc.objects.some((o) => o.id === patch.object)) doc.setObjects(withoutTree(doc.objects, patch.object));
+      });
       this.changed();
     });
   }
@@ -761,7 +790,15 @@ export class Session {
       const patch = doc.patch(patchId);
       const { mask, changed } = await applyShapesRegion(patch.mask, patch.rect, shapes);
       if (this.doc !== doc) throw new Error('Документ уже закрыт');
-      if (changed) doc.setPatchMask(patchId, mask, changed);
+      if (changed) {
+        doc.batch(() => {
+          doc.setPatchMask(patchId, mask, changed);
+          // Маска отделённого объекта — это маска его слоя: стёртое ластиком уходит и из объекта
+          const obj = patch.lifted && patch.object ? doc.objects.find((o) => o.id === patch.object) : undefined;
+          const bitmap = obj && trim({ rect: patch.rect, mask });
+          if (obj && bitmap) doc.setObjects(doc.objects.map((o) => (o === obj ? { ...o, ...bitmap, version: doc.nextObjectVersion() } : o)));
+        });
+      }
       this.changed();
       return { version: patch.maskVersion, rev: doc.rev };
     });
@@ -867,6 +904,8 @@ export class Session {
       if (!ref) throw new Error('Референс не найден — добавьте картинку заново');
       return ref.image;
     });
+    const object = only.startsWith('obj:') ? only.slice(4) : undefined;
+    const lifted = object ? liftedLayer(this.requireDoc(), object) : undefined;
     return this.enqueue({
       prompt: req.prompt.trim(),
       hide: !!req.hide,
@@ -875,7 +914,8 @@ export class Session {
       variants: req.variants,
       shapes,
       bitmaps,
-      object: only.startsWith('obj:') ? only.slice(4) : undefined,
+      object,
+      lifted: lifted?.active ? { rect: lifted.rect } : undefined,
       area,
       references,
       sketch: checkSketch(req.sketch),
@@ -902,6 +942,7 @@ export class Session {
    */
   patchVariants(patchId: string, req: PatchVariantsRequest): string {
     const patch = this.requireDoc().patch(patchId);
+    if (patch.lifted) throw new Error('Отделённый объект перерисовывают правкой: выделите его и напишите задачу');
     const box = maskBBox(patch.mask, patch.rect.width, patch.rect.height);
     if (!box) throw new Error('Маска слоя пустая: верните кистью то, что нужно перерисовать');
     return this.enqueue({
@@ -925,7 +966,21 @@ export class Session {
   private enqueue(
     task: Pick<
       Job,
-      'prompt' | 'hide' | 'model' | 'size' | 'shapes' | 'bitmaps' | 'object' | 'area' | 'references' | 'sketch' | 'director' | 'directed' | 'replaces'
+      | 'prompt'
+      | 'hide'
+      | 'model'
+      | 'size'
+      | 'shapes'
+      | 'bitmaps'
+      | 'object'
+      | 'lifted'
+      | 'detach'
+      | 'area'
+      | 'references'
+      | 'sketch'
+      | 'director'
+      | 'directed'
+      | 'replaces'
     > & {
       variants: number;
     },
@@ -1336,27 +1391,90 @@ export class Session {
         refs: job.references,
         object: job.object && doc.objects.some((o) => o.id === job.object) ? job.object : undefined,
       };
-      // Участок, где холст меняется: по пикселям до и после маски объектов пересчитываются следом
-      const before = target ? doc.patch(target).rect : patch.rect;
-      const region = union(before, patch.rect);
-      const pixels = doc.region(region);
-      const placed = target ? doc.replacePatch(target, patch) : doc.addPatch(patch);
-      void this.followObjects(doc, placed.id, region, pixels, doc.region(region));
+      if (job.detach) {
+        this.placeDetached(doc, job.detach, patch);
+      } else if (target || !this.mergeLifted(doc, job, patch)) {
+        // Участок, где холст меняется: по пикселям до и после маски объектов пересчитываются следом
+        const before = target ? doc.patch(target).rect : patch.rect;
+        const region = union(before, patch.rect);
+        const pixels = doc.region(region);
+        const placed = target ? doc.replacePatch(target, patch) : doc.addPatch(patch);
+        void this.followObjects(doc, placed.id, region, pixels, doc.region(region));
+      }
     }
     this.discard(jobId);
   }
 
+  /** Отделить объект: фон ложится слоем, объект — своим слоем поверх него с пикселями холста; всё одним шагом отмены */
+  private placeDetached(doc: CanvasDocument, objectId: string, fill: NewPatch): void {
+    const obj = doc.objects.find((o) => o.id === objectId);
+    if (!obj) throw new Error('Объекта уже нет: отделять нечего');
+    if (liftedLayer(doc, objectId)) throw new Error('Объект уже отделён');
+    const { rect, mask } = dilate(obj, LIFT_GROW, { x: 0, y: 0, width: doc.width, height: doc.height });
+    // Пиксели объекта — с холста, пока под ним ещё не фон
+    const rgb = doc.region(rect);
+    const alpha = featherAlpha(mask, rect.width, rect.height, LIFT_FEATHER);
+    const layer = Buffer.alloc(rect.width * rect.height * 4);
+    for (let i = 0; i < alpha.length; i++) {
+      rgb.copy(layer, i * 4, i * 3, i * 3 + 3);
+      layer[i * 4 + 3] = Math.round(alpha[i]! * 255);
+    }
+    doc.batch(() => {
+      doc.addPatch(fill);
+      doc.addPatch({
+        id: randomUUID(),
+        rect,
+        layer,
+        mask,
+        feather: LIFT_FEATHER,
+        prompt: obj.name,
+        jobId: fill.jobId,
+        variant: fill.variant,
+        createdAt: fill.createdAt,
+        object: obj.id,
+        lifted: true,
+      });
+      // Маска объекта теперь — маска его слоя: её и правят ластиком по слою
+      doc.setObjects(doc.objects.map((o) => (o === obj ? { ...o, rect, mask, version: doc.nextObjectVersion(), lost: undefined } : o)));
+    });
+  }
+
+  /**
+   * Правка отделённого объекта ложится в его слой, а не новым поверх: иначе при сдвиге она осталась бы на прежнем месте.
+   * Слой с тех пор сдвинули — правка едет вместе с ним. false — объект не отделён (или скрыт), правка ложится как обычно
+   */
+  private mergeLifted(doc: CanvasDocument, job: Job, patch: NewPatch): boolean {
+    const lifted = job.object && job.lifted ? liftedLayer(doc, job.object) : undefined;
+    if (!lifted?.active || !job.lifted) return false;
+    const at = { ...patch.rect, x: patch.rect.x + lifted.rect.x - job.lifted.rect.x, y: patch.rect.y + lifted.rect.y - job.lifted.rect.y };
+    const into = lifted.rect;
+    const layer = Buffer.from(lifted.layer);
+    const o = intersect(at, into);
+    for (let y = o.y; y < o.y + o.height; y++) {
+      for (let x = o.x; x < o.x + o.width; x++) {
+        const src = ((y - at.y) * at.width + x - at.x) * 4;
+        const a = patch.layer[src + 3]!;
+        if (!a) continue;
+        const dst = ((y - into.y) * into.width + x - into.x) * 4;
+        for (let c = 0; c < 3; c++) layer[dst + c] = Math.round(layer[dst + c]! + ((patch.layer[src + c]! - layer[dst + c]!) * a) / 255);
+      }
+    }
+    doc.replacePatch(lifted.id, { ...lifted, id: randomUUID(), layer });
+    return true;
+  }
   /**
    * Маски объектов следуют за принятой правкой: те, чей край она задела, пересчитываются по новому холсту.
    * Это часть того же шага отмены: ⌘Z правки возвращает и прежние маски. Если пока считали, правку уже отменили
    * или скрыли, пересчёт не нужен; если после неё успели сделать что-то ещё — ложится отдельным шагом.
    */
   private async followObjects(doc: CanvasDocument, patchId: string, region: Rect, before: Buffer, after: Buffer): Promise<void> {
-    if (!doc.objects.length) return;
+    // Маска отделённого объекта — маска его слоя, её не пересчитывают
+    const objects = doc.objects.filter((o) => !liftedLayer(doc, o.id));
+    if (!objects.length) return;
     const join = doc.historyTop();
     let masks: Map<string, Bitmap | null>;
     try {
-      masks = await this.segmentation.remask(doc, doc.objects, region, before, after);
+      masks = await this.segmentation.remask(doc, objects, region, before, after);
     } catch {
       // Без пересчёта маски объектов просто остаются прежними
       return;
@@ -1424,12 +1542,84 @@ export class Session {
     });
   }
 
-  /** Удалить объект — только имя и маску, пиксели холста те же; его части переходят к его родителю. ⌘Z возвращает */
+  /**
+   * Удалить объект — только имя и маску, пиксели холста те же; его части переходят к его родителю.
+   * Отделённый объект уходит с холста: его слой и части вместе с ним, под ним уже фон. ⌘Z возвращает
+   */
   deleteObject(id: string): Promise<void> {
     return this.serialDoc((doc) => {
-      doc.setObjects(removeObject(doc.objects, id));
+      const layer = liftedLayer(doc, id);
+      doc.batch(() => {
+        if (layer) doc.removePatch(layer.id);
+        doc.setObjects(layer ? withoutTree(doc.objects, id) : removeObject(doc.objects, id));
+      });
       this.changed();
     });
+  }
+
+  /**
+   * Отделить объект: задача в очереди, где модель дорисовывает фон под ним — область ей стирают, с запасом вокруг контура.
+   * «Принять» кладёт фон слоем, а объект — своим слоем поверх: его можно сдвигать, скрывать и удалять, не трогая фон
+   */
+  detachObject(objectId: string, req: DetachRequest): string {
+    const doc = this.requireDoc();
+    const obj = doc.object(objectId);
+    if (liftedLayer(doc, objectId)) throw new Error('Объект уже отделён');
+    if (this.jobs.some((j) => j.detach === objectId)) throw new Error('Этот объект уже отделяется');
+    const grown = dilate(obj, fillGrow(obj.rect), { x: 0, y: 0, width: doc.width, height: doc.height });
+    const id = `obj:${objectId}`;
+    return this.enqueue({
+      prompt: FILL_TASK,
+      hide: true,
+      model: req.model,
+      size: req.size,
+      variants: req.variants,
+      shapes: [{ kind: 'mask', id, ...grown.rect }],
+      bitmaps: new Map([[id, grown]]),
+      object: objectId,
+      detach: objectId,
+      area: grown.rect,
+      references: [],
+      sketch: [],
+      director: false,
+    });
+  }
+
+  /** Сдвинуть отделённый объект: его слой и маски — его и его частей, одним шагом отмены. Слой остаётся целиком на холсте */
+  moveObject(objectId: string, dx: number, dy: number): Promise<{ rev: number }> {
+    return this.serialDoc((doc) => {
+      const patch = liftedLayer(doc, objectId);
+      if (!patch) throw new Error('Сдвинуть можно только отделённый объект');
+      const { rect } = patch;
+      const x = Math.min(Math.max(0, rect.x + Math.round(dx)), doc.width - rect.width);
+      const y = Math.min(Math.max(0, rect.y + Math.round(dy)), doc.height - rect.height);
+      if (x !== rect.x || y !== rect.y) {
+        const moved = new Set([objectId, ...descendants(doc.objects, objectId).map((o) => o.id)]);
+        const bounds = { x: 0, y: 0, width: doc.width, height: doc.height };
+        doc.batch(() => {
+          doc.movePatch(patch.id, { ...rect, x, y });
+          doc.setObjects(
+            doc.objects.map((o) => {
+              if (!moved.has(o.id)) return o;
+              const b = shiftBitmap(o, x - rect.x, y - rect.y, bounds);
+              return b ? { ...o, ...b, version: doc.nextObjectVersion() } : o;
+            }),
+          );
+        });
+      }
+      this.changed();
+      return { rev: doc.rev };
+    });
+  }
+
+  /** Слой картинкой с растушёванной маской в альфе, не больше max по большей стороне: так сдвиг виден сразу */
+  cutoutPng(patchId: string, max = 2048): Promise<Buffer> {
+    const patch = this.requireDoc().patch(patchId);
+    const { width, height } = patch.rect;
+    const k = Math.min(1, max / Math.max(width, height));
+    let img = sharp(Buffer.from(patch.layer), { raw: { width, height, channels: 4 } });
+    if (k < 1) img = img.resize(Math.max(1, Math.round(width * k)), Math.max(1, Math.round(height * k)), { fit: 'fill' });
+    return img.png({ compressionLevel: 2 }).toBuffer();
   }
 
   // ——— Выделение объектов ———
@@ -1566,6 +1756,31 @@ export class Session {
     return png;
   }
 
+}
+
+/** Слой отделённого объекта; нет — объект не отделён */
+function liftedLayer(doc: CanvasDocument, objectId: string): Patch | undefined {
+  return doc.patches.findLast((p) => p.lifted && p.object === objectId);
+}
+
+/** Без объекта и всех его частей: так уходит отделённый объект вместе со своим слоем */
+function withoutTree(objects: DocObject[], id: string): DocObject[] {
+  const gone = new Set([id, ...descendants(objects, id).map((o) => o.id)]);
+  return objects.filter((o) => !gone.has(o.id));
+}
+
+/** Маска, сдвинутая на dx, dy и обрезанная по холсту; null — вся ушла за край */
+function shiftBitmap(b: Bitmap, dx: number, dy: number, bounds: Rect): Bitmap | null {
+  const rect = { ...b.rect, x: b.rect.x + dx, y: b.rect.y + dy };
+  const o = intersect(rect, bounds);
+  if (o.width === rect.width && o.height === rect.height) return { rect, mask: b.mask };
+  if (!o.width || !o.height) return null;
+  const mask = new Uint8Array(o.width * o.height);
+  for (let y = 0; y < o.height; y++) {
+    const from = (o.y - rect.y + y) * rect.width + o.x - rect.x;
+    mask.set(b.mask.subarray(from, from + o.width), y * o.width);
+  }
+  return trim({ rect: o, mask });
 }
 
 function union(a: Rect, b: Rect): Rect {

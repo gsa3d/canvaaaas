@@ -44,6 +44,11 @@ export interface Patch {
   sketch?: SketchStroke[];
   /** Правили этот объект: его маска была выделением */
   object?: string;
+  /**
+   * Отделённый объект (object): пиксели холста под его маской, а под слоем — дорисованный фон.
+   * Такой слой сдвигают целиком; правка объекта ложится в него же
+   */
+  lifted?: boolean;
 }
 
 /**
@@ -88,6 +93,8 @@ type HistoryOp =
   /** changed — участок маски, где before и after различаются: отмена пересчитывает только его */
   | { kind: 'mask'; patchId: string; before: MaskState; after: MaskState; changed?: Rect }
   | { kind: 'objects'; before: DocObject[]; after: DocObject[] }
+  /** Слой сдвинули: размер тот же, другое место */
+  | { kind: 'move'; patchId: string; from: Rect; to: Rect }
   /** Несколько шагов, которые отменяются разом: принятая правка и маски объектов, пересчитанные после неё */
   | { kind: 'group'; ops: HistoryOp[] };
 
@@ -155,6 +162,8 @@ export class CanvasDocument {
   private redoStack: HistoryOp[] = [];
   private maskVersions = 0;
   private objectVersions = 0;
+  /** Шаги внутри batch: лягут одним */
+  private collecting: HistoryOp[] | null = null;
 
   private constructor(name: string, width: number, height: number, base: Buffer, patches: Patch[] = [], objects: DocObject[] = []) {
     this.name = name;
@@ -241,13 +250,13 @@ export class CanvasDocument {
   get contentKey(): string {
     return this.patches
       .filter((p) => p.active)
-      .map((p) => `${p.id}:${p.maskVersion}`)
+      .map((p) => `${p.id}:${p.maskVersion}@${p.rect.x},${p.rect.y}`)
       .join(',');
   }
 
   /** То же со скрытыми слоями — они тоже ложатся в проект .caaa */
   get layersKey(): string {
-    return this.patches.map((p) => `${p.id}:${p.maskVersion}${p.active ? '' : ':off'}`).join(',');
+    return this.patches.map((p) => `${p.id}:${p.maskVersion}@${p.rect.x},${p.rect.y}${p.active ? '' : ':off'}`).join(',');
   }
 
   /** Объекты с именами, частями и масками: меняется — проекту .caaa есть что сохранить */
@@ -290,6 +299,17 @@ export class CanvasDocument {
     this.recompute(union(before.rect, after.rect));
     this.record({ kind: 'replace', before, after, index });
     return after;
+  }
+
+  /** Сдвинуть слой на место to того же размера, целиком на холсте; ⌘Z возвращает прежнее */
+  movePatch(patchId: string, to: Rect): void {
+    const patch = this.patch(patchId);
+    const from = patch.rect;
+    if (to.width !== from.width || to.height !== from.height) throw new Error('Сдвиг не меняет размер слоя');
+    if (to.x < 0 || to.y < 0 || to.x + to.width > this.width || to.y + to.height > this.height) throw new Error('Слой за краем холста');
+    if (to.x === from.x && to.y === from.y) return;
+    this.place(patch, to, from);
+    this.record({ kind: 'move', patchId, from, to });
   }
 
   /** Выключить или снова включить правку из истории */
@@ -370,6 +390,19 @@ export class CanvasDocument {
     return o;
   }
 
+  /** Всё, что fn меняет в документе, — одним шагом отмены */
+  batch<T>(fn: () => T): T {
+    if (this.collecting) return fn();
+    const ops: HistoryOp[] = [];
+    this.collecting = ops;
+    try {
+      return fn();
+    } finally {
+      this.collecting = null;
+      if (ops.length) this.record(ops.length === 1 ? ops[0]! : { kind: 'group', ops });
+    }
+  }
+
   /** Последний шаг истории — чтобы потом присоединить к нему пересчёт масок объектов */
   historyTop(): unknown {
     return this.undoStack.at(-1);
@@ -405,6 +438,8 @@ export class CanvasDocument {
       this.recompute(union(op.before.rect, op.after.rect));
     } else if (op.kind === 'mask') {
       this.applyMask(this.patch(op.patchId), op.before, op.changed);
+    } else if (op.kind === 'move') {
+      this.place(this.patch(op.patchId), op.from, op.to);
     } else {
       this.flip(op.patchId);
     }
@@ -426,12 +461,18 @@ export class CanvasDocument {
       this.recompute(union(op.before.rect, op.after.rect));
     } else if (op.kind === 'mask') {
       this.applyMask(this.patch(op.patchId), op.after, op.changed);
+    } else if (op.kind === 'move') {
+      this.place(this.patch(op.patchId), op.to, op.from);
     } else {
       this.flip(op.patchId);
     }
   }
 
   private record(op: HistoryOp): void {
+    if (this.collecting) {
+      this.collecting.push(op);
+      return;
+    }
     this.undoStack.push(op);
     if (this.undoStack.length > HISTORY_LIMIT) this.undoStack.shift();
     this.redoStack = [];
@@ -488,6 +529,12 @@ export class CanvasDocument {
       for (let i = 0; i < mask.length; i++) mask[i] = patch.layer[i * 4 + 3]!;
     }
     return { ...patch, mask, feather: patch.mask ? (patch.feather ?? 0) : 0, maskVersion: 0, active: true };
+  }
+
+  /** Слой на месте to вместо from: холст пересобирается на обоих */
+  private place(patch: Patch, to: Rect, from: Rect): void {
+    patch.rect = to;
+    if (patch.active) this.recompute(union(from, to));
   }
 
   private flip(patchId: string): void {

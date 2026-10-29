@@ -91,6 +91,40 @@ export function placeObject(objects: DocObject[], obj: DocObject): DocObject[] {
   return [...next, placed];
 }
 
+/** Части объекта, части частей и так далее */
+export function descendants(objects: DocObject[], id: string): DocObject[] {
+  const out: DocObject[] = [];
+  const seen = new Set([id]);
+  for (let i = -1; i < out.length; i++) {
+    const parent = i < 0 ? id : out[i]!.id;
+    for (const o of objects) {
+      if (o.parent !== parent || seen.has(o.id)) continue;
+      seen.add(o.id);
+      out.push(o);
+    }
+  }
+  return out;
+}
+
+/** Маска, раздутая на r пикселей во все стороны (не за пределы bounds) */
+export function dilate(b: Bitmap, r: number, bounds: Rect): Bitmap {
+  const rect = intersect(bounds, { x: b.rect.x - r, y: b.rect.y - r, width: b.rect.width + 2 * r, height: b.rect.height + 2 * r });
+  // Расстояние до маски считается как у растушёвки, только «выделено» здесь всё, что не маска
+  const outside = new Uint8Array(rect.width * rect.height).fill(255);
+  for (let y = 0; y < b.rect.height; y++) {
+    const ty = b.rect.y + y - rect.y;
+    if (ty < 0 || ty >= rect.height) continue;
+    for (let x = 0; x < b.rect.width; x++) {
+      const tx = b.rect.x + x - rect.x;
+      if (tx >= 0 && tx < rect.width && b.mask[y * b.rect.width + x]! >= MASK_THRESHOLD) outside[ty * rect.width + tx] = 0;
+    }
+  }
+  const d = insideDistance(outside, rect.width, rect.height);
+  const mask = new Uint8Array(rect.width * rect.height);
+  for (let i = 0; i < mask.length; i++) if (d[i]! <= r) mask[i] = 255;
+  return { rect, mask };
+}
+
 /** Без объекта: его части переходят к его родителю */
 export function removeObject(objects: DocObject[], id: string): DocObject[] {
   const gone = objects.find((o) => o.id === id);

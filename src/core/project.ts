@@ -50,6 +50,8 @@ interface Manifest {
     sketch?: SketchStroke[];
     /** Правили этот объект */
     object?: string;
+    /** Отделённый объект object */
+    lifted?: boolean;
   }[];
   /** Объекты: имя, маска размером с rect и объект, частью которого этот является */
   objects?: { id: string; name: string; rect: Rect; parent?: string; createdAt: string; lost?: boolean; mask: Part }[];
@@ -127,6 +129,7 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
       directed: p.directed,
       sketch: p.sketch?.length ? p.sketch : undefined,
       object: p.object,
+      lifted: p.lifted || undefined,
     })),
   };
   const first = 1 + patches.length * 2;
@@ -223,6 +226,7 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       directed: typeof l.directed === 'string' && l.directed.trim() ? l.directed : undefined,
       sketch: readSketch(l.sketch),
       object: typeof l.object === 'string' && ids.has(l.object) ? l.object : undefined,
+      lifted: (l.lifted === true && typeof l.object === 'string' && ids.has(l.object)) || undefined,
     };
   });
   const doc = CanvasDocument.restore(name, width, height, base!, patches, objects);

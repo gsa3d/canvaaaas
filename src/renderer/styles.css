@@ -407,6 +407,15 @@ button.swatch.active,
   cursor: default !important;
 }
 
+/* «Сдвинуть»: над отделённым объектом — тянуть его, мимо — картинку */
+.osd[data-tool='move'] * {
+  cursor: grab !important;
+}
+
+.osd[data-tool='move'][data-over='1'] * {
+  cursor: move !important;
+}
+
 .osd[data-tool='brush'] *,
 .osd[data-tool='eraser'] *,
 .osd[data-tool='sketch'] * {
@@ -1336,7 +1345,7 @@ button.chip-action:hover:not(:disabled) {
 
 .objects li {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   align-items: center;
   gap: 8px;
   padding: 2px 2px;
@@ -1358,6 +1367,26 @@ button.chip-action:hover:not(:disabled) {
 .objects li.lost .link {
   color: var(--muted);
   text-decoration: line-through;
+}
+
+.objects li.off .link {
+  color: var(--muted);
+}
+
+.objects li button.layer-icon.detach {
+  color: var(--muted);
+  opacity: 0;
+}
+
+.objects li:hover button.layer-icon.detach:not(:disabled),
+.objects li button.layer-icon.detach:focus-visible {
+  opacity: 1;
+}
+
+.layers li .link .layer-kind {
+  vertical-align: -2px;
+  margin-right: 4px;
+  color: var(--muted);
 }
 
 .objects li button.layer-icon.delete {

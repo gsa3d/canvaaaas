@@ -1,13 +1,36 @@
 // Просмотр холста: OpenSeadragon тянет тайлы с сервера, поверх — канвас размером с экран
 // для выделения, наброска для модели, контуров задач, курсора кисти, объекта под курсором и превью правки маски (mask-edit.ts).
 // Фигуры и штрихи хранятся в координатах холста, поэтому большой canvas в браузере не нужен ни для какой операции;
-// маски объектов приходят с сервера картинками.
+// маски объектов приходят с сервера картинками. Сдвиг отделённого объекта виден сразу: сервер отдаёт картинки объекта и холста под ним.
 import OpenSeadragon from 'openseadragon';
 import { API_HEADER, type DocDto, type JobDto, type MaskEditResult, type MaskShape, type RectDto, type SketchStroke } from '../shared/api.ts';
 import { post } from './api.ts';
 import { MaskPreview, type MaskEditView } from './mask-edit.ts';
 
-export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser' | 'sketch' | 'object';
+export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser' | 'sketch' | 'object' | 'move';
+
+/** Отделённый объект, который можно сдвинуть: его слой и где тот лежит */
+export interface Movable {
+  id: string;
+  layer: string;
+  rect: RectDto;
+}
+
+/** Сдвиг объекта: пока тянут, и после — пока холст не догонит */
+interface Shift {
+  item: Movable;
+  start: [number, number];
+  dx: number;
+  dy: number;
+  /** Холст под объектом и сам объект — картинками, загруженными, когда начали тянуть */
+  below: HTMLImageElement;
+  cutout: HTMLImageElement;
+  /** Номер маски объекта в выделении, когда начали тянуть: пока сервер не прислал новую, её сдвигаем сами */
+  rev?: number;
+  /** Холст с этим номером уже показывает сдвиг; до ответа сервера — бесконечность */
+  settleRev: number;
+  until: number;
+}
 
 /** Маска объекта в выделении */
 export type MaskRef = Extract<MaskShape, { kind: 'mask' }>;
@@ -45,6 +68,8 @@ export interface ViewerHooks {
   onMaskShape(view: MaskEditView, shape: MaskShape): Promise<MaskEditResult>;
   /** Щелчок или рамка инструментом «Объект» */
   onPick(event: PickEvent): void;
+  /** Отделённый объект сдвинули: номер холста после сдвига */
+  onMove(objectId: string, dx: number, dy: number): Promise<number>;
   onZoom(percent: number): void;
 }
 
@@ -159,6 +184,11 @@ export class CanvasView {
   private prepareTimer = 0;
   /** Вид, для которого сервер уже считает признаки */
   private prepared = '';
+  /** Отделённые объекты снизу вверх, как их слои в стопке */
+  private movable: Movable[] = [];
+  private shift: Shift | null = null;
+  /** Картинки для сдвига, загруженные заранее: тянуть можно сразу */
+  private readonly moveImages = new Map<string, HTMLImageElement>();
 
   constructor(container: HTMLElement, hooks: ViewerHooks) {
     this.container = container;
@@ -185,7 +215,7 @@ export class CanvasView {
 
     this.viewer.addHandler('canvas-press', (e) => this.press(e.position, e.originalEvent as MouseEvent));
     this.viewer.addHandler('canvas-drag', (e) => {
-      if (!this.draft) return;
+      if (!this.draft && !this.dragging()) return;
       e.preventDefaultAction = true;
       this.move(e.position);
     });
@@ -232,6 +262,11 @@ export class CanvasView {
         this.hoverAt = this.toImage(new OpenSeadragon.Point(this.cursor.x, this.cursor.y));
         this.requestHover();
       }
+      if (this.activeTool() === 'move') {
+        const p = this.toImage(new OpenSeadragon.Point(this.cursor.x, this.cursor.y));
+        const over = this.dragging() || (!!p && !!this.movableAt(p));
+        if (over !== (this.container.dataset.over === '1')) this.container.dataset.over = over ? '1' : '';
+      }
     });
     container.addEventListener('pointerleave', () => {
       this.cursor = null;
@@ -259,6 +294,7 @@ export class CanvasView {
     }
     if (prev.rev !== doc.rev) {
       this.schedulePrepare();
+      this.preloadMove();
       // Новую версию кладём прямо над старой: пока её тайлы не пришли, сквозь неё видна старая.
       // Старую убираем, когда новая догрузилась целиком.
       const rev = doc.rev;
@@ -284,6 +320,8 @@ export class CanvasView {
   private reset(): void {
     this.closing?.preview.dispose();
     this.closing = null;
+    this.shift = null;
+    this.moveImages.clear();
     this.clearHover();
     this.maskImages.clear();
     this.prepared = '';
@@ -442,9 +480,51 @@ export class CanvasView {
   setTool(tool: Tool): void {
     this.tool = tool;
     this.applyCursor();
+    this.preloadMove();
     if (tool !== 'object') this.clearHover();
     this.schedulePrepare();
     this.redraw();
+  }
+
+  /** Отделённые объекты, которые можно сдвинуть, снизу вверх */
+  setMovable(items: Movable[]): void {
+    this.movable = items;
+    this.preloadMove();
+    this.redraw();
+  }
+
+  /** Верхний отделённый объект под точкой холста */
+  private movableAt(p: [number, number]): Movable | undefined {
+    return this.movable.findLast(({ rect: r }) => p[0] >= r.x && p[1] >= r.y && p[0] < r.x + r.width && p[1] < r.y + r.height);
+  }
+
+  /** Тянут объект прямо сейчас */
+  private dragging(): boolean {
+    return !!this.shift && this.shift.settleRev === Infinity && this.shift.until === Infinity;
+  }
+
+  /** Картинки объекта и холста под ним — для превью сдвига; меняются вместе с холстом */
+  private moveUrls(item: Movable): [string, string] {
+    const q = `doc=${this.doc?.id}&rev=${this.doc?.rev}`;
+    return [`/api/history/${item.layer}/edit/below.jpg?${q}`, `/api/history/${item.layer}/cutout.png?${q}`];
+  }
+
+  private moveImage(url: string): HTMLImageElement {
+    let img = this.moveImages.get(url);
+    if (!img) {
+      img = new Image();
+      img.onload = () => this.redraw();
+      img.src = url;
+      this.moveImages.set(url, img);
+      while (this.moveImages.size > MASK_IMAGES_KEPT) this.moveImages.delete(this.moveImages.keys().next().value!);
+    }
+    return img;
+  }
+
+  /** С инструментом «Сдвинуть» картинки грузятся заранее: тянуть можно сразу */
+  private preloadMove(): void {
+    if (this.tool !== 'move' || !this.doc) return;
+    for (const item of this.movable) for (const url of this.moveUrls(item)) this.moveImage(url);
   }
 
   /** Модель выделения объектов готова — можно считать признаки вида и подсвечивать объект под курсором */
@@ -644,6 +724,16 @@ export class CanvasView {
     if (tool === 'hand') return;
     const p = this.toImage(position);
     if (!p) return;
+    if (tool === 'move') {
+      // Мимо отделённых объектов — картинку двигает OpenSeadragon, как рукой
+      const item = this.movableAt(p);
+      if (!item || this.maskMode()) return;
+      const [below, cutout] = this.moveUrls(item).map((url) => this.moveImage(url)) as [HTMLImageElement, HTMLImageElement];
+      const rev = this.selection.find((sh) => sh.kind === 'mask' && sh.id === `obj:${item.id}`) as MaskRef | undefined;
+      this.shift = { item, start: p, dx: 0, dy: 0, below, cutout, rev: rev?.rev, settleRev: Infinity, until: Infinity };
+      this.redraw();
+      return;
+    }
     if (tool === 'object') {
       // Щелчок — объект под ним, рамка — объект внутри неё
       if (!this.objectTool()) return;
@@ -683,6 +773,16 @@ export class CanvasView {
   private move(position: OpenSeadragon.Point): void {
     const draft = this.draft;
     const p = this.toImage(position);
+    if (p && this.shift && this.dragging()) {
+      // Целыми пикселями и так, чтобы объект остался на холсте, — как сдвинет сервер
+      const { rect } = this.shift.item;
+      const W = this.doc?.width ?? 0;
+      const H = this.doc?.height ?? 0;
+      this.shift.dx = Math.min(Math.max(-rect.x, Math.round(p[0] - this.shift.start[0])), W - rect.x - rect.width);
+      this.shift.dy = Math.min(Math.max(-rect.y, Math.round(p[1] - this.shift.start[1])), H - rect.y - rect.height);
+      this.redraw();
+      return;
+    }
     if (!draft || !p) return;
     if (draft.kind === 'rect') {
       draft.points = [draft.points[0]!, p];
@@ -698,6 +798,27 @@ export class CanvasView {
   }
 
   private release(): void {
+    if (this.shift && this.dragging()) {
+      const shift = this.shift;
+      if (!shift.dx && !shift.dy) {
+        this.shift = null;
+        this.redraw();
+        return;
+      }
+      // Превью держится, пока холст не покажет сдвиг сам
+      shift.until = Date.now() + SETTLE_TIMEOUT;
+      setTimeout(() => this.redraw(), SETTLE_TIMEOUT + 50);
+      this.hooks
+        .onMove(shift.item.id, shift.dx, shift.dy)
+        .then((rev) => {
+          shift.settleRev = rev;
+        })
+        .catch(() => {
+          if (this.shift === shift) this.shift = null;
+        })
+        .finally(() => this.redraw());
+      return;
+    }
     const draft = this.draft;
     this.draft = null;
     if (!draft) return;
@@ -827,6 +948,18 @@ export class CanvasView {
       ctx.drawImage(this.edge, 0, 0);
     }
 
+    // Сдвиг объекта: на прежнем месте — холст под ним, сам он — на новом
+    const shift = this.shift;
+    if (shift && !this.dragging() && ((this.pendingRev === null && (this.doc?.rev ?? 0) >= shift.settleRev) || Date.now() > shift.until)) {
+      this.shift = null;
+    } else if (shift && shift.below.complete && shift.cutout.complete && shift.below.naturalWidth && shift.cutout.naturalWidth) {
+      const r = shift.item.rect;
+      toImage(ctx);
+      ctx.drawImage(shift.below, r.x, r.y, r.width, r.height);
+      ctx.drawImage(shift.cutout, r.x + shift.dx, r.y + shift.dy, r.width, r.height);
+    }
+    const moved = this.shift;
+
     // Выделение: объединение фигур с вычитанием ластика — на отдельном канвасе, затем заливка и контур.
     // Пока правится маска, выделение не показываем, чтобы не путать одно с другим. Мазок по маске виден сразу
     // в превью; черновик — только у прямоугольника и лассо (и пока превью грузится), стирающий — красным
@@ -841,7 +974,9 @@ export class CanvasView {
         f.globalCompositeOperation = shape.erase && !maskMode ? 'destination-out' : 'source-over';
         if (shape.kind === 'mask') {
           const img = this.maskImage(shape);
-          if (img) f.drawImage(img, shape.x, shape.y, shape.width, shape.height);
+          // Сдвигаемый объект в выделении едет вместе с ним
+          const [dx, dy] = moved && shape.id === `obj:${moved.item.id}` && shape.rev === moved.rev ? [moved.dx, moved.dy] : [0, 0];
+          if (img) f.drawImage(img, shape.x + dx, shape.y + dy, shape.width, shape.height);
           continue;
         }
         const color = shape.erase ? ERROR : ACCENT;
@@ -948,6 +1083,19 @@ export class CanvasView {
       frame(r, `#${this.numbers.get(job.id) ?? '?'}`, color, job.id === this.focused ? 2 : 1, job.status === 'done' ? [] : [6, 4]);
     }
     if (this.edit?.view.kind === 'layer') frame(this.edit.view.rect, 'Маска слоя', ACCENT, 2, [6, 4]);
+    // С «Сдвинуть» видно, что можно сдвинуть
+    if (this.activeTool() === 'move' && !maskMode) {
+      ctx.strokeStyle = ACCENT;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      for (const { id, rect: r } of this.movable) {
+        // Пока сервер не прислал новое место, рамку сдвигаем сами
+        const old = moved?.item.id === id && r.x === moved.item.rect.x && r.y === moved.item.rect.y;
+        const [dx, dy] = old ? [moved.dx, moved.dy] : [0, 0];
+        ctx.strokeRect(Math.round(o.x + (r.x + dx) * s) + 0.5, Math.round(o.y + (r.y + dy) * s) + 0.5, Math.round(r.width * s), Math.round(r.height * s));
+      }
+      ctx.setLineDash([]);
+    }
 
     // Курсор кисти; у мягкой кисти пунктиром — где кончается сплошная середина; у наброска — его цветом
     const tool = this.activeTool();

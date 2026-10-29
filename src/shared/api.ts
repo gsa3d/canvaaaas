@@ -127,6 +127,8 @@ export interface JobDto {
   canUndoMask: boolean;
   /** Ещё варианты принятого слоя: «Принять» заменит этот слой */
   replaces?: string;
+  /** Отделить этот объект: варианты — фон под ним, а сам он ляжет своим слоем сверху */
+  detach?: string;
 }
 
 export interface PatchDto {
@@ -149,6 +151,8 @@ export interface PatchDto {
   sketch?: boolean;
   /** Правили этот объект: его маска была выделением */
   object?: string;
+  /** Отделённый объект object: его слой сдвигают целиком */
+  lifted?: boolean;
 }
 
 export interface ObjectDto {
@@ -161,6 +165,8 @@ export interface ObjectDto {
   rev: number;
   /** После правки на холсте объект не нашёлся */
   lost?: boolean;
+  /** Объект отделён: его слой (под ним дорисован фон) */
+  layer?: string;
 }
 
 /** Модель выделения объектов: её веса скачиваются по просьбе пользователя */
@@ -254,6 +260,13 @@ export interface RedoChange {
 
 /** «Ещё варианты» принятого слоя: задача, маска и референсы — слоя, модель и разрешение — слоя, если он их помнит */
 export interface PatchVariantsRequest extends RedoChange {
+  variants: number;
+  model: ModelChoice;
+  size: SizeChoice;
+}
+
+/** Отделить объект: модель дорисует фон под ним */
+export interface DetachRequest {
   variants: number;
   model: ModelChoice;
   size: SizeChoice;
