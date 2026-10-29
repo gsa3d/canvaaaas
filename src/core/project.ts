@@ -1,13 +1,13 @@
 // Свой формат canvaaaas, .caaa: исходник и слои правок вместе с масками. После повторного открытия
 // слои можно скрывать и править их маски, как до сохранения; история отмены начинается заново.
 // Внутри — подпись, длина и JSON-описание, затем PNG подряд: исходник, у каждого слоя — RGBA
-// (ответ модели и растушёванная маска в альфе) и маска до растушёвки; в конце — референсы слоёв,
+// (ответ модели и растушёванная маска в альфе) и маска до растушёвки, маски объектов; в конце — референсы слоёв,
 // чтобы слой можно было перерисовать ещё раз и после повторного открытия. Набросок и текст директора — в описании.
 import { extname } from 'node:path';
 import sharp from 'sharp';
 import type { InputImage } from '../providers/types.ts';
 import type { ModelChoice, SizeChoice, SketchStroke } from '../shared/api.ts';
-import { CanvasDocument, type Patch } from './document.ts';
+import { CanvasDocument, type DocObject, type Patch } from './document.ts';
 import type { Rect } from './frame.ts';
 import { checkSketch } from './sketch.ts';
 
@@ -48,7 +48,11 @@ interface Manifest {
     hide?: boolean;
     directed?: string;
     sketch?: SketchStroke[];
+    /** Правили этот объект */
+    object?: string;
   }[];
+  /** Объекты: имя, маска размером с rect и объект, частью которого этот является */
+  objects?: { id: string; name: string; rect: Rect; parent?: string; createdAt: string; lost?: boolean; mask: Part }[];
   /** Референсы: картинка, которая ушла с несколькими правками, хранится один раз */
   refs?: { mimeType: string; data: Part }[];
 }
@@ -74,6 +78,7 @@ function png(data: Uint8Array, width: number, height: number, channels: 1 | 3 | 
 export async function encodeProject(doc: CanvasDocument, density?: number): Promise<Buffer> {
   // Слои копируются сразу: правка маски меняет альфу слоя на месте, пока идёт кодирование
   const patches = doc.patches.map((p) => ({ ...p, layer: Buffer.from(p.layer) }));
+  const objects = doc.objects;
   let base = basePngs.get(doc.base);
   if (!base) {
     base = png(doc.base, doc.width, doc.height, 3);
@@ -83,6 +88,7 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
   const images = await Promise.all([
     base,
     ...patches.flatMap((p) => [png(p.layer, p.rect.width, p.rect.height, 4), png(p.mask, p.rect.width, p.rect.height, 1)]),
+    ...objects.map((o) => png(o.mask, o.rect.width, o.rect.height, 1)),
   ]);
   const refs: InputImage[] = [];
   const refIndex = (ref: InputImage): number => {
@@ -120,8 +126,19 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
       hide: p.hide || undefined,
       directed: p.directed,
       sketch: p.sketch?.length ? p.sketch : undefined,
+      object: p.object,
     })),
   };
+  const first = 1 + patches.length * 2;
+  manifest.objects = objects.map((o, i) => ({
+    id: o.id,
+    name: o.name,
+    rect: o.rect,
+    parent: o.parent,
+    createdAt: o.createdAt,
+    lost: o.lost || undefined,
+    mask: part(images[first + i]!),
+  }));
   manifest.refs = refs.map((r) => ({ mimeType: r.mimeType, data: part(r.data) }));
   const json = Buffer.from(JSON.stringify(manifest), 'utf8');
   const length = Buffer.alloc(4);
@@ -156,10 +173,27 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
   };
 
   const baseBytes = slice(manifest.base);
+  const inside = (r: Rect) => r.x >= 0 && r.y >= 0 && r.width > 0 && r.height > 0 && r.x + r.width <= width && r.y + r.height <= height;
+  const objectList = manifest.objects ?? [];
+  for (const o of objectList) if (!inside(o.rect)) throw broken('объект за краем холста');
   const [base, ...layers] = await Promise.all([
     decode(manifest.base, width, height, 3),
     ...manifest.layers.flatMap((l) => [decode(l.pixels, l.rect.width, l.rect.height, 4), decode(l.mask, l.rect.width, l.rect.height, 1)]),
   ]);
+  const objectMasks = await Promise.all(objectList.map((o) => decode(o.mask, o.rect.width, o.rect.height, 1)));
+  const ids = new Set(objectList.map((o) => o.id));
+  const objects = objectList.map(
+    (o, i): DocObject => ({
+      id: o.id,
+      name: String(o.name ?? ''),
+      rect: o.rect,
+      mask: objectMasks[i]!,
+      parent: o.parent && ids.has(o.parent) && o.parent !== o.id ? o.parent : undefined,
+      createdAt: o.createdAt,
+      version: 0,
+      lost: o.lost === true || undefined,
+    }),
+  );
   // Копия, а не кусок файла: иначе в памяти остался бы весь файл
   const refs = (manifest.refs ?? []).map((r): InputImage => ({ mimeType: r.mimeType, data: Buffer.from(slice(r.data)) }));
   const patches = manifest.layers.map((l, i): Patch => {
@@ -188,9 +222,10 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       hide: l.hide === true || undefined,
       directed: typeof l.directed === 'string' && l.directed.trim() ? l.directed : undefined,
       sketch: readSketch(l.sketch),
+      object: typeof l.object === 'string' && ids.has(l.object) ? l.object : undefined,
     };
   });
-  const doc = CanvasDocument.restore(name, width, height, base!, patches);
+  const doc = CanvasDocument.restore(name, width, height, base!, patches, objects);
   doc.style = manifest.style ?? '';
   basePngs.set(doc.base, Promise.resolve(Buffer.from(baseBytes)));
   return { doc, density: manifest.density };

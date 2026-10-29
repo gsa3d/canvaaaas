@@ -1,14 +1,35 @@
 // Просмотр холста: OpenSeadragon тянет тайлы с сервера, поверх — канвас размером с экран
-// для выделения, наброска для модели, контуров задач, курсора кисти и превью правки маски (mask-edit.ts). Фигуры и штрихи
-// хранятся в координатах холста, поэтому большой canvas в браузере не нужен ни для какой операции.
+// для выделения, наброска для модели, контуров задач, курсора кисти, объекта под курсором и превью правки маски (mask-edit.ts).
+// Фигуры и штрихи хранятся в координатах холста, поэтому большой canvas в браузере не нужен ни для какой операции;
+// маски объектов приходят с сервера картинками.
 import OpenSeadragon from 'openseadragon';
-import type { DocDto, JobDto, MaskEditResult, MaskShape, RectDto, SketchStroke } from '../shared/api.ts';
+import { API_HEADER, type DocDto, type JobDto, type MaskEditResult, type MaskShape, type RectDto, type SketchStroke } from '../shared/api.ts';
+import { post } from './api.ts';
 import { MaskPreview, type MaskEditView } from './mask-edit.ts';
 
-export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser' | 'sketch';
+export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser' | 'sketch' | 'object';
+
+/** Маска объекта в выделении */
+export type MaskRef = Extract<MaskShape, { kind: 'mask' }>;
+
+/** Щелчок или рамка инструментом «Объект» */
+export interface PickEvent {
+  point?: [number, number];
+  box?: RectDto;
+  shift: boolean;
+  alt: boolean;
+  /** ⌘ или Ctrl: ещё один объект к выделению */
+  add: boolean;
+  /** Видимая часть холста */
+  view: RectDto;
+  /** Сколько пикселей холста в экранном пикселе: щёлкнули ли в то же место */
+  imagePx: number;
+}
 
 const ACCENT = '#2F5BEA';
 const ERROR = '#C8431A';
+/** Сколько картинок масок объектов держать готовыми */
+const MASK_IMAGES_KEPT = 40;
 
 export type { MaskEditView };
 
@@ -22,6 +43,8 @@ export interface ViewerHooks {
   onSketch(stroke: SketchStroke): void;
   /** Мазок по маске слоя или задачи: отправить на сервер */
   onMaskShape(view: MaskEditView, shape: MaskShape): Promise<MaskEditResult>;
+  /** Щелчок или рамка инструментом «Объект» */
+  onPick(event: PickEvent): void;
   onZoom(percent: number): void;
 }
 
@@ -35,6 +58,10 @@ interface Draft {
   live?: boolean;
   /** Штрих наброска этим цветом, а не фигура выделения */
   sketch?: string;
+  /** Рамка инструмента «Объект»: объект внутри неё */
+  pick?: boolean;
+  shift?: boolean;
+  add?: boolean;
 }
 
 interface Layer {
@@ -116,6 +143,22 @@ export class CanvasView {
   private draft: Draft | null = null;
   private cursor: { x: number; y: number } | null = null;
   private frame = 0;
+  /** Модель выделения объектов готова: можно подсвечивать объект под курсором */
+  private segmentReady = false;
+  /** Объект под курсором: маска с сервера и где она лежит на холсте */
+  private hover: { bitmap: ImageBitmap; rect: RectDto } | null = null;
+  /** Где курсор на холсте, пока выбран «Объект» */
+  private hoverAt: [number, number] | null = null;
+  private hoverBusy = false;
+  /** Растёт, когда подсветка больше не нужна: опоздавший ответ её не вернёт */
+  private hoverSeq = 0;
+  /** Объект, на который навели в списке объектов */
+  private highlight: MaskRef | null = null;
+  /** Маски объектов, перекрашенные в цвет выделения; null — ещё грузится */
+  private readonly maskImages = new Map<string, HTMLCanvasElement | null>();
+  private prepareTimer = 0;
+  /** Вид, для которого сервер уже считает признаки */
+  private prepared = '';
 
   constructor(container: HTMLElement, hooks: ViewerHooks) {
     this.container = container;
@@ -151,11 +194,15 @@ export class CanvasView {
     this.viewer.addHandler('animation', () => this.drawNow());
     this.viewer.addHandler('update-viewport', () => this.drawNow());
     this.viewer.addHandler('animation', () => this.reportZoom());
-    this.viewer.addHandler('animation-finish', () => this.reportZoom());
+    this.viewer.addHandler('animation-finish', () => {
+      this.reportZoom();
+      this.schedulePrepare();
+    });
     this.viewer.addHandler('open', () => {
       this.base = this.viewer.world.getItemAt(0);
       if (this.base && this.doc) this.baseItems.set(this.base, this.doc.rev);
       this.reportZoom();
+      this.schedulePrepare();
       this.redraw();
     });
 
@@ -181,9 +228,14 @@ export class CanvasView {
       const r = container.getBoundingClientRect();
       this.cursor = { x: e.clientX - r.left, y: e.clientY - r.top };
       if (this.tool === 'brush' || this.tool === 'eraser' || this.tool === 'sketch') this.redraw();
+      if (this.activeTool() === 'object' && !this.draft) {
+        this.hoverAt = this.toImage(new OpenSeadragon.Point(this.cursor.x, this.cursor.y));
+        this.requestHover();
+      }
     });
     container.addEventListener('pointerleave', () => {
       this.cursor = null;
+      this.clearHover();
       this.redraw();
     });
     this.applyCursor();
@@ -206,6 +258,7 @@ export class CanvasView {
       return;
     }
     if (prev.rev !== doc.rev) {
+      this.schedulePrepare();
       // Новую версию кладём прямо над старой: пока её тайлы не пришли, сквозь неё видна старая.
       // Старую убираем, когда новая догрузилась целиком.
       const rev = doc.rev;
@@ -231,6 +284,9 @@ export class CanvasView {
   private reset(): void {
     this.closing?.preview.dispose();
     this.closing = null;
+    this.clearHover();
+    this.maskImages.clear();
+    this.prepared = '';
     this.base = null;
     this.baseItems.clear();
     this.baseCount = 0;
@@ -386,7 +442,135 @@ export class CanvasView {
   setTool(tool: Tool): void {
     this.tool = tool;
     this.applyCursor();
+    if (tool !== 'object') this.clearHover();
+    this.schedulePrepare();
     this.redraw();
+  }
+
+  /** Модель выделения объектов готова — можно считать признаки вида и подсвечивать объект под курсором */
+  setSegmentReady(ready: boolean): void {
+    this.segmentReady = ready;
+    if (!ready) this.clearHover();
+    this.schedulePrepare();
+  }
+
+  /** Обвести объект, на который навели в списке объектов */
+  setHighlight(shape: MaskRef | null): void {
+    this.highlight = shape;
+    this.redraw();
+  }
+
+  /** Видимая часть холста целыми пикселями; null — холста не видно */
+  visibleRect(current = true): RectDto | null {
+    if (!this.base || !this.doc) return null;
+    const r = this.base.viewportToImageRectangle(this.viewer.viewport.getBounds(current));
+    const x0 = Math.max(0, Math.floor(r.x));
+    const y0 = Math.max(0, Math.floor(r.y));
+    const x1 = Math.min(this.doc.width, Math.ceil(r.x + r.width));
+    const y1 = Math.min(this.doc.height, Math.ceil(r.y + r.height));
+    if (x1 - x0 < 16 || y1 - y0 < 16) return null;
+    return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+  }
+
+  private objectTool(): boolean {
+    return this.activeTool() === 'object' && this.segmentReady && !this.maskMode();
+  }
+
+  /** Вид остановился: пусть сервер заранее посчитает признаки видимой части — тогда подсветка и щелчок сразу */
+  private schedulePrepare(): void {
+    window.clearTimeout(this.prepareTimer);
+    this.prepareTimer = window.setTimeout(() => {
+      const view = this.objectTool() ? this.visibleRect(false) : null;
+      const key = view && `${this.doc?.id}:${this.doc?.rev}:${view.x},${view.y},${view.width},${view.height}`;
+      if (!view || key === this.prepared) return;
+      this.prepared = key!;
+      post('/api/segment/view', { view }).catch(() => {
+        if (this.prepared === key) this.prepared = '';
+      });
+    }, 200);
+  }
+
+  private clearHover(): void {
+    this.hoverSeq++;
+    this.hoverAt = null;
+    this.hover?.bitmap.close();
+    this.hover = null;
+  }
+
+  /** Объект под курсором — не больше одного запроса разом; пока он шёл, курсор сдвинулся — следующий */
+  private requestHover(): void {
+    const at = this.hoverAt;
+    const view = this.visibleRect();
+    if (this.hoverBusy || !at || !view || !this.objectTool() || this.draft) return;
+    this.hoverBusy = true;
+    const seq = this.hoverSeq;
+    const q = `x=${at[0]}&y=${at[1]}&vx=${view.x}&vy=${view.y}&vw=${view.width}&vh=${view.height}`;
+    fetch(`/api/segment/hover.png?${q}`)
+      .then(async (res) => {
+        const r = res.headers.get(`${API_HEADER}-rect`)?.split(',').map(Number);
+        if (res.status !== 200 || r?.length !== 4) return null;
+        return { bitmap: await createImageBitmap(await res.blob()), rect: { x: r[0]!, y: r[1]!, width: r[2]!, height: r[3]! } };
+      })
+      .catch(() => null)
+      .then((hit) => {
+        this.hoverBusy = false;
+        if (seq !== this.hoverSeq) {
+          hit?.bitmap.close();
+          return;
+        }
+        this.hover?.bitmap.close();
+        this.hover = hit;
+        this.redraw();
+        if (this.hoverAt !== at) this.requestHover();
+      });
+  }
+
+  private maskUrl(shape: MaskRef): string {
+    return `/api/masks/${encodeURIComponent(shape.id)}.png?doc=${this.doc?.id}&rev=${shape.rev ?? 0}`;
+  }
+
+  /** Маска объекта, перекрашенная в цвет выделения; пока не пришла — null */
+  private maskImage(shape: MaskRef): HTMLCanvasElement | null {
+    const url = this.maskUrl(shape);
+    if (this.maskImages.has(url)) {
+      const img = this.maskImages.get(url)!;
+      this.maskImages.delete(url);
+      this.maskImages.set(url, img);
+      return img;
+    }
+    void this.loadMask(shape);
+    return null;
+  }
+
+  /** Загрузить маску объекта заранее: выделение меняют на неё, только когда она готова, — так оно не мигает */
+  loadMask(shape: MaskRef): Promise<void> {
+    const url = this.maskUrl(shape);
+    if (this.maskImages.get(url)) return Promise.resolve();
+    this.maskImages.set(url, null);
+    while (this.maskImages.size > MASK_IMAGES_KEPT) this.maskImages.delete(this.maskImages.keys().next().value!);
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        if (this.maskImages.has(url)) {
+          const c = document.createElement('canvas');
+          c.width = img.naturalWidth;
+          c.height = img.naturalHeight;
+          const g = c.getContext('2d')!;
+          g.drawImage(img, 0, 0);
+          g.globalCompositeOperation = 'source-in';
+          g.fillStyle = ACCENT;
+          g.fillRect(0, 0, c.width, c.height);
+          this.maskImages.set(url, c);
+          this.redraw();
+        }
+        resolve();
+      };
+      img.onerror = () => {
+        this.maskImages.delete(url);
+        resolve();
+      };
+      img.src = url;
+    });
   }
 
   setBrush(px: number, softness: number): void {
@@ -460,6 +644,23 @@ export class CanvasView {
     if (tool === 'hand') return;
     const p = this.toImage(position);
     if (!p) return;
+    if (tool === 'object') {
+      // Щелчок — объект под ним, рамка — объект внутри неё
+      if (!this.objectTool()) return;
+      this.clearHover();
+      this.draft = {
+        kind: 'rect',
+        points: [p],
+        erase: original.altKey,
+        shift: original.shiftKey,
+        add: original.metaKey || original.ctrlKey,
+        size: 0,
+        softness: 0,
+        pick: true,
+      };
+      this.redraw();
+      return;
+    }
     if (tool === 'sketch') {
       // Набросок — для новой правки; пока правят маску, кисть меняет маску
       if (this.maskMode()) return;
@@ -502,6 +703,17 @@ export class CanvasView {
     if (!draft) return;
     const erase = draft.erase || undefined;
     const pts = draft.points;
+    if (draft.pick) {
+      this.redraw();
+      const view = this.visibleRect();
+      if (!view) return;
+      const [a, b] = [pts[0]!, pts[pts.length - 1]!];
+      const imagePx = 1 / this.scale();
+      const dragged = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])) > 6 * imagePx;
+      const box = { x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), width: Math.abs(b[0] - a[0]), height: Math.abs(b[1] - a[1]) };
+      this.hooks.onPick({ ...(dragged ? { box } : { point: a }), shift: !!draft.shift, alt: draft.erase, add: !!draft.add, view, imagePx });
+      return;
+    }
     if (draft.sketch) {
       this.redraw();
       this.hooks.onSketch({ points: pts, size: draft.size, color: draft.sketch, erase });
@@ -620,13 +832,18 @@ export class CanvasView {
     // в превью; черновик — только у прямоугольника и лассо (и пока превью грузится), стирающий — красным
     const maskMode = this.maskMode();
     const shapes: (MaskShape | Draft)[] = maskMode ? [] : [...this.selection];
-    if (this.draft && !this.draft.live && !this.draft.sketch) shapes.push(this.draft);
+    if (this.draft && !this.draft.live && !this.draft.sketch && !this.draft.pick) shapes.push(this.draft);
     if (shapes.length) {
       f.setTransform(1, 0, 0, 1, 0, 0);
       f.clearRect(0, 0, this.fill.width, this.fill.height);
       toImage(f);
       for (const shape of shapes) {
         f.globalCompositeOperation = shape.erase && !maskMode ? 'destination-out' : 'source-over';
+        if (shape.kind === 'mask') {
+          const img = this.maskImage(shape);
+          if (img) f.drawImage(img, shape.x, shape.y, shape.width, shape.height);
+          continue;
+        }
         const color = shape.erase ? ERROR : ACCENT;
         const path = shapePath(shape);
         if (shape.kind === 'stroke') {
@@ -676,8 +893,39 @@ export class CanvasView {
       ctx.globalAlpha = 1;
     }
 
+    // Объект под курсором и объект, на который навели в списке, — лёгкой заливкой с контуром
+    const glow = (img: CanvasImageSource, r: RectDto, alpha: number) => {
+      f.setTransform(1, 0, 0, 1, 0, 0);
+      f.globalCompositeOperation = 'source-over';
+      f.clearRect(0, 0, this.fill.width, this.fill.height);
+      toImage(f);
+      f.drawImage(img, r.x, r.y, r.width, r.height);
+      f.setTransform(1, 0, 0, 1, 0, 0);
+      f.globalCompositeOperation = 'source-in';
+      f.fillStyle = ACCENT;
+      f.fillRect(0, 0, this.fill.width, this.fill.height);
+      f.globalCompositeOperation = 'source-over';
+      outline();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(this.fill, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.drawImage(this.edge, 0, 0);
+    };
+    if (this.hover && this.objectTool() && !this.draft) glow(this.hover.bitmap, this.hover.rect, 0.16);
+    const lit = this.highlight && !maskMode ? this.maskImage(this.highlight) : null;
+    if (lit && this.highlight) glow(lit, this.highlight, 0.2);
+
     // Области задач с номерами, как в очереди, и границы правимого слоя: за ними маску не расширить
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (this.draft?.pick && this.draft.points.length > 1) {
+      const [a, b] = [this.draft.points[0]!, this.draft.points[this.draft.points.length - 1]!];
+      ctx.strokeStyle = this.draft.erase ? ERROR : ACCENT;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(o.x + Math.min(a[0], b[0]) * s, o.y + Math.min(a[1], b[1]) * s, Math.abs(b[0] - a[0]) * s, Math.abs(b[1] - a[1]) * s);
+      ctx.setLineDash([]);
+    }
     ctx.font = '600 12px "Golos Text Variable", system-ui, sans-serif';
     const frame = (r: RectDto, label: string, color: string, width: number, dash: number[]) => {
       const x = o.x + r.x * s;

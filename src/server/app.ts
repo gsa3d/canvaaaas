@@ -5,7 +5,16 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
-import { API_HEADER, type CreateJobRequest, type MaskShape, type MoreVariantsRequest, type PatchVariantsRequest, type RedoChange } from '../shared/api.ts';
+import {
+  API_HEADER,
+  type CreateJobRequest,
+  type MaskShape,
+  type MoreVariantsRequest,
+  type PatchVariantsRequest,
+  type PickRequest,
+  type RectDto,
+  type RedoChange,
+} from '../shared/api.ts';
 import type { Session } from './session.ts';
 
 export interface ServerOptions {
@@ -220,6 +229,56 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   route('GET', '/api/jobs/:id/edit/:part.:ext', (_req, res, [id, part], url) =>
     editImage(res, session.maskEditImage({ job: id!, n: Number(url.searchParams.get('n') ?? NaN) }, part!)),
   );
+
+  // Выделение объектов: веса модели скачиваются по просьбе, признаки видимой части считаются заранее,
+  // подсветка под курсором — картинкой маски с её местом на холсте в заголовке
+  route('POST', '/api/segment/install', (_req, res) => {
+    session.installSegmenter();
+    json(res, { ok: true });
+  });
+  route('POST', '/api/segment/view', async (req, res) => {
+    const { view } = await readJson<{ view: RectDto }>(req);
+    await session.prepareView(view);
+    json(res, { ok: true });
+  });
+  route('GET', '/api/segment/hover.png', async (_req, res, _p, url) => {
+    const n = (k: string) => Number(url.searchParams.get(k) ?? NaN);
+    const view = { x: n('vx'), y: n('vy'), width: n('vw'), height: n('vh') };
+    if (![n('x'), n('y'), view.x, view.y, view.width, view.height].every(Number.isFinite)) throw new HttpError(400, 'Нет точки или вида');
+    const hit = await session.hoverObject(view, n('x'), n('y'));
+    if (!hit) {
+      res.writeHead(204, { 'Cache-Control': 'no-store' });
+      res.end();
+      return;
+    }
+    const { x, y, width, height } = hit.rect;
+    send(res, 200, hit.png, 'image/png', { 'Cache-Control': 'no-store', [`${API_HEADER}-rect`]: [x, y, width, height].join(',') });
+  });
+  route('POST', '/api/segment/pick', async (req, res) => {
+    json(res, await session.pickObject(await readJson<PickRequest>(req)));
+  });
+  route('POST', '/api/segment/refine', async (req, res) => {
+    const { id } = await readJson<{ id: string }>(req);
+    json(res, await session.refineObject(String(id)));
+  });
+  // Маска объекта под щелчком или сохранённого (obj:id); у сохранённого меняется с правками — адрес несёт rev
+  route('GET', '/api/masks/:id.png', async (_req, res, [id]) => {
+    send(res, 200, await session.maskImage(id!), 'image/png', IMMUTABLE);
+  });
+
+  route('POST', '/api/objects', async (req, res) => {
+    const { shapes, name } = await readJson<{ shapes: MaskShape[]; name?: string }>(req);
+    json(res, { id: await session.saveObject(shapes, name) });
+  });
+  route('POST', '/api/objects/:id/rename', async (req, res, [id]) => {
+    const { name } = await readJson<{ name: string }>(req);
+    await session.renameObject(id!, String(name ?? ''));
+    json(res, { ok: true });
+  });
+  route('POST', '/api/objects/:id/delete', async (_req, res, [id]) => {
+    await session.deleteObject(id!);
+    json(res, { ok: true });
+  });
 
   route('POST', '/api/jobs', async (req, res) => {
     const body = await readJson<CreateJobRequest>(req);

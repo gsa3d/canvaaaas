@@ -42,6 +42,28 @@ export interface Patch {
   /** Задача, как её расписал директор: с ней же идут «Ещё варианты» с той же задачей */
   directed?: string;
   sketch?: SketchStroke[];
+  /** Правили этот объект: его маска была выделением */
+  object?: string;
+}
+
+/**
+ * Объект на холсте: имя и маска поверх пикселей, сами пиксели — холст и слои правок. Запись не меняется на месте:
+ * правка объекта кладёт новую, поэтому шаг отмены — просто прежний список.
+ */
+export interface DocObject {
+  id: string;
+  name: string;
+  /** Где маска лежит на холсте */
+  rect: Rect;
+  /** Один канал 0/255 размером с rect */
+  mask: Uint8Array;
+  /** Объект, частью которого этот является */
+  parent?: string;
+  createdAt: string;
+  /** Номер состояния маски: растёт, когда маска меняется */
+  version: number;
+  /** После правки на холсте объект не нашёлся: маска прежняя */
+  lost?: boolean;
 }
 
 interface Level {
@@ -64,7 +86,10 @@ type HistoryOp =
   | { kind: 'replace'; before: Patch; after: Patch; index: number }
   | { kind: 'toggle'; patchId: string }
   /** changed — участок маски, где before и after различаются: отмена пересчитывает только его */
-  | { kind: 'mask'; patchId: string; before: MaskState; after: MaskState; changed?: Rect };
+  | { kind: 'mask'; patchId: string; before: MaskState; after: MaskState; changed?: Rect }
+  | { kind: 'objects'; before: DocObject[]; after: DocObject[] }
+  /** Несколько шагов, которые отменяются разом: принятая правка и маски объектов, пересчитанные после неё */
+  | { kind: 'group'; ops: HistoryOp[] };
 
 function union(a: Rect, b: Rect): Rect {
   const x = Math.min(a.x, b.x);
@@ -121,6 +146,7 @@ export class CanvasDocument {
   readonly composite: Buffer;
   style = '';
   patches: Patch[] = [];
+  objects: DocObject[] = [];
   /** Растёт при каждом изменении холста: по нему браузер понимает, что тайлы устарели */
   rev = 1;
   private readonly levels: Level[];
@@ -128,14 +154,16 @@ export class CanvasDocument {
   private undoStack: HistoryOp[] = [];
   private redoStack: HistoryOp[] = [];
   private maskVersions = 0;
+  private objectVersions = 0;
 
-  private constructor(name: string, width: number, height: number, base: Buffer, patches: Patch[] = []) {
+  private constructor(name: string, width: number, height: number, base: Buffer, patches: Patch[] = [], objects: DocObject[] = []) {
     this.name = name;
     this.width = width;
     this.height = height;
     this.base = base;
     this.composite = Buffer.from(base);
     this.patches = patches;
+    this.objects = objects;
     for (const p of patches) {
       if (p.active) applyLayer({ data: this.composite, rect: this.bounds(), channels: 3 }, p.rect, p.layer);
     }
@@ -171,14 +199,24 @@ export class CanvasDocument {
     return new CanvasDocument(name, width, height, base);
   }
 
-  /** Документ из проекта .caaa: исходник и слои с масками как были, история отмены начинается заново */
-  static restore(name: string, width: number, height: number, base: Buffer, patches: Patch[]): CanvasDocument {
+  /** Документ из проекта .caaa: исходник, слои с масками и объекты как были, история отмены начинается заново */
+  static restore(name: string, width: number, height: number, base: Buffer, patches: Patch[], objects: DocObject[] = []): CanvasDocument {
     if (base.length !== width * height * 3) throw new Error('Исходник не того размера');
-    return new CanvasDocument(name, width, height, base, patches);
+    return new CanvasDocument(name, width, height, base, patches, objects);
   }
 
   raw(): RawImage {
     return { data: this.composite, width: this.width, height: this.height, channels: 3 };
+  }
+
+  /** Участок холста, RGB размером с rect (копия) */
+  region(rect: Rect): Buffer {
+    const out = Buffer.alloc(rect.width * rect.height * 3);
+    for (let row = 0; row < rect.height; row++) {
+      const from = ((rect.y + row) * this.width + rect.x) * 3;
+      this.composite.copy(out, row * rect.width * 3, from, from + rect.width * 3);
+    }
+    return out;
   }
 
   /** Копия холста: её можно долго кодировать, пока на холст ложатся новые правки */
@@ -210,6 +248,11 @@ export class CanvasDocument {
   /** То же со скрытыми слоями — они тоже ложатся в проект .caaa */
   get layersKey(): string {
     return this.patches.map((p) => `${p.id}:${p.maskVersion}${p.active ? '' : ':off'}`).join(',');
+  }
+
+  /** Объекты с именами, частями и масками: меняется — проекту .caaa есть что сохранить */
+  get objectsKey(): string {
+    return this.objects.map((o) => `${o.id}:${o.version}:${o.parent ?? ''}:${o.lost ? 1 : 0}:${o.name}`).join('\n');
   }
 
   get canUndo(): boolean {
@@ -300,10 +343,58 @@ export class CanvasDocument {
     this.record({ kind: 'mask', patchId, before, after, changed });
   }
 
+  /**
+   * Новый список объектов — шаг отмены. join — шаг, к которому его присоединить (historyTop() после правки):
+   * если он всё ещё последний, отмена уберёт оба разом; если после него было что-то ещё — обычный отдельный шаг.
+   */
+  setObjects(next: DocObject[], opts: { join?: unknown } = {}): void {
+    const op: HistoryOp = { kind: 'objects', before: this.objects, after: next };
+    this.objects = next;
+    const top = this.undoStack.at(-1);
+    if (opts.join && top === opts.join) {
+      this.undoStack[this.undoStack.length - 1] = { kind: 'group', ops: [top, op] };
+      this.redoStack = [];
+    } else {
+      this.record(op);
+    }
+  }
+
+  /** Номер для новой маски объекта */
+  nextObjectVersion(): number {
+    return ++this.objectVersions;
+  }
+
+  object(objectId: string): DocObject {
+    const o = this.objects.find((x) => x.id === objectId);
+    if (!o) throw new Error('Нет такого объекта');
+    return o;
+  }
+
+  /** Последний шаг истории — чтобы потом присоединить к нему пересчёт масок объектов */
+  historyTop(): unknown {
+    return this.undoStack.at(-1);
+  }
+
   undo(): void {
     const op = this.undoStack.pop();
     if (!op) return;
-    if (op.kind === 'add') {
+    this.revert(op);
+    this.redoStack.push(op);
+  }
+
+  redo(): void {
+    const op = this.redoStack.pop();
+    if (!op) return;
+    this.apply(op);
+    this.undoStack.push(op);
+  }
+
+  private revert(op: HistoryOp): void {
+    if (op.kind === 'group') {
+      for (const o of [...op.ops].reverse()) this.revert(o);
+    } else if (op.kind === 'objects') {
+      this.objects = op.before;
+    } else if (op.kind === 'add') {
       this.patches.splice(op.index, 1);
       this.recompute(op.patch.rect);
     } else if (op.kind === 'remove') {
@@ -317,13 +408,14 @@ export class CanvasDocument {
     } else {
       this.flip(op.patchId);
     }
-    this.redoStack.push(op);
   }
 
-  redo(): void {
-    const op = this.redoStack.pop();
-    if (!op) return;
-    if (op.kind === 'add') {
+  private apply(op: HistoryOp): void {
+    if (op.kind === 'group') {
+      for (const o of op.ops) this.apply(o);
+    } else if (op.kind === 'objects') {
+      this.objects = op.after;
+    } else if (op.kind === 'add') {
       this.patches.splice(op.index, 0, op.patch);
       this.recompute(op.patch.rect);
     } else if (op.kind === 'remove') {
@@ -337,7 +429,6 @@ export class CanvasDocument {
     } else {
       this.flip(op.patchId);
     }
-    this.undoStack.push(op);
   }
 
   private record(op: HistoryOp): void {

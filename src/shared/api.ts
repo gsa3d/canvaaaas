@@ -14,7 +14,12 @@ export type MaskShape =
   | { kind: 'ellipse'; cx: number; cy: number; rx: number; ry: number; erase?: boolean }
   | { kind: 'polygon'; points: [number, number][]; erase?: boolean }
   /** softness — доля радиуса кисти, на которой мазок плавно сходит на нет: 0 — жёсткий край, 1 — затухает от середины */
-  | { kind: 'stroke'; points: [number, number][]; size: number; softness?: number; erase?: boolean };
+  | { kind: 'stroke'; points: [number, number][]; size: number; softness?: number; erase?: boolean }
+  /**
+   * Маска с сервера: объект под щелчком (id из /api/segment) или сохранённый объект (obj:id).
+   * x…height — где она лежит; rev меняется вместе с маской объекта
+   */
+  | { kind: 'mask'; id: string; x: number; y: number; width: number; height: number; rev?: number; erase?: boolean };
 
 /** Штрих наброска для модели в координатах холста: где и каким должно быть то, что описано в задаче; erase — стирает набросок */
 export interface SketchStroke {
@@ -142,6 +147,52 @@ export interface PatchDto {
   directed?: string;
   /** С правкой ушёл набросок */
   sketch?: boolean;
+  /** Правили этот объект: его маска была выделением */
+  object?: string;
+}
+
+export interface ObjectDto {
+  id: string;
+  name: string;
+  rect: RectDto;
+  /** Объект, частью которого этот является */
+  parent?: string;
+  /** Растёт, когда маска меняется: по нему браузер перезапрашивает её картинку */
+  rev: number;
+  /** После правки на холсте объект не нашёлся */
+  lost?: boolean;
+}
+
+/** Модель выделения объектов: её веса скачиваются по просьбе пользователя */
+export interface SegmentDto {
+  status: 'missing' | 'downloading' | 'loading' | 'ready' | 'error';
+  /** Доля скачанного, 0..1 */
+  progress?: number;
+  error?: string;
+  /** Где считает кодировщик */
+  backend?: 'webgpu' | 'cpu';
+  /** Пересчитываются маски объектов после правки */
+  following: boolean;
+}
+
+/** Точка подсказки для выделения объекта: positive — объект здесь, иначе — здесь не он */
+export interface SegmentPoint {
+  x: number;
+  y: number;
+  positive: boolean;
+}
+
+/** Выделить объект: точки и (или) рамка в координатах холста, view — видимая часть холста */
+export interface PickRequest {
+  view: RectDto;
+  points: SegmentPoint[];
+  box?: RectDto;
+}
+
+/** Уровни объекта от мелкого к крупному («деталь / часть / целое»); level — какой показать первым */
+export interface PickResult {
+  levels: { id: string; rect: RectDto }[];
+  level: number;
 }
 
 /** Какие ответы умеет модель — чтобы подсказать про разрешение ещё до генерации */
@@ -162,6 +213,8 @@ export interface StateDto {
   doc: DocDto | null;
   jobs: JobDto[];
   history: PatchDto[];
+  objects: ObjectDto[];
+  segment: SegmentDto;
   canUndo: boolean;
   canRedo: boolean;
   generations: { session: number; today: number };
@@ -242,6 +295,9 @@ export function shapesBBox(shapes: MaskShape[]): RectDto | null {
     } else if (s.kind === 'ellipse') {
       add(s.cx - s.rx, s.cy - s.ry);
       add(s.cx + s.rx, s.cy + s.ry);
+    } else if (s.kind === 'mask') {
+      add(s.x, s.y);
+      add(s.x + s.width, s.y + s.height);
     } else {
       const pad = s.kind === 'stroke' ? s.size / 2 : 0;
       for (const [x, y] of s.points) add(x, y, pad);
@@ -263,6 +319,7 @@ export type AppCommand =
   | 'undo'
   | 'redo'
   | 'deselect'
+  | 'save-object'
   | 'zoom-fit'
   | 'zoom-100'
   | 'zoom-50'

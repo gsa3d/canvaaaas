@@ -403,6 +403,10 @@ button.swatch.active,
   cursor: crosshair !important;
 }
 
+.osd[data-tool='object'] * {
+  cursor: default !important;
+}
+
 .osd[data-tool='brush'] *,
 .osd[data-tool='eraser'] *,
 .osd[data-tool='sketch'] * {
@@ -432,6 +436,14 @@ button.swatch.active,
   background: #fff;
   color: var(--accent);
   font-weight: 500;
+}
+
+.stage-banner.error {
+  background: var(--danger);
+}
+
+.stage-banner.error button {
+  color: var(--danger);
 }
 
 .stage-banner .help {
@@ -1271,4 +1283,99 @@ button.danger {
     transition: none !important;
     animation: none !important;
   }
+}
+
+/* Уровни объекта под щелчком: кружки от мелкого к крупному */
+.pick-levels {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+}
+
+button.level {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 1.5px solid var(--muted);
+  border-radius: 50%;
+  background: transparent;
+}
+
+button.level.active,
+button.level.active:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+button.chip-action {
+  min-height: 0;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border-color: transparent;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+button.chip-action:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+}
+
+.objects {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.objects li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px;
+  border-radius: var(--radius);
+}
+
+.objects li.selected {
+  background: var(--accent-soft);
+}
+
+.objects li .link {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+  text-align: left;
+}
+
+.objects li.lost .link {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.objects li button.layer-icon.delete {
+  color: var(--muted);
+  opacity: 0;
+}
+
+.objects li:hover button.layer-icon.delete,
+.objects li button.layer-icon.delete:focus-visible {
+  opacity: 1;
+}
+
+.objects li button.layer-icon.delete:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+input.object-name {
+  min-width: 0;
+  padding: 2px 6px;
+  font: inherit;
 }

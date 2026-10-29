@@ -344,7 +344,8 @@ export class MaskPreview {
 
   /** Прямоугольник или лассо целиком — на отпускании; false — превью ещё не готово */
   fill(shape: MaskShape): boolean {
-    if (!this.ready || shape.kind === 'stroke') return false;
+    // Маски объектов в правку маски не попадают: «Объект» в ней выключен
+    if (!this.ready || shape.kind === 'stroke' || shape.kind === 'mask') return false;
     this.strokes++;
     const k = this.scale;
     const { x: ox, y: oy } = this.view.rect;

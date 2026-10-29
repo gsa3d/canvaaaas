@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import sharp from 'sharp';
-import { CanvasDocument, TILE_SIZE, type NewPatch } from '../core/document.ts';
+import { CanvasDocument, TILE_SIZE, type DocObject, type NewPatch } from '../core/document.ts';
 import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, type ImageFormat } from '../core/image-file.ts';
 import { encodeProject, isProject, isProjectPath, openProject, PROJECT_EXTENSION } from '../core/project.ts';
 import type { RecentFiles } from '../core/recent.ts';
@@ -31,7 +31,9 @@ import { intersect, type Rect } from '../core/frame.ts';
 import { expandMaskByDiff } from '../core/expand.ts';
 import { readLedger, withDirectorLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha, featherAlphaRegion, maskBBox } from '../core/mask.ts';
-import { applyShapes, applyShapesRegion } from '../core/mask-shapes.ts';
+import { applyShapes, applyShapesRegion, type MaskLookup } from '../core/mask-shapes.ts';
+import { placeObject, removeObject, trim } from '../core/objects.ts';
+import type { Bitmap } from '../core/segment.ts';
 import type { KeyStore } from '../core/secrets.ts';
 import { checkSketch } from '../core/sketch.ts';
 import { chatgptCodex, chatgptDirector, findCodex } from '../providers/chatgpt-codex.ts';
@@ -39,6 +41,7 @@ import { mockDirector, type PromptDirector } from '../providers/director.ts';
 import { laozhangGemini } from '../providers/laozhang-gemini.ts';
 import { mockProvider } from '../providers/mock.ts';
 import type { ImageProvider, InputImage } from '../providers/types.ts';
+import { maskPng, Segmentation } from './segmentation.ts';
 import {
   MAX_REFERENCES,
   shapesBBox,
@@ -48,6 +51,8 @@ import {
   type MaskShape,
   type ModelChoice,
   type PatchVariantsRequest,
+  type PickRequest,
+  type PickResult,
   type RectDto,
   type RedoChange,
   type SizeChoice,
@@ -120,6 +125,10 @@ interface Job {
   status: JobDto['status'];
   error?: string;
   shapes: MaskShape[];
+  /** Маски объектов из выделения: берутся сразу, пока они есть */
+  bitmaps: Map<string, Bitmap>;
+  /** Выделение — это сохранённый объект: слой правки его помнит */
+  object?: string;
   /** Границы выделения — известны сразу, ещё до подготовки куска */
   area: RectDto;
   variantsRequested: number;
@@ -210,6 +219,10 @@ export class Session {
   private savedLayers = '';
   /** Стиль на момент сохранения: в проект .caaa он записывается, в картинку — нет */
   private savedStyle = '';
+  /** Объекты на момент сохранения (objectsKey документа) */
+  private savedObjects = '';
+  /** Выделение объектов: модель SAM и маски под щелчком */
+  readonly segmentation: Segmentation;
   /** Документ со слоями уже записывали картинкой: «Сохранить» больше не спрашивает, сохранить ли слои */
   private flattened = false;
   /** Что сервер сейчас делает с файлом: «Открываю…», «Сохраняю…» */
@@ -230,6 +243,7 @@ export class Session {
     this.keys = keys;
     this.host = opts.host ?? null;
     this.recent = opts.recent ?? null;
+    this.segmentation = new Segmentation(() => this.changed());
   }
 
   async init(): Promise<void> {
@@ -385,7 +399,10 @@ export class Session {
         hide: p.hide,
         directed: p.directed,
         sketch: !!p.sketch?.length,
+        object: p.object,
       })),
+      objects: (doc?.objects ?? []).map((o) => ({ id: o.id, name: o.name, rect: o.rect, parent: o.parent, rev: o.version, lost: o.lost })),
+      segment: this.segmentation.state(),
       canUndo: doc?.canUndo ?? false,
       canRedo: doc?.canRedo ?? false,
       generations: { session: this.generations, today: this.todayAtStart + this.generations },
@@ -414,9 +431,10 @@ export class Session {
     return this.file?.path ?? null;
   }
 
-  /** Есть несохранённые изменения холста; у проекта .caaa — и скрытых слоёв, и стиля */
+  /** Есть несохранённые изменения холста и объектов; у проекта .caaa — ещё скрытых слоёв и стиля */
   get dirty(): boolean {
     if (!this.doc) return false;
+    if (this.doc.objectsKey !== this.savedObjects) return true;
     if (this.file?.format === PROJECT_EXTENSION) return this.doc.layersKey !== this.savedLayers || this.doc.style !== this.savedStyle;
     return this.doc.contentKey !== this.savedKey;
   }
@@ -500,6 +518,7 @@ export class Session {
     this.savedKey = doc.contentKey;
     this.savedLayers = doc.layersKey;
     this.savedStyle = doc.style;
+    this.savedObjects = doc.objectsKey;
     this.flattened = false;
     this.changed();
   }
@@ -546,10 +565,12 @@ export class Session {
     const doc = this.requireDoc();
     const file = this.file;
     if (file?.format === PROJECT_EXTENSION) return this.overwrite(file);
-    if (doc.patches.length && !this.flattened && this.host) {
+    if ((doc.patches.length || doc.objects.length) && !this.flattened && this.host) {
       const answer = await this.host.ask({
-        message: 'Сохранить слои?',
-        detail: 'Слои останутся слоями, только если сохранить документ в формате canvaaaas (.caaa): после повторного открытия их можно будет скрывать и править их маски. В картинке они сольются с холстом.',
+        message: doc.patches.length ? 'Сохранить слои?' : 'Сохранить объекты?',
+        detail: doc.patches.length
+          ? `Слои останутся слоями, только если сохранить документ в формате canvaaaas (.caaa): после повторного открытия их можно будет скрывать и править их маски. В картинке они сольются с холстом${doc.objects.length ? ', а объекты пропадут' : ''}.`
+          : 'Объекты сохранятся, только если сохранить документ в формате canvaaaas (.caaa). В картинку они не попадут.',
         buttons: ['Сохранить в .caaa…', file && !file.blocker ? `Записать в «${doc.name}»` : 'Сохранить картинкой…', 'Отмена'],
       });
       if (answer === 0) return this.saveAs({ kind: 'project' });
@@ -577,9 +598,10 @@ export class Session {
     return file.path;
   }
 
-  /** Слои документа пойдут в .caaa, а не сольются в картинку */
+  /** Слои и объекты документа пойдут в .caaa, а не сольются в картинку */
   private keepsLayers(): boolean {
-    return this.file?.format === PROJECT_EXTENSION || (this.requireDoc().patches.length > 0 && !this.flattened);
+    const doc = this.requireDoc();
+    return this.file?.format === PROJECT_EXTENSION || ((doc.patches.length > 0 || doc.objects.length > 0) && !this.flattened);
   }
 
   /** Папка для окна сохранения: открытого файла или последнего из недавних */
@@ -646,6 +668,7 @@ export class Session {
       const key = doc.contentKey;
       const layers = doc.layersKey;
       const style = doc.style;
+      const objects = doc.objectsKey;
       const data =
         format === PROJECT_EXTENSION
           ? await encodeProject(doc, this.density)
@@ -656,6 +679,7 @@ export class Session {
       this.savedKey = key;
       this.savedLayers = layers;
       this.savedStyle = style;
+      this.savedObjects = objects;
       if (format !== PROJECT_EXTENSION) this.flattened = true;
       await this.remember(doc, path);
     } finally {
@@ -831,8 +855,11 @@ export class Session {
 
   createJob(req: CreateJobRequest): string {
     if (!req.prompt.trim()) throw new Error('Пустой промпт');
-    const area = shapesBBox(req.shapes);
+    const { shapes, bitmaps } = this.resolveShapes(req.shapes);
+    const area = shapesBBox(shapes);
     if (!area) throw new Error('Нет выделения');
+    const added = shapes.filter((s) => !s.erase);
+    const only = added.length === 1 && added[0]!.kind === 'mask' ? added[0]!.id : '';
     const refIds = req.refs ?? [];
     if (refIds.length > MAX_REFERENCES) throw new Error(`Не больше ${MAX_REFERENCES} референсов на правку`);
     const references = refIds.map((id) => {
@@ -846,12 +873,26 @@ export class Session {
       model: req.model,
       size: req.size,
       variants: req.variants,
-      shapes: req.shapes,
+      shapes,
+      bitmaps,
+      object: only.startsWith('obj:') ? only.slice(4) : undefined,
       area,
       references,
       sketch: checkSketch(req.sketch),
       director: !!req.director,
     });
+  }
+
+  /** Маски объектов в выделении: где они сейчас лежат и сами маски — задача берёт их сразу */
+  private resolveShapes(input: MaskShape[]): { shapes: MaskShape[]; bitmaps: Map<string, Bitmap> } {
+    const bitmaps = new Map<string, Bitmap>();
+    const shapes = input.map((s) => {
+      if (s.kind !== 'mask') return s;
+      const b = this.maskOf(s.id);
+      bitmaps.set(s.id, b);
+      return { ...s, ...b.rect };
+    });
+    return { shapes, bitmaps };
   }
 
   /**
@@ -870,6 +911,8 @@ export class Session {
       size: patch.size ?? req.size,
       variants: req.variants,
       shapes: [],
+      bitmaps: new Map(),
+      object: patch.object,
       area: { ...box, x: box.x + patch.rect.x, y: box.y + patch.rect.y },
       references: patch.refs ?? [],
       sketch: patch.sketch ?? [],
@@ -880,7 +923,10 @@ export class Session {
   }
 
   private enqueue(
-    task: Pick<Job, 'prompt' | 'hide' | 'model' | 'size' | 'shapes' | 'area' | 'references' | 'sketch' | 'director' | 'directed' | 'replaces'> & {
+    task: Pick<
+      Job,
+      'prompt' | 'hide' | 'model' | 'size' | 'shapes' | 'bitmaps' | 'object' | 'area' | 'references' | 'sketch' | 'director' | 'directed' | 'replaces'
+    > & {
       variants: number;
     },
   ): string {
@@ -995,7 +1041,12 @@ export class Session {
       { x: 0, y: 0, width: doc.width, height: doc.height },
     );
     if (!area.width || !area.height) throw new Error('Выделение за пределами холста');
-    const region = await applyShapes(new Uint8Array(area.width * area.height), area, job.shapes);
+    const lookup: MaskLookup = (id) => {
+      const b = job.bitmaps.get(id);
+      if (!b) throw new Error('Маска объекта потерялась: выделите его заново');
+      return b;
+    };
+    const region = await applyShapes(new Uint8Array(area.width * area.height), area, job.shapes, lookup);
     return { data: Buffer.from(region.buffer, region.byteOffset, region.length), width: area.width, height: area.height, channels: 1, x: area.x, y: area.y };
   }
 
@@ -1283,11 +1334,124 @@ export class Session {
         model: job.model,
         size: job.size,
         refs: job.references,
+        object: job.object && doc.objects.some((o) => o.id === job.object) ? job.object : undefined,
       };
-      if (target) doc.replacePatch(target, patch);
-      else doc.addPatch(patch);
+      // Участок, где холст меняется: по пикселям до и после маски объектов пересчитываются следом
+      const before = target ? doc.patch(target).rect : patch.rect;
+      const region = union(before, patch.rect);
+      const pixels = doc.region(region);
+      const placed = target ? doc.replacePatch(target, patch) : doc.addPatch(patch);
+      void this.followObjects(doc, placed.id, region, pixels, doc.region(region));
     }
     this.discard(jobId);
+  }
+
+  /**
+   * Маски объектов следуют за принятой правкой: те, чей край она задела, пересчитываются по новому холсту.
+   * Это часть того же шага отмены: ⌘Z правки возвращает и прежние маски. Если пока считали, правку уже отменили
+   * или скрыли, пересчёт не нужен; если после неё успели сделать что-то ещё — ложится отдельным шагом.
+   */
+  private async followObjects(doc: CanvasDocument, patchId: string, region: Rect, before: Buffer, after: Buffer): Promise<void> {
+    if (!doc.objects.length) return;
+    const join = doc.historyTop();
+    let masks: Map<string, Bitmap | null>;
+    try {
+      masks = await this.segmentation.remask(doc, doc.objects, region, before, after);
+    } catch {
+      // Без пересчёта маски объектов просто остаются прежними
+      return;
+    }
+    if (!masks.size) return;
+    await this.serialDoc((d) => {
+      if (d !== doc || !doc.hasPatch(patchId) || !doc.patch(patchId).active) return;
+      const next = doc.objects.map((o): DocObject => {
+        if (!masks.has(o.id)) return o;
+        const b = masks.get(o.id);
+        return b ? { ...o, rect: b.rect, mask: b.mask, version: doc.nextObjectVersion(), lost: undefined } : { ...o, lost: true };
+      });
+      doc.setObjects(next, { join });
+      this.changed();
+    });
+  }
+
+  // ——— Объекты ———
+
+  /** Маска фигуры kind: 'mask': сохранённого объекта (obj:id) или объекта под щелчком */
+  private maskOf(id: string): Bitmap {
+    if (id.startsWith('obj:')) return this.requireDoc().object(id.slice(4));
+    return this.segmentation.bitmap(id);
+  }
+
+  /** Картинка маски для браузера: белая там, где объект, не больше max по большей стороне */
+  maskImage(id: string, max = 2048): Promise<Buffer> {
+    return maskPng(this.maskOf(id), max);
+  }
+
+  /** Сохранить выделение объектом; объекты внутри него становятся его частями, а он — частью того, в чём лежит */
+  saveObject(input: MaskShape[], name?: string): Promise<string> {
+    return this.serialDoc(async (doc) => {
+      const { shapes, bitmaps } = this.resolveShapes(input);
+      const box = shapesBBox(shapes);
+      const area = box && intersect(box, { x: 0, y: 0, width: doc.width, height: doc.height });
+      if (!area?.width || !area.height) throw new Error('Нет выделения');
+      const mask = await applyShapes(new Uint8Array(area.width * area.height), area, shapes, (id) => bitmaps.get(id)!);
+      const bitmap = trim({ rect: area, mask });
+      if (!bitmap) throw new Error('Выделение пустое');
+      if (this.doc !== doc) throw new Error('Документ уже закрыт');
+      const used = new Set(doc.objects.map((o) => o.name));
+      let n = doc.objects.length + 1;
+      while (used.has(`Объект ${n}`)) n++;
+      const obj: DocObject = {
+        id: randomUUID(),
+        name: name?.trim() || `Объект ${n}`,
+        ...bitmap,
+        createdAt: new Date().toISOString(),
+        version: doc.nextObjectVersion(),
+      };
+      doc.setObjects(placeObject(doc.objects, obj));
+      this.changed();
+      return obj.id;
+    });
+  }
+
+  renameObject(id: string, name: string): Promise<void> {
+    return this.serialDoc((doc) => {
+      const trimmed = name.trim();
+      if (!trimmed) throw new Error('Пустое имя');
+      if (doc.object(id).name === trimmed) return;
+      doc.setObjects(doc.objects.map((o) => (o.id === id ? { ...o, name: trimmed } : o)));
+      this.changed();
+    });
+  }
+
+  /** Удалить объект — только имя и маску, пиксели холста те же; его части переходят к его родителю. ⌘Z возвращает */
+  deleteObject(id: string): Promise<void> {
+    return this.serialDoc((doc) => {
+      doc.setObjects(removeObject(doc.objects, id));
+      this.changed();
+    });
+  }
+
+  // ——— Выделение объектов ———
+
+  installSegmenter(): void {
+    this.segmentation.install();
+  }
+
+  prepareView(view: RectDto): Promise<void> {
+    return this.segmentation.prepare(this.requireDoc(), view);
+  }
+
+  hoverObject(view: RectDto, x: number, y: number): Promise<{ png: Buffer; rect: RectDto } | null> {
+    return this.segmentation.hover(this.requireDoc(), view, x, y);
+  }
+
+  pickObject(req: PickRequest): Promise<PickResult> {
+    return this.segmentation.pick(this.requireDoc(), req);
+  }
+
+  refineObject(id: string): Promise<{ id: string; rect: RectDto }> {
+    return this.segmentation.refine(this.requireDoc(), id);
   }
 
   // ——— Маска задачи после генерации ———
@@ -1402,6 +1566,12 @@ export class Session {
     return png;
   }
 
+}
+
+function union(a: Rect, b: Rect): Rect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return { x, y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
 }
 
 /** Как показать модели область: стереть, что под маской, или подсветить её поверх куска */

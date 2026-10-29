@@ -1,10 +1,14 @@
-// Маска из векторных фигур в координатах холста: прямоугольник, эллипс, лассо, мазки кисти и ластика (жёсткой или мягкой).
-// Так её будет присылать интерфейс; растеризуется здесь, в полном разрешении, через SVG.
+// Маска из фигур в координатах холста: прямоугольник, эллипс, лассо, мазки кисти и ластика (жёсткой или мягкой)
+// и маски объектов с сервера. Так её присылает интерфейс; векторные фигуры растеризуются здесь, в полном разрешении, через SVG.
 import sharp from 'sharp';
 import { shapesBBox, type MaskShape } from '../shared/api.ts';
-import type { Rect } from './frame.ts';
+import { intersect, type Rect } from './frame.ts';
+import type { Bitmap } from './segment.ts';
 
 export type { MaskShape };
+
+/** Маска с сервера по id фигуры kind: 'mask' */
+export type MaskLookup = (id: string) => Bitmap;
 
 function shapeSvg(shape: MaskShape, i: number): string {
   const fill = shape.erase ? 'black' : 'white';
@@ -17,6 +21,8 @@ function shapeSvg(shape: MaskShape, i: number): string {
       return `<polygon points="${shape.points.map((p) => p.join(',')).join(' ')}" fill="${fill}"/>`;
     case 'stroke':
       return strokeSvg(shape, fill, i);
+    case 'mask':
+      throw new Error('Маску объекта SVG не нарисовать');
   }
 }
 
@@ -60,13 +66,44 @@ export async function renderMask(width: number, height: number, shapes: MaskShap
 
 /**
  * Наложить фигуры на уже готовую маску участка rect: белые фигуры добавляют, ластик стирает.
- * Координаты фигур — холста; всё, что за пределами rect, отсекается.
+ * Координаты фигур — холста; всё, что за пределами rect, отсекается. Фигуры ложатся по порядку: подряд идущие
+ * векторные рисуются одним SVG, маски объектов (их даёт lookup) — попиксельно.
  */
-export async function applyShapes(
-  mask: Uint8Array,
-  rect: { x: number; y: number; width: number; height: number },
-  shapes: MaskShape[],
-): Promise<Uint8Array> {
+export async function applyShapes(mask: Uint8Array, rect: Rect, shapes: MaskShape[], lookup?: MaskLookup): Promise<Uint8Array> {
+  let out: Uint8Array = new Uint8Array(mask);
+  let run: MaskShape[] = [];
+  const flush = async () => {
+    if (run.length) out = await applyVector(out, rect, run);
+    run = [];
+  };
+  for (const shape of shapes) {
+    if (shape.kind !== 'mask') {
+      run.push(shape);
+      continue;
+    }
+    await flush();
+    if (!lookup) throw new Error('Маска объекта недоступна: выделите его заново');
+    applyBitmap(out, rect, lookup(shape.id), !!shape.erase);
+  }
+  await flush();
+  return out;
+}
+
+/** Маска объекта поверх маски участка rect: добавляет или, erase, стирает */
+function applyBitmap(out: Uint8Array, rect: Rect, b: Bitmap, erase: boolean): void {
+  const o = intersect(rect, b.rect);
+  for (let y = o.y; y < o.y + o.height; y++) {
+    const src = (y - b.rect.y) * b.rect.width - b.rect.x;
+    const dst = (y - rect.y) * rect.width - rect.x;
+    for (let x = o.x; x < o.x + o.width; x++) {
+      const m = b.mask[src + x]!;
+      if (!m) continue;
+      out[dst + x] = erase ? Math.min(out[dst + x]!, 255 - m) : Math.max(out[dst + x]!, m);
+    }
+  }
+}
+
+async function applyVector(mask: Uint8Array, rect: Rect, shapes: MaskShape[]): Promise<Uint8Array> {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${rect.width}" height="${rect.height}"><g transform="translate(${-rect.x} ${-rect.y})">${shapes.map((shape, i) => shapeSvg(shape, i)).join('')}</g></svg>`;
   const layer = await sharp(Buffer.from(svg), { limitInputPixels: false }).ensureAlpha().raw().toBuffer();
   const out = new Uint8Array(mask);
@@ -85,8 +122,9 @@ export async function applyShapes(
  */
 export async function applyShapesRegion(
   mask: Uint8Array,
-  rect: { x: number; y: number; width: number; height: number },
+  rect: Rect,
   shapes: MaskShape[],
+  lookup?: MaskLookup,
 ): Promise<{ mask: Uint8Array; changed: Rect | null }> {
   const b = shapesBounds(shapes);
   const x0 = Math.max(0, Math.floor((b?.x0 ?? 0) - rect.x));
@@ -100,7 +138,7 @@ export async function applyShapesRegion(
     const from = (y0 + row) * rect.width + x0;
     part.set(mask.subarray(from, from + changed.width), row * changed.width);
   }
-  const drawn = await applyShapes(part, { ...changed, x: rect.x + x0, y: rect.y + y0 }, shapes);
+  const drawn = await applyShapes(part, { ...changed, x: rect.x + x0, y: rect.y + y0 }, shapes, lookup);
   const out = new Uint8Array(mask);
   for (let row = 0; row < changed.height; row++) out.set(drawn.subarray(row * changed.width, (row + 1) * changed.width), (y0 + row) * rect.width + x0);
   return { mask: out, changed };

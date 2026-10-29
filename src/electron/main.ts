@@ -8,11 +8,15 @@ import { app, BrowserWindow, dialog, Menu, safeStorage, shell, type MenuItemCons
 import { encodeImage, formatOf, IMAGE_EXTENSIONS } from '../core/image-file.ts';
 import { isProjectPath, PROJECT_EXTENSION } from '../core/project.ts';
 import { RecentFiles } from '../core/recent.ts';
+import { Segmenter } from '../core/segment.ts';
+import { modelFiles, modelInstalled } from '../core/segment-model.ts';
 import { encryptedFileStore, keychainStore, withEnv } from '../core/secrets.ts';
 import { COMMAND_EVENT, type AppCommand } from '../shared/api.ts';
 import { startServer } from '../server/app.ts';
 import { Session, type Host } from '../server/session.ts';
 
+// Самопроверка — со своим профилем: так она идёт и рядом с открытым canvaaaas и не будит его окно
+if (process.argv.includes('--smoke')) app.setPath('userData', join(tmpdir(), `canvaaaas-smoke-${process.pid}`));
 if (!app.requestSingleInstanceLock()) app.quit();
 
 // Файл, который система просит открыть: двойной щелчок по .caaa в Finder, перетаскивание на значок в Dock.
@@ -108,6 +112,7 @@ function buildMenu(win: BrowserWindow, session: Session): void {
         { role: 'selectAll', label: 'Выбрать всё' },
         { type: 'separator' },
         { ...item('Снять выделение', 'deselect', 'CmdOrCtrl+D'), enabled: hasDoc },
+        { ...item('Сохранить как объект', 'save-object', 'CmdOrCtrl+J'), enabled: hasDoc },
       ],
     },
     {
@@ -249,10 +254,19 @@ app.whenReady().then(async () => {
       console.log(`SMOKE файлы: ${err instanceof Error ? err.message : String(err)}`);
     }
     await rm(smokeDir, { recursive: true, force: true });
+    // Выделение объектов: onnxruntime загрузился вместе с сервером; если веса скачаны — где считает кодировщик
+    let sam = 'модель не скачана';
+    if (modelInstalled()) {
+      const { encoder, decoder } = modelFiles();
+      sam = await Segmenter.load(encoder, decoder).then(
+        (s) => s.backend,
+        (err: unknown) => `ошибка: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     const ok = check.ui && check.api && files && project && close;
     console.log(
       `SMOKE ${ok ? 'OK' : 'FAIL'}: ${server.url}, интерфейс ${check.ui}, API ${check.api}, открытие и сохранение ${files}, ` +
-        `проект .caaa ${project}, вопрос при закрытии ${close}, ключ ${check.key ? 'есть' : 'нет'}`,
+        `проект .caaa ${project}, вопрос при закрытии ${close}, ключ ${check.key ? 'есть' : 'нет'}, выделение объектов ${sam}`,
     );
     app.exit(ok ? 0 : 1);
     return;

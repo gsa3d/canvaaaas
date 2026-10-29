@@ -20,6 +20,7 @@
     "install:mac": "npm run app:mac && node --disable-warning=ExperimentalWarning scripts/install-mac.ts"
   },
   "dependencies": {
+    "onnxruntime-node": "^1.31.1",
     "sharp": "^0.35.5",
     "undici": "^8.12.3"
   },
@@ -51,7 +52,8 @@
     ],
     "asarUnpack": [
       "node_modules/sharp/**",
-      "node_modules/@img/**"
+      "node_modules/@img/**",
+      "node_modules/onnxruntime-node/**"
     ],
     "fileAssociations": [
       {
@@ -67,13 +69,23 @@
         "dir"
       ],
       "category": "public.app-category.graphics-design",
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "files": [
+        "dist/**",
+        "package.json",
+        "!node_modules/onnxruntime-node/bin/napi-v6/{linux,win32}/**"
+      ]
     },
     "win": {
       "target": [
         "nsis"
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "files": [
+        "dist/**",
+        "package.json",
+        "!node_modules/onnxruntime-node/bin/napi-v6/{linux,darwin}/**"
+      ]
     },
     "nsis": {
       "oneClick": true,
