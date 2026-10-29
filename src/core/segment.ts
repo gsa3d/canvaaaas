@@ -133,11 +133,11 @@ export class Segmenter {
     if (h !== LOW || w !== LOW) throw new Error(`Декодер вернул маски ${w}×${h}, а не ${LOW}×${LOW}`);
     const data = masks.data as Float32Array;
     const scores = out.iou_predictions!.data as Float32Array;
-    return Array.from({ length: k! }, (_, j) => ({
-      logits: Float32Array.from(data.subarray(j * LOW * LOW, (j + 1) * LOW * LOW)),
-      score: scores[j]!,
-      crop,
-    }));
+    return Array.from({ length: k! }, (_, j) => {
+      const logits = Float32Array.from(data.subarray(j * LOW * LOW, (j + 1) * LOW * LOW));
+      cleanLogits(logits);
+      return { logits, score: scores[j]!, crop };
+    });
   }
 }
 
@@ -188,6 +188,72 @@ export function lowIou(a: Candidate, b: Candidate): number {
     if (x || y) u++;
   }
   return u ? i / u : 0;
+}
+
+/** Дыра внутри маски меньше этой доли её площади заделывается: «шахматка» на штриховке, щели, но не проём арки */
+const HOLE = 0.05;
+/** Кусок маски меньше этой доли самого большого — крошка, его нет */
+const ISLAND = 0.02;
+
+/**
+ * Чистка маски на сетке, на месте: декодер на штриховке и тонких линиях оставляет в объекте дыры клетками
+ * и крошки вокруг. Мелкая дыра, не выходящая к краю участка, получает небольшой плюс, крошка — минус.
+ * Куски объекта связны и по диагонали, дыры — только по сторонам клеток.
+ */
+export function cleanLogits(logits: Float32Array): void {
+  const N = LOW * LOW;
+  const comp = new Int32Array(N).fill(-1);
+  const stack = new Int32Array(N);
+  const sizes: number[] = [];
+  const inside: boolean[] = [];
+  const edge: boolean[] = [];
+  for (let s = 0; s < N; s++) {
+    if (comp[s]! >= 0) continue;
+    const id = sizes.length;
+    const on = logits[s]! > 0;
+    let n = 0;
+    let top = 0;
+    let border = false;
+    comp[s] = id;
+    stack[top++] = s;
+    while (top) {
+      const k = stack[--top]!;
+      n++;
+      const x = k % LOW;
+      const y = (k - x) / LOW;
+      if (x === 0 || y === 0 || x === LOW - 1 || y === LOW - 1) border = true;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if ((!dx && !dy) || (!on && dx && dy)) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= LOW || ny >= LOW) continue;
+          const nb = ny * LOW + nx;
+          if (comp[nb]! < 0 && (logits[nb]! > 0) === on) {
+            comp[nb] = id;
+            stack[top++] = nb;
+          }
+        }
+      }
+    }
+    sizes.push(n);
+    inside.push(on);
+    edge.push(border);
+  }
+  let area = 0;
+  let largest = 0;
+  sizes.forEach((n, i) => {
+    if (!inside[i]) return;
+    area += n;
+    largest = Math.max(largest, n);
+  });
+  if (!area) return;
+  for (let k = 0; k < N; k++) {
+    const id = comp[k]!;
+    if (inside[id]) {
+      if (sizes[id]! < ISLAND * largest) logits[k] = -1;
+    } else if (!edge[id] && sizes[id]! <= HOLE * area) logits[k] = 1;
+  }
 }
 
 /**

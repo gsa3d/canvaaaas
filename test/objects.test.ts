@@ -3,7 +3,7 @@ import { CanvasDocument, type DocObject } from '../src/core/document.ts';
 import { applyShapes } from '../src/core/mask-shapes.ts';
 import { changedPixels, overlap, placeObject, removeObject, touchedEdge, trim } from '../src/core/objects.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
-import { LOW, levels, rasterize, type Bitmap, type Candidate } from '../src/core/segment.ts';
+import { LOW, cleanLogits, levels, rasterize, type Bitmap, type Candidate } from '../src/core/segment.ts';
 import { envOnlyStore } from '../src/core/secrets.ts';
 import { Session } from '../src/server/session.ts';
 import type { MaskShape } from '../src/shared/api.ts';
@@ -169,6 +169,30 @@ describe('Маски из логитов сетки', () => {
     expect(b.rect).toEqual({ x: 100 + 128, y: 50 + 64, width: 128, height: 64 });
     expect(b.mask.every((v) => v === 255)).toBe(true);
     expect(rasterize({ ...square(0, 0, 0, 0), logits: new Float32Array(LOW * LOW).fill(-1) })).toBeNull();
+  });
+
+  it('мелкие дыры заделываются, крошки убираются; проём и дыра у края участка остаются', () => {
+    const c = square(40, 40, 140, 140);
+    const at = (x: number, y: number) => c.logits[y * LOW + x]!;
+    const set = (x0: number, y0: number, x1: number, y1: number, v: number) => {
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) c.logits[y * LOW + x] = v;
+    };
+    // «Шахматка» на штриховке
+    for (let y = 50; y < 70; y += 2) for (let x = 50; x < 70; x += 2) c.logits[y * LOW + x] = -3;
+    // Проём: 30×30 клеток — 9% площади
+    set(90, 90, 119, 119, -5);
+    // Крошка рядом и кусок поменьше, но не крошка; объект во всю высоту участка с дырой у края
+    set(160, 40, 161, 41, 5);
+    set(160, 100, 175, 115, 5);
+    set(200, 0, 230, 255, 5);
+    set(210, 0, 215, 3, -5);
+    cleanLogits(c.logits);
+    expect(at(50, 50)).toBeGreaterThan(0);
+    expect(at(60, 62)).toBeGreaterThan(0);
+    expect(at(100, 100)).toBeLessThan(0);
+    expect(at(160, 40)).toBeLessThan(0);
+    expect(at(165, 105)).toBeGreaterThan(0);
+    expect(at(212, 1)).toBeLessThan(0);
   });
 
   it('уровни идут от мелкого к крупному, почти одинаковые — одним', () => {
