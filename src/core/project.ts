@@ -90,8 +90,8 @@ export function isProject(data: Buffer): boolean {
   return data.subarray(0, MAGIC.length).equals(MAGIC);
 }
 
-/** Исходник не меняется, пока документ открыт: при повторном сохранении его PNG уже готов */
-const basePngs = new WeakMap<Buffer, Promise<Buffer>>();
+/** PNG исходника — пока в него ничего не влили (то же состояние), при повторном сохранении он уже готов */
+const basePngs = new WeakMap<Buffer, { state: number; png: Promise<Buffer> }>();
 
 function png(data: Uint8Array, width: number, height: number, channels: 1 | 3 | 4): Promise<Buffer> {
   return sharp(data, { raw: { width, height, channels }, limitInputPixels: false }).png().toBuffer();
@@ -101,11 +101,16 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
   // Слои копируются сразу: правка маски меняет альфу слоя на месте, пока идёт кодирование
   const patches = doc.patches.map((p) => ({ ...p, layer: Buffer.from(p.layer) }));
   const objects = doc.objects;
-  let base = basePngs.get(doc.base);
+  const cached = basePngs.get(doc.base);
+  let base = cached?.state === doc.baseState ? cached.png : undefined;
   if (!base) {
-    base = png(doc.base, doc.width, doc.height, 3);
-    basePngs.set(doc.base, base);
-    base.catch(() => basePngs.delete(doc.base));
+    // Исходник копируется сразу: пока кодируется, в него могут влить слой
+    base = png(doc.baseState ? Buffer.from(doc.base) : doc.base, doc.width, doc.height, 3);
+    const entry = { state: doc.baseState, png: base };
+    basePngs.set(doc.base, entry);
+    base.catch(() => {
+      if (basePngs.get(doc.base) === entry) basePngs.delete(doc.base);
+    });
   }
   const images = await Promise.all([
     base,
@@ -272,7 +277,7 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
   if (manifest.version < 2) migrate(patches, objects);
   const doc = CanvasDocument.restore(name, width, height, base!, patches, objects);
   doc.style = manifest.style ?? '';
-  basePngs.set(doc.base, Promise.resolve(Buffer.from(baseBytes)));
+  basePngs.set(doc.base, { state: doc.baseState, png: Promise.resolve(Buffer.from(baseBytes)) });
   return { doc, density: manifest.density };
 }
 

@@ -115,6 +115,8 @@ type HistoryOp =
   | { kind: 'objects'; before: DocObject[]; after: DocObject[] }
   /** Слой сдвинули: размер тот же, другое место */
   | { kind: 'move'; patchId: string; from: Rect; to: Rect }
+  /** В исходник вписали участок (влили слой, свели слои); state — номер состояния исходника до и после */
+  | { kind: 'base'; rect: Rect; before: Buffer; after: Buffer; stateBefore: number; stateAfter: number }
   /** Несколько шагов, которые отменяются разом: принятая правка и маски объектов, пересчитанные после неё */
   | { kind: 'group'; ops: HistoryOp[] };
 
@@ -181,8 +183,10 @@ export class CanvasDocument {
   name: string;
   readonly width: number;
   readonly height: number;
-  /** Исходник, RGB 8 бит; никогда не меняется */
+  /** Исходник, RGB 8 бит; меняется, только когда в него вливают слои (baseState растёт) */
   readonly base: Buffer;
+  /** Номер состояния исходника: 0 — как открыли; отмена возвращает прежний */
+  baseState = 0;
   /** Исходник с включёнными правками, RGB 8 бит */
   readonly composite: Buffer;
   style = '';
@@ -198,6 +202,7 @@ export class CanvasDocument {
   private redoStack: HistoryOp[] = [];
   private maskVersions = 0;
   private objectVersions = 0;
+  private baseStates = 0;
   /** Шаги внутри batch: лягут одним */
   private collecting: HistoryOp[] | null = null;
 
@@ -275,14 +280,16 @@ export class CanvasDocument {
 
   /** Холст однозначно задан исходником и видимыми версиями с их масками по порядку: одинаковый ключ — одинаковые пиксели */
   get contentKey(): string {
-    return this.drawOrder()
+    const layers = this.drawOrder()
       .map((p) => `${p.id}:${p.maskVersion}@${p.rect.x},${p.rect.y}`)
       .join(',');
+    return this.baseState ? `base${this.baseState}|${layers}` : layers;
   }
 
   /** То же со скрытыми слоями — они тоже ложатся в проект .caaa */
   get layersKey(): string {
-    return this.patches.map((p) => `${p.id}:${p.maskVersion}@${p.rect.x},${p.rect.y}${p.active ? '' : ':off'}`).join(',');
+    const layers = this.patches.map((p) => `${p.id}:${p.maskVersion}@${p.rect.x},${p.rect.y}${p.active ? '' : ':off'}`).join(',');
+    return this.baseState ? `base${this.baseState}|${layers}` : layers;
   }
 
   /** Объекты с именами, частями и масками: меняется — проекту .caaa есть что сохранить */
@@ -306,6 +313,33 @@ export class CanvasDocument {
     if (full.active) this.recompute(this.clip(full.rect));
     this.record({ kind: 'add', patch: full, index: this.patches.length - 1 });
     return full;
+  }
+
+  /** Вписать участок в исходник (RGB размером с rect): так слои вливают в фон; ⌘Z возвращает прежний */
+  setBase(rect: Rect, rgb: Buffer): void {
+    if (rgb.length !== rect.width * rect.height * 3) throw new Error('Участок не того размера');
+    const before = Buffer.alloc(rgb.length);
+    for (let row = 0; row < rect.height; row++) {
+      const from = ((rect.y + row) * this.width + rect.x) * 3;
+      this.base.copy(before, row * rect.width * 3, from, from + rect.width * 3);
+    }
+    const op: HistoryOp = { kind: 'base', rect, before, after: Buffer.from(rgb), stateBefore: this.baseState, stateAfter: ++this.baseStates };
+    this.writeBase(rect, op.after, op.stateAfter);
+    this.record(op);
+  }
+
+  /** Удалить несколько версий разом: холст пересобирается один раз; ⌘Z возвращает их */
+  removePatches(patchIds: string[]): void {
+    const gone = new Set(patchIds);
+    const removed = this.patches.flatMap((p, index) => (gone.has(p.id) ? [{ patch: p, index }] : []));
+    if (!removed.length) return;
+    this.patches = this.patches.filter((p) => !gone.has(p.id));
+    this.sync();
+    const rect = removed.map((r) => this.clip(r.patch.rect)).reduce(union);
+    if (rect.width && rect.height) this.recompute(rect);
+    // С конца: отмена вставляет их обратно по возрастанию, на прежние места
+    const ops: HistoryOp[] = removed.reverse().map(({ patch, index }) => ({ kind: 'remove', patch, index }));
+    this.record(ops.length === 1 ? ops[0]! : { kind: 'group', ops });
   }
 
   /** Удалить версию; ⌘Z возвращает её */
@@ -459,6 +493,8 @@ export class CanvasDocument {
       this.applyMask(this.patch(op.patchId), op.before, op.changed);
     } else if (op.kind === 'move') {
       this.place(this.patch(op.patchId), op.from, op.to);
+    } else if (op.kind === 'base') {
+      this.writeBase(op.rect, op.before, op.stateBefore);
     } else {
       this.flip(op.patchId);
     }
@@ -485,9 +521,22 @@ export class CanvasDocument {
       this.applyMask(this.patch(op.patchId), op.after, op.changed);
     } else if (op.kind === 'move') {
       this.place(this.patch(op.patchId), op.to, op.from);
+    } else if (op.kind === 'base') {
+      this.writeBase(op.rect, op.after, op.stateAfter);
     } else {
       this.flip(op.patchId);
     }
+  }
+
+  /** Записать участок в исходник: его пирамида для «\» строится заново, холст пересобирается */
+  private writeBase(rect: Rect, rgb: Buffer, state: number): void {
+    for (let row = 0; row < rect.height; row++) {
+      rgb.copy(this.base, ((rect.y + row) * this.width + rect.x) * 3, row * rect.width * 3, (row + 1) * rect.width * 3);
+    }
+    this.baseState = state;
+    this.baseLevels = null;
+    for (const key of [...this.tiles.keys()]) if (key.startsWith('base:')) this.tiles.delete(key);
+    this.recompute(rect);
   }
 
   private record(op: HistoryOp): void {

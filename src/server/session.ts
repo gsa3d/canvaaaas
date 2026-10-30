@@ -11,6 +11,7 @@ import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, t
 import { encodeProject, isProject, isProjectPath, openProject, PROJECT_EXTENSION } from '../core/project.ts';
 import type { RecentFiles } from '../core/recent.ts';
 import {
+  applyLayer,
   blendFrame,
   buildLayer,
   criticImages,
@@ -20,6 +21,7 @@ import {
   layerAsGen,
   layerOver,
   measure,
+  type MaskedLayer,
   overviewImage,
   prepareEdit,
   retarget,
@@ -353,6 +355,7 @@ export class Session {
         width: doc.width,
         height: doc.height,
         rev: doc.rev,
+        baseState: doc.baseState,
         levels: doc.levelCount,
         tileSize: TILE_SIZE,
         style: doc.style,
@@ -1587,6 +1590,95 @@ export class Session {
   }
 
   /**
+   * Влить слой в фон: то, что от него видно (с заплаткой фона под ним), ложится в исходник, слой и все его версии уходят.
+   * Если под ним видны другие слои, нельзя: в исходнике он оказался бы под ними. Одним шагом ⌘Z
+   */
+  mergeIntoBase(objectId: string): Promise<void> {
+    return this.serialDoc((doc) => {
+      const obj = doc.object(objectId);
+      if (obj.hidden) throw new Error(`Слой «${obj.name}» скрыт: покажите его или удалите`);
+      // Слой, его части (из старых проектов) и заплатки фона под ними
+      const group = new Set([objectId, ...descendants(doc.objects, objectId).map((o) => o.id)]);
+      for (const f of doc.objects) if (f.kind === 'fill' && f.under && group.has(f.under)) group.add(f.id);
+      const order = doc.drawOrder();
+      const mine = order.filter((p) => p.object && group.has(p.object));
+      const top = order.lastIndexOf(mine.at(-1)!);
+      const under = order.slice(0, Math.max(0, top)).filter((p) => !(p.object && group.has(p.object)) && mine.some((m) => layersOverlap(p, m)));
+      if (under.length) {
+        const names = [...new Set(under.flatMap((p) => (p.object ? [doc.object(p.object).name] : [])))].map((n) => `«${n}»`);
+        throw new Error(names.length ? `Под слоем видны ${names.join(', ')}: сначала влейте их или объедините с ним` : 'Под слоем видны другие правки');
+      }
+      doc.batch(() => {
+        if (mine.length) {
+          const rect = mine.map((p) => intersect(p.rect, { x: 0, y: 0, width: doc.width, height: doc.height })).reduce(union);
+          const region = { data: Buffer.alloc(rect.width * rect.height * 3), rect, channels: 3 as const };
+          for (let row = 0; row < rect.height; row++) {
+            const from = ((rect.y + row) * doc.width + rect.x) * 3;
+            doc.base.copy(region.data, row * rect.width * 3, from, from + rect.width * 3);
+          }
+          for (const p of mine) applyLayer(region, p.rect, p.layer);
+          doc.setBase(rect, region.data);
+        }
+        doc.removePatches(doc.patches.filter((p) => p.object && group.has(p.object)).map((p) => p.id));
+        doc.setObjects(doc.objects.filter((o) => !group.has(o.id)).map((o) => (o.parent && group.has(o.parent) ? { ...o, parent: undefined } : o)));
+      });
+      this.changed();
+    });
+  }
+
+  /**
+   * Объединить слои в один: то, что сейчас видно от каждого, — одной картинкой, версии уходят. Новый слой встаёт на место
+   * верхнего из них и берёт его имя; заплатки фона под ними остаются — под ним. Одним шагом ⌘Z. Возвращает id
+   */
+  mergeLayers(ids: string[]): Promise<string> {
+    return this.serialDoc((doc) => {
+      const picked = [...new Set(ids)].map((id) => doc.object(id)).filter((o) => o.kind !== 'fill' && !o.hidden);
+      if (picked.length < 2) throw new Error('Объединяют два видимых слоя или больше');
+      const group = new Set(picked.flatMap((o) => [o.id, ...descendants(doc.objects, o.id).map((d) => d.id)]));
+      const mine = doc.drawOrder().filter((p) => p.object && group.has(p.object));
+      if (!mine.length) throw new Error('В этих слоях нечего объединять: у них нет своих пикселей');
+      let acc: MaskedLayer = mine[0]!;
+      for (const p of mine.slice(1)) acc = layerOver(acc, p);
+      const shape = trim({ rect: acc.rect, mask: acc.mask });
+      if (!shape) throw new Error('В этих слоях нечего объединять');
+      // Верхний — тот, чья версия рисуется последней; его место и имя
+      const top = doc.object(mine.at(-1)!.object!);
+      const topId = top.parent && group.has(top.parent) ? picked.find((o) => o.id === top.parent)?.id ?? top.id : top.id;
+      const merged: DocObject = { id: randomUUID(), name: doc.object(topId).name, ...shape, createdAt: new Date().toISOString(), version: doc.nextObjectVersion() };
+      const next = doc.objects.flatMap((o): DocObject[] => {
+        if (o.id === topId) return [merged];
+        if (group.has(o.id)) return [];
+        if (o.kind === 'fill' && o.under && group.has(o.under)) return [{ ...o, under: merged.id }];
+        return [o.parent && group.has(o.parent) ? { ...o, parent: undefined } : o];
+      });
+      doc.batch(() => {
+        doc.removePatches(doc.patches.filter((p) => p.object && group.has(p.object)).map((p) => p.id));
+        doc.setObjects(next);
+        doc.addPatch({ id: randomUUID(), ...acc, feather: LIFT_FEATHER, prompt: merged.name, jobId: `merge:${merged.id}`, variant: 0, createdAt: merged.createdAt, object: merged.id, lifted: true });
+      });
+      this.changed();
+      return merged.id;
+    });
+  }
+
+  /** Свести все слои: то, что видно, становится исходником, слои (и скрытые) и их версии уходят. Одним шагом ⌘Z */
+  flattenLayers(): Promise<void> {
+    return this.serialDoc((doc) => {
+      if (!doc.objects.length && !doc.patches.length) throw new Error('Слоёв нет: сводить нечего');
+      const order = doc.drawOrder();
+      doc.batch(() => {
+        if (order.length) {
+          const rect = order.map((p) => intersect(p.rect, { x: 0, y: 0, width: doc.width, height: doc.height })).reduce(union);
+          doc.setBase(rect, doc.region(rect));
+        }
+        doc.removePatches(doc.patches.map((p) => p.id));
+        doc.setObjects([]);
+      });
+      this.changed();
+    });
+  }
+
+  /**
    * Дорисовать фон под слоем: задача в очереди, где модель рисует то, что за ним, — область ей стирают, с запасом вокруг
    * контура. Первый готовый вариант снимает исходник слоя и заводит под ним заплатку фона; слой с тех пор можно сдвигать
    * и скрывать. Уже отделённому — ещё варианты заплатки
@@ -1733,6 +1825,17 @@ export class Session {
 /** Слой отделённого объекта; нет — объект не отделён */
 function liftedLayer(doc: CanvasDocument, objectId: string): Patch | undefined {
   return doc.patches.findLast((p) => p.lifted && p.object === objectId);
+}
+
+/** Видны ли где-то обе версии разом: пиксели, где у обеих есть альфа */
+function layersOverlap(a: Patch, b: Patch): boolean {
+  const r = intersect(a.rect, b.rect);
+  for (let y = r.y; y < r.y + r.height; y++) {
+    for (let x = r.x; x < r.x + r.width; x++) {
+      if (a.layer[((y - a.rect.y) * a.rect.width + x - a.rect.x) * 4 + 3]! > 0 && b.layer[((y - b.rect.y) * b.rect.width + x - b.rect.x) * 4 + 3]! > 0) return true;
+    }
+  }
+  return false;
 }
 
 /** Где ищет палочка: в слое owner или на фоне — всё, кроме видимых слоёв */

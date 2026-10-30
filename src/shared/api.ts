@@ -41,6 +41,8 @@ export interface DocDto {
   width: number;
   height: number;
   rev: number;
+  /** Номер состояния исходника: растёт, когда в него вливают слои (тайлы «\» кэшируются по нему) */
+  baseState: number;
   levels: number;
   tileSize: number;
   style: string;
@@ -387,6 +389,9 @@ export type AppCommand =
   | 'deselect'
   | 'save-object'
   | 'cut-object'
+  | 'merge-layers'
+  | 'merge-down'
+  | 'flatten'
   | 'zoom-fit'
   | 'zoom-100'
   | 'zoom-50'

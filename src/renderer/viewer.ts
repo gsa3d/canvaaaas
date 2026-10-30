@@ -440,7 +440,7 @@ export class CanvasView {
 
   private baseTileUrl(doc: DocDto, level: number, x: number, y: number): string {
     const maxLevel = Math.ceil(Math.log2(Math.max(doc.width, doc.height)));
-    return `/api/doc/base/${maxLevel - level}/${x}/${y}.jpg?doc=${doc.id}`;
+    return `/api/doc/base/${maxLevel - level}/${x}/${y}.jpg?doc=${doc.id}&base=${doc.baseState}`;
   }
 
   setSelection(shapes: MaskShape[]): void {

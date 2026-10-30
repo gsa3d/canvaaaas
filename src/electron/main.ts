@@ -112,8 +112,18 @@ function buildMenu(win: BrowserWindow, session: Session): void {
         { role: 'selectAll', label: 'Выбрать всё' },
         { type: 'separator' },
         { ...item('Снять выделение', 'deselect', 'CmdOrCtrl+D'), enabled: hasDoc },
+      ],
+    },
+    {
+      label: 'Слой',
+      submenu: [
         { ...item('Слой из выделения', 'save-object', 'CmdOrCtrl+J'), enabled: hasDoc },
         { ...item('Вырезать в слой', 'cut-object', 'CmdOrCtrl+Shift+J'), enabled: hasDoc },
+        { type: 'separator' },
+        { ...item('Объединить слои', 'merge-layers', 'CmdOrCtrl+E'), enabled: hasDoc },
+        { ...item('Влить в фон', 'merge-down'), enabled: hasDoc },
+        { type: 'separator' },
+        { ...item('Свести все слои', 'flatten'), enabled: hasDoc },
       ],
     },
     {

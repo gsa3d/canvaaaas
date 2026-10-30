@@ -300,6 +300,19 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     await session.deleteObject(id!);
     json(res, { ok: true });
   });
+  route('POST', '/api/objects/:id/merge-down', async (_req, res, [id]) => {
+    await session.mergeIntoBase(id!);
+    json(res, { ok: true });
+  });
+  route('POST', '/api/objects/merge', async (req, res) => {
+    const { ids } = await readJson<{ ids: string[] }>(req);
+    if (!Array.isArray(ids)) throw new HttpError(400, 'Нет слоёв');
+    json(res, { id: await session.mergeLayers(ids.map(String)) });
+  });
+  route('POST', '/api/doc/flatten', async (_req, res) => {
+    await session.flattenLayers();
+    json(res, { ok: true });
+  });
   route('POST', '/api/objects/:id/detach', async (req, res, [id]) => {
     const body = await readJson<DetachRequest>(req);
     json(res, { id: session.detachObject(id!, body) });

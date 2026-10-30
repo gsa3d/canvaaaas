@@ -616,6 +616,44 @@ export function App() {
     const o = await saveObject();
     if (o) await detach(o);
   };
+  /** ⌘E: слои в выделении (Shift-щелчком в списке) и тот, в котором работают, — одним слоем; работа сразу в нём */
+  const mergeLayers = async () => {
+    const ids = [...new Set([...selectedObjects, ...(active ? [active] : [])])];
+    if (ids.length < 2) {
+      notify('Выделите в «Слоях» два слоя или больше: Shift-щелчок', false);
+      return;
+    }
+    try {
+      const { id } = await post<{ id: string }>('/api/objects/merge', { ids });
+      const seq = ++refreshSeq.current;
+      const s = await getState();
+      if (seq === refreshSeq.current) setState(s);
+      const o = s.objects.find((x) => x.id === id);
+      if (o) enterLayer(o);
+      notify('Слои объединены. ⌘Z вернёт их', false);
+    } catch (err) {
+      fail(err);
+    }
+  };
+  /** Влить слой в фон: то, что от него видно, становится исходником */
+  const mergeDown = (o: ObjectDto | undefined) => {
+    if (!o) {
+      notify('Откройте слой: щелчок по нему', false);
+      return;
+    }
+    post(`/api/objects/${o.id}/merge-down`).then(() => {
+      if (active === o.id) setActive(null);
+      clearSelection();
+      notify(`«${short(o.name)}» влит в фон. ⌘Z вернёт`, false);
+    }, fail);
+  };
+  /** Свести все слои в плоскую картинку */
+  const flatten = () =>
+    post('/api/doc/flatten').then(() => {
+      setActive(null);
+      clearSelection();
+      notify('Слои сведены. ⌘Z вернёт их', false);
+    }, fail);
   /**
    * Щелчок по слою в списке — работа в нём: его маска становится выделением; с ⌘ или Shift — маска добавляется
    * к выделению или убирается из него, а слой, в котором работают, тот же
@@ -826,6 +864,15 @@ export function App() {
       case 'cut-object':
         void cutObject();
         break;
+      case 'merge-layers':
+        void mergeLayers();
+        break;
+      case 'merge-down':
+        mergeDown(activeObj ?? (selectedObjects.size === 1 ? objects.find((x) => selectedObjects.has(x.id)) : undefined));
+        break;
+      case 'flatten':
+        void flatten();
+        break;
       case 'zoom-fit':
         view?.fit();
         break;
@@ -919,6 +966,7 @@ export function App() {
         s: 'save',
         d: 'deselect',
         j: 'save-object',
+        e: 'merge-layers',
         '0': 'zoom-fit',
         '1': 'zoom-100',
         '2': 'zoom-50',
@@ -1489,6 +1537,7 @@ export function App() {
               onExpand={expandVersion}
               onFill={(o) => void detach(o)}
               onDeleteVersion={deleteVersion}
+              onMergeDown={mergeDown}
               onDelete={deleteObject}
             />
           </>
@@ -1819,6 +1868,7 @@ function LayersPanel(props: {
   onExpand: (patch: PatchDto) => void;
   onFill: (o: ObjectDto) => void;
   onDeleteVersion: (patch: PatchDto) => void;
+  onMergeDown: (o: ObjectDto) => void;
   onDelete: (o: ObjectDto) => void;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
@@ -1850,6 +1900,7 @@ function LayersPanel(props: {
           ]
         : []),
       ...(!fill && !props.detaching.has(o.id) ? [{ label: o.filled ? 'Ещё варианты фона' : 'Дорисовать фон под слоем', run: () => props.onFill(o) }] : []),
+      ...(!o.hidden ? [{ label: 'Влить в фон', run: () => props.onMergeDown(o) }] : []),
       ...(current ? [{ label: 'Удалить версию', run: () => props.onDeleteVersion(current), danger: true }] : []),
       { label: fill ? 'Удалить заплатку' : o.filled ? 'Убрать с холста' : 'Удалить слой', run: () => props.onDelete(o), danger: true },
     ];
