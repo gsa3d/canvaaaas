@@ -1,9 +1,10 @@
 // Выделение объектов: SAM 2.1 от Meta (Apache 2.0) в onnxruntime-node, ONNX-сборка AnyLabeling.
-// Кодировщик превращает участок холста в признаки — раз на участок, около секунды на WebGPU; декодер по точкам,
-// рамке и прежней маске объекта даёт три маски разного охвата («деталь / часть / целое») за ~20 мс.
+// Кодировщик превращает участок холста в признаки — раз на участок, секунды на WebGPU; декодер по точкам,
+// рамке и прежней маске объекта даёт три маски разного охвата («деталь / часть / целое») за десятки миллисекунд.
 // Участок сжимается в 1024×1024 без сохранения пропорций, как у SAM 2. Итоги разведки — docs/recon-objects.md.
-import ort from 'onnxruntime-node';
+// Сама модель считает в своём потоке (segment-worker.ts): onnxruntime держит поток, пока считает.
 import sharp from 'sharp';
+import { Worker } from 'node:worker_threads';
 import type { Rect } from './frame.ts';
 
 const SIZE = 1024;
@@ -20,12 +21,10 @@ export interface Bitmap {
   mask: Uint8Array;
 }
 
-/** Признаки участка холста */
+/** Признаки участка холста: они лежат в потоке модели под этим id */
 export interface Embedding {
   crop: Rect;
-  embed: ort.Tensor;
-  f0: ort.Tensor;
-  f1: ort.Tensor;
+  id: number;
 }
 
 export interface SegmentPrompt {
@@ -48,39 +47,98 @@ export interface Candidate {
 
 export type Backend = 'webgpu' | 'cpu';
 
+/** Запрос в поток модели; seq — номер для ответа */
+export type WorkerRequest =
+  | { seq: number; type: 'load'; encoder: string; decoder: string; prefer: Backend }
+  | { seq: number; type: 'encode'; id: number; input: Float32Array; size: number }
+  | { seq: number; type: 'decode'; id: number; coords: Float32Array; labels: Float32Array; hint: Float32Array; hasHint: boolean; low: number }
+  | { seq: number; type: 'touch'; id: number };
+
+/** Ответ потока модели: ошибка или то, что просили */
+export interface WorkerReply {
+  seq: number;
+  error?: string;
+  backend?: Backend;
+  masks?: Float32Array;
+  dims?: number[];
+  scores?: Float32Array;
+}
+
+type Request = WorkerRequest extends infer R ? (R extends WorkerRequest ? Omit<R, 'seq'> : never) : never;
+
+/** Поток модели рядом с исходником; в сборке Electron — рядом с main.mjs */
+function workerUrl(): URL {
+  return new URL(import.meta.url.endsWith('.ts') ? './segment-worker.ts' : './segment-worker.mjs', import.meta.url);
+}
+
 export class Segmenter {
   readonly backend: Backend;
-  private readonly enc: ort.InferenceSession;
-  private readonly dec: ort.InferenceSession;
+  private readonly worker: Worker;
+  private readonly pending: Map<number, { resolve: (r: WorkerReply) => void; reject: (err: Error) => void }>;
+  private seq = 0;
+  private embeddings = 0;
   /** Сеансы ONNX зовутся строго по очереди */
   private chain: Promise<unknown> = Promise.resolve();
 
-  private constructor(enc: ort.InferenceSession, dec: ort.InferenceSession, backend: Backend) {
-    this.enc = enc;
-    this.dec = dec;
+  private constructor(worker: Worker, pending: Segmenter['pending'], backend: Backend) {
+    this.worker = worker;
+    this.pending = pending;
     this.backend = backend;
   }
 
   /** Кодировщик — на WebGPU, если он есть (втрое быстрее, маски те же), иначе на процессоре; декодер всегда на процессоре */
   static async load(encoder: string, decoder: string, prefer: Backend = 'webgpu'): Promise<Segmenter> {
-    const opts = (ep: Backend): ort.InferenceSession.SessionOptions => ({ executionProviders: [ep], logSeverityLevel: 3 });
-    let backend: Backend = prefer;
-    let enc: ort.InferenceSession;
+    const worker = new Worker(workerUrl());
+    const pending: Segmenter['pending'] = new Map();
+    const fail = (err: Error) => {
+      for (const p of pending.values()) p.reject(err);
+      pending.clear();
+    };
+    worker.on('message', (reply: WorkerReply) => {
+      const p = pending.get(reply.seq);
+      if (!p) return;
+      pending.delete(reply.seq);
+      // Ждать нечего — поток не держит процесс (тесты, выход из приложения)
+      if (!pending.size) worker.unref();
+      if (reply.error) p.reject(new Error(reply.error));
+      else p.resolve(reply);
+    });
+    worker.on('error', (err: unknown) => fail(err instanceof Error ? err : new Error(String(err))));
+    worker.on('exit', (code) => fail(new Error(`Поток выделения объектов завершился (код ${code})`)));
+    const s = new Segmenter(worker, pending, prefer);
     try {
-      enc = await ort.InferenceSession.create(encoder, opts(prefer));
+      const { backend } = await s.request({ type: 'load', encoder, decoder, prefer });
+      (s as { backend: Backend }).backend = backend!;
     } catch (err) {
-      if (prefer === 'cpu') throw err;
-      backend = 'cpu';
-      enc = await ort.InferenceSession.create(encoder, opts('cpu'));
+      await worker.terminate();
+      throw err;
     }
-    const dec = await ort.InferenceSession.create(decoder, opts('cpu'));
-    return new Segmenter(enc, dec, backend);
+    return s;
+  }
+
+  /** Освободить поток модели */
+  close(): Promise<number> {
+    return this.worker.terminate();
+  }
+
+  private request(msg: Request, transfer: ArrayBuffer[] = []): Promise<WorkerReply> {
+    const seq = ++this.seq;
+    return new Promise((resolve, reject) => {
+      this.pending.set(seq, { resolve, reject });
+      this.worker.ref();
+      this.worker.postMessage({ ...msg, seq }, transfer);
+    });
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.chain.then(fn);
     this.chain = next.catch(() => undefined);
     return next;
+  }
+
+  /** Признаки снова нужны: пусть поток модели не выбрасывает их первыми */
+  touch(emb: Embedding): void {
+    void this.request({ type: 'touch', id: emb.id }).catch(() => undefined);
   }
 
   /** Признаки участка crop; rgb — его пиксели, RGB размером с crop. shouldRun — ещё нужны ли они, когда подошла очередь */
@@ -93,11 +151,12 @@ export class Segmenter {
     for (let i = 0; i < SIZE * SIZE; i++) {
       for (let c = 0; c < 3; c++) input[c * SIZE * SIZE + i] = (small[i * 3 + c]! / 255 - MEAN[c]!) / STD[c]!;
     }
-    const out = await this.serial(() => {
+    const id = ++this.embeddings;
+    await this.serial(() => {
       if (shouldRun && !shouldRun()) throw new Error('Вид сменился');
-      return this.enc.run({ image: new ort.Tensor('float32', input, [1, 3, SIZE, SIZE]) });
+      return this.request({ type: 'encode', id, input, size: SIZE }, [input.buffer]);
     });
-    return { crop, embed: out.image_embed!, f0: out.high_res_feats_0!, f1: out.high_res_feats_1! };
+    return { crop, id };
   }
 
   /** Три маски по подсказке. Декодер этой сборки принимает один набор подсказок за вызов */
@@ -118,21 +177,15 @@ export class Segmenter {
     });
     const hint = prompt.hint ? hintLogits(prompt.hint, crop, prompt.unsure) : new Float32Array(LOW * LOW);
     const out = await this.serial(() =>
-      this.dec.run({
-        image_embed: emb.embed,
-        high_res_feats_0: emb.f0,
-        high_res_feats_1: emb.f1,
-        point_coords: new ort.Tensor('float32', coords, [1, pts.length, 2]),
-        point_labels: new ort.Tensor('float32', labels, [1, pts.length]),
-        mask_input: new ort.Tensor('float32', hint, [1, 1, LOW, LOW]),
-        has_mask_input: new ort.Tensor('float32', new Float32Array([prompt.hint ? 1 : 0]), [1]),
-      }),
+      this.request(
+        { type: 'decode', id: emb.id, coords, labels, hint, hasHint: !!prompt.hint, low: LOW },
+        [coords.buffer, labels.buffer, hint.buffer as ArrayBuffer],
+      ),
     );
-    const masks = out.masks!;
-    const [, k, h, w] = masks.dims as number[];
+    const [, k, h, w] = out.dims!;
     if (h !== LOW || w !== LOW) throw new Error(`Декодер вернул маски ${w}×${h}, а не ${LOW}×${LOW}`);
-    const data = masks.data as Float32Array;
-    const scores = out.iou_predictions!.data as Float32Array;
+    const data = out.masks!;
+    const scores = out.scores!;
     return Array.from({ length: k! }, (_, j) => {
       const logits = Float32Array.from(data.subarray(j * LOW * LOW, (j + 1) * LOW * LOW));
       cleanLogits(logits);

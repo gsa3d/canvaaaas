@@ -1,9 +1,12 @@
-// Сборка main-процесса Electron: один ESM-файл, все пакеты из node_modules остаются внешними.
+// Сборка main-процесса Electron: ESM-файл main.mjs и рядом поток выделения объектов segment-worker.mjs,
+// все пакеты из node_modules остаются внешними.
 import { build } from 'esbuild';
 
 await build({
-  entryPoints: ['src/electron/main.ts'],
-  outfile: 'dist/electron/main.mjs',
+  entryPoints: ['src/electron/main.ts', 'src/core/segment-worker.ts'],
+  outdir: 'dist/electron',
+  entryNames: '[name]',
+  outExtension: { '.js': '.mjs' },
   bundle: true,
   platform: 'node',
   format: 'esm',

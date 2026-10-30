@@ -5,6 +5,7 @@ import type { Bitmap } from '../src/core/segment.ts';
 import { modelInstalled } from '../src/core/segment-model.ts';
 import { envOnlyStore } from '../src/core/secrets.ts';
 import { Session } from '../src/server/session.ts';
+import { OUTSIDE_LAYER } from '../src/shared/api.ts';
 
 const W = 800;
 const H = 600;
@@ -76,5 +77,27 @@ describe.skipIf(!modelInstalled())('SAM', () => {
     await s.undo();
     expect(doc.patches).toHaveLength(0);
     expect(iou(doc.object(id), discMask(80))).toBeGreaterThan(0.9);
+  }, 60_000);
+
+  it('в слое палочка ищет только в нём: круг обрезается по слою, щелчок мимо слоя — ошибка', async () => {
+    const s = new Session('mock', envOnlyStore());
+    await s.newDocument(W, H, [235, 232, 225]);
+    const doc = s.doc!;
+    paint({ composite: doc.base, width: W }, 80);
+    paint(doc, 80);
+    doc.rev++;
+    // Слой — левая половина круга
+    const half = await s.saveObject([{ kind: 'rect', x: 200, y: 200, width: 100, height: 200 }]);
+    const view = { x: 0, y: 0, width: W, height: H };
+    const pick = await s.pickObject({ view, points: [{ x: 270, y: 300, positive: true }], within: half });
+    for (const level of pick.levels) {
+      const b = s.segmentation.bitmap(level.id);
+      expect(b.rect.x).toBeGreaterThanOrEqual(200);
+      expect(b.rect.x + b.rect.width).toBeLessThanOrEqual(300);
+    }
+    // Самый крупный уровень — вся левая половина круга
+    const whole = s.segmentation.bitmap(pick.levels.at(-1)!.id);
+    expect(area(whole)).toBeGreaterThan(0.85 * (Math.PI * 80 * 80) / 2);
+    await expect(s.pickObject({ view, points: [{ x: 620, y: 200, positive: true }], within: half })).rejects.toThrow(OUTSIDE_LAYER);
   }, 60_000);
 });

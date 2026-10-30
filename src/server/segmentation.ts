@@ -6,6 +6,7 @@ import sharp from 'sharp';
 import type { CanvasDocument, DocObject } from '../core/document.ts';
 import { intersect, type Rect } from '../core/frame.ts';
 import { lineMap, snapToLines } from '../core/lines.ts';
+import { MASK_THRESHOLD } from '../core/mask.ts';
 import { area, changedPixels, clipBitmap, clipScaled, overlap, touchedEdge } from '../core/objects.ts';
 import { levels, rasterize, Segmenter, type Backend, type Bitmap, type Candidate, type Embedding, type SegmentPrompt } from '../core/segment.ts';
 import { installModel, modelFiles, modelInstalled } from '../core/segment-model.ts';
@@ -157,6 +158,8 @@ export class Segmentation {
     );
     if (hit) {
       this.embeddings = [hit, ...this.embeddings.filter((e) => e !== hit)];
+      // Признаки лежат в потоке модели: там они тоже свежие, иначе выбросились бы раньше, чем здесь
+      hit.emb.then((e) => this.model?.then((s) => s.touch(e))).catch(() => undefined);
       return hit.emb;
     }
     const seq = view ? ++this.viewSeq : 0;
@@ -198,6 +201,7 @@ export class Segmentation {
   async hover(doc: CanvasDocument, view: RectDto, x: number, y: number, within?: Bitmap): Promise<{ png: Buffer; rect: RectDto } | null> {
     const crop = this.viewRect(doc, view);
     if (x < crop.x || y < crop.y || x >= crop.x + crop.width || y >= crop.y + crop.height) return null;
+    if (within && !covers(within, x, y)) return null;
     const emb = await this.embedding(doc, crop, { view: true, need: { x: Math.floor(x), y: Math.floor(y), width: 1, height: 1 } });
     const lv = levels(await (await this.segmenter()).decode(emb, { points: [{ x, y, positive: true }] }));
     const c = lv.levels[lv.best];
@@ -222,6 +226,8 @@ export class Segmentation {
     const points = req.points ?? [];
     const box = req.box && intersect(req.box, { x: 0, y: 0, width: doc.width, height: doc.height });
     if (!points.length && !box?.width) throw new Error('Нет подсказки для выделения');
+    // Мимо слоя — сразу: крупный уровень (фон) задевает слой, и щелчок снаружи выделил бы его весь
+    if (within && (points.some((p) => p.positive && !covers(within, p.x, p.y)) || (box && !intersect(box, within.rect).width))) throw new Error(OUTSIDE_LAYER);
     // Точки прежнего вида (Shift и Alt после прокрутки) тоже должны попасть в участок
     let crop = this.viewRect(doc, req.view);
     const need = [...points.map((p) => ({ x: Math.floor(p.x), y: Math.floor(p.y), width: 1, height: 1 })), ...(box?.width ? [box] : [])].reduce(union);
@@ -364,6 +370,13 @@ export class Segmentation {
     }
     return out;
   }
+}
+
+/** Точка холста внутри маски */
+function covers(b: Bitmap, x: number, y: number): boolean {
+  const lx = Math.floor(x) - b.rect.x;
+  const ly = Math.floor(y) - b.rect.y;
+  return lx >= 0 && ly >= 0 && lx < b.rect.width && ly < b.rect.height && b.mask[ly * b.rect.width + lx]! >= MASK_THRESHOLD;
 }
 
 /** Уровни, обрезанные по слою, часто совпадают (часть и целое — весь слой): из почти одинаковых остаётся мельчайший */

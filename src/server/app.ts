@@ -251,7 +251,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
   route('POST', '/api/segment/view', async (req, res) => {
     const { view } = await readJson<{ view: RectDto }>(req);
-    await session.prepareView(view);
+    // Признаки считаются секунды: ответ сразу, иначе запрос держал бы одно из шести соединений браузера и тайлы ждали бы
+    session.prepareView(view).catch(() => undefined);
     json(res, { ok: true });
   });
   route('GET', '/api/segment/hover.png', async (_req, res, _p, url) => {
