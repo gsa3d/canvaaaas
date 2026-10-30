@@ -18,6 +18,7 @@ import {
   IconLayersSubtract,
   IconLayersUnion,
   IconMarquee2,
+  IconMarqueeOff,
   IconMask,
   IconMinus,
   IconPencil,
@@ -1226,6 +1227,18 @@ export function App() {
                   <EdgeControl px={edgePx} onChange={changeEdge} />
                 </>
               )}
+              {selection.length > 0 && (
+                <span class="opt-actions">
+                  {hasSelection && !(selectedObjects.size === 1 && selection.length === 1) && (
+                    <button class="icon" title="Слой из выделения (⌘J)" aria-label="Слой из выделения" onClick={() => void saveObject()}>
+                      <IconCubePlus size={16} stroke={STROKE} />
+                    </button>
+                  )}
+                  <button class="icon" title="Снять выделение (⌘D)" aria-label="Снять выделение" onClick={clearSelection}>
+                    <IconMarqueeOff size={16} stroke={STROKE} />
+                  </button>
+                </span>
+              )}
             </>
           ))}
       </div>
@@ -1306,17 +1319,9 @@ export function App() {
                   сгенерировать.
                 </Help>
               </h2>
-              {(selection.length > 0 || sketch.length > 0) && (
+              {sketch.length > 0 && (
                 <div class="chips">
-                  {selection.length > 0 && (
-                    <Chip icon={IconMarquee2} label="Выделение" clear="Снять выделение (⌘D)" onClear={clearSelection} />
-                  )}
-                  {hasSelection && !(selectedObjects.size === 1 && selection.length === 1) && (
-                    <button class="chip-action" title="Слой из выделения (⌘J)" aria-label="Слой из выделения" onClick={() => void saveObject()}>
-                      <IconCubePlus size={15} stroke={STROKE} />
-                    </button>
-                  )}
-                  {sketch.length > 0 && <Chip icon={IconScribble} label="Набросок" clear="Стереть набросок" onClear={clearSketch} />}
+                  <Chip icon={IconScribble} label="Набросок" clear="Стереть набросок" onClear={clearSketch} />
                 </div>
               )}
               <textarea rows={3} placeholder="Что должно получиться" value={prompt} onInput={(e) => setPrompt(e.currentTarget.value)} />

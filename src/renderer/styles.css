@@ -455,6 +455,20 @@ button.swatch.active,
   flex: none;
 }
 
+/* Действия с выделением — справа при любом инструменте */
+.opt-actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+  flex: none;
+}
+
+.opt-actions button.icon {
+  min-height: 26px;
+  width: 28px;
+  padding: 0;
+}
+
 /* ——— Холст ——— */
 
 .stage {
@@ -1483,23 +1497,6 @@ button.danger {
     transition: none !important;
     animation: none !important;
   }
-}
-
-button.chip-action {
-  min-height: 0;
-  width: 24px;
-  height: 22px;
-  padding: 0;
-  border-color: transparent;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-button.chip-action:hover:not(:disabled) {
-  background: var(--accent);
-  border-color: transparent;
-  color: #fff;
 }
 
 .objects {
