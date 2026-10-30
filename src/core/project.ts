@@ -1,19 +1,23 @@
-// Свой формат canvaaaas, .caaa: исходник и слои правок вместе с масками. После повторного открытия
-// слои можно скрывать и править их маски, как до сохранения; история отмены начинается заново.
-// Внутри — подпись, длина и JSON-описание, затем PNG подряд: исходник, у каждого слоя — RGBA
-// (ответ модели и растушёванная маска в альфе) и маска до растушёвки, маски объектов; в конце — референсы слоёв,
-// чтобы слой можно было перерисовать ещё раз и после повторного открытия. Набросок и текст директора — в описании.
+// Свой формат canvaaaas, .caaa: исходник, слои и все их версии с масками. После повторного открытия
+// версии можно переключать, слои скрывать и править маски, как до сохранения; история отмены начинается заново.
+// Внутри — подпись, длина и JSON-описание, затем PNG подряд: исходник, у каждой версии — RGBA
+// (ответ модели и растушёванная маска в альфе) и маска до растушёвки, маски слоёв; в конце — референсы версий,
+// чтобы перерисовать ещё раз и после повторного открытия. Набросок и текст директора — в описании.
+// В описании версии лежат в layers, а слои — в objects: так назывались правки и объекты в проектах 1.
+import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
 import sharp from 'sharp';
 import type { InputImage } from '../providers/types.ts';
 import type { ModelChoice, SizeChoice, SketchStroke } from '../shared/api.ts';
 import { CanvasDocument, type DocObject, type Patch } from './document.ts';
 import type { Rect } from './frame.ts';
+import { layerName, trim } from './objects.ts';
 import { checkSketch } from './sketch.ts';
 
 export const PROJECT_EXTENSION = 'caaa';
 const MAGIC = Buffer.from('CAAA\r\n\x1a\n', 'latin1');
-const VERSION = 1;
+/** 2 — слои с версиями: у слоя текущая версия и видимость, заплатки фона; проекты 1 при открытии переводятся */
+const VERSION = 2;
 
 /** Кусок файла после описания */
 interface Part {
@@ -48,13 +52,26 @@ interface Manifest {
     hide?: boolean;
     directed?: string;
     sketch?: SketchStroke[];
-    /** Правили этот объект */
+    /** Слой, чья это версия (в проектах 1 — объект, который правили) */
     object?: string;
-    /** Отделённый объект object */
+    /** Снятый исходник отделённого слоя object */
     lifted?: boolean;
   }[];
-  /** Объекты: имя, маска размером с rect и объект, частью которого этот является */
-  objects?: { id: string; name: string; rect: Rect; parent?: string; createdAt: string; lost?: boolean; mask: Part }[];
+  /** Слои: имя, маска размером с rect, слой, частью которого этот является, видимость, текущая версия, заплатка фона */
+  objects?: {
+    id: string;
+    name: string;
+    rect: Rect;
+    parent?: string;
+    createdAt: string;
+    lost?: boolean;
+    hidden?: boolean;
+    current?: string;
+    kind?: 'fill';
+    under?: string;
+    edit?: boolean;
+    mask: Part;
+  }[];
   /** Референсы: картинка, которая ушла с несколькими правками, хранится один раз */
   refs?: { mimeType: string; data: Part }[];
 }
@@ -140,6 +157,11 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
     parent: o.parent,
     createdAt: o.createdAt,
     lost: o.lost || undefined,
+    hidden: o.hidden || undefined,
+    current: o.current,
+    kind: o.kind,
+    under: o.under,
+    edit: o.edit || undefined,
     mask: part(images[first + i]!),
   }));
   manifest.refs = refs.map((r) => ({ mimeType: r.mimeType, data: part(r.data) }));
@@ -185,6 +207,7 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
   ]);
   const objectMasks = await Promise.all(objectList.map((o) => decode(o.mask, o.rect.width, o.rect.height, 1)));
   const ids = new Set(objectList.map((o) => o.id));
+  const layerIds = new Set(manifest.layers.map((l) => l.id));
   const objects = objectList.map(
     (o, i): DocObject => ({
       id: o.id,
@@ -195,6 +218,11 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       createdAt: o.createdAt,
       version: 0,
       lost: o.lost === true || undefined,
+      hidden: o.hidden === true || undefined,
+      current: typeof o.current === 'string' && layerIds.has(o.current) ? o.current : undefined,
+      kind: o.kind === 'fill' ? 'fill' : undefined,
+      under: o.kind === 'fill' && typeof o.under === 'string' ? o.under : undefined,
+      edit: o.edit === true || undefined,
     }),
   );
   // Копия, а не кусок файла: иначе в памяти остался бы весь файл
@@ -229,10 +257,40 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       lifted: (l.lifted === true && typeof l.object === 'string' && ids.has(l.object)) || undefined,
     };
   });
+  if (manifest.version < 2) migrate(patches, objects);
   const doc = CanvasDocument.restore(name, width, height, base!, patches, objects);
   doc.style = manifest.style ?? '';
   basePngs.set(doc.base, Promise.resolve(Buffer.from(baseBytes)));
   return { doc, density: manifest.density };
+}
+
+/**
+ * Проект 1 — в слои с версиями: каждая правка становится слоем (имя — задача) с ней одной текущей версией, скрытая — скрытым
+ * слоем; снятый исходник отделённого объекта остаётся его, а фон, дорисованный под ним той же задачей, — заплаткой фона.
+ * Новые слои — поверх прежних объектов по порядку правок, поэтому холст тот же
+ */
+function migrate(patches: Patch[], objects: DocObject[]): void {
+  const lifted = new Map(patches.filter((p) => p.lifted && p.object).map((p) => [p.jobId, p.object!]));
+  for (const p of patches) {
+    if (p.lifted) continue;
+    const bitmap = trim({ rect: p.rect, mask: p.mask }) ?? { rect: { ...p.rect, width: 1, height: 1 }, mask: new Uint8Array([255]) };
+    const under = lifted.get(p.jobId);
+    const owner = under ? objects.find((o) => o.id === under) : undefined;
+    const layer: DocObject = {
+      id: randomUUID(),
+      name: owner ? `Фон под «${owner.name}»` : layerName(p.prompt),
+      ...bitmap,
+      createdAt: p.createdAt,
+      version: 0,
+      hidden: !p.active || undefined,
+      current: p.id,
+      kind: owner ? 'fill' : undefined,
+      under: owner?.id,
+      edit: !owner || undefined,
+    };
+    objects.push(layer);
+    p.object = layer.id;
+  }
 }
 
 /** Набросок слоя; испорченный не мешает открыть проект — слой просто остаётся без него */

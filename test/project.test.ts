@@ -183,3 +183,34 @@ describe('Проект .caaa', () => {
     await expect(t.openPath(broken)).rejects.toThrow(/Не открыть «broken.caaa»/);
   });
 });
+
+describe('Проект 1 — в слои с версиями', () => {
+  it('каждая правка — слоем с ней одной текущей версией, скрытая — скрытым слоем; холст тот же', async () => {
+    const s = new Session('mock', envOnlyStore());
+    await s.openDocument(await sharp(pattern(W, H), { raw: { width: W, height: H, channels: 3 } }).png().toBuffer(), 'a.png');
+    const doc = s.doc!;
+    doc.addPatch({ ...patch('p1', 100, 100, 300, 200, 12), prompt: 'кот на крыше' });
+    doc.addPatch({ ...patch('p2', 250, 150, 300, 300, 0), prompt: 'пёс' });
+    doc.addPatch(patch('p3', 500, 300, 200, 200, 8));
+    doc.togglePatch('p3');
+    // Как писал проект 1: та же раскладка, только номер версии в описании
+    const file = await encodeProject(doc);
+    const start = 8 + 4;
+    const length = file.readUInt32BE(8);
+    const manifest = JSON.parse(file.toString('utf8', start, start + length));
+    manifest.version = 1;
+    const json = Buffer.from(JSON.stringify(manifest), 'utf8');
+    const head = Buffer.alloc(4);
+    head.writeUInt32BE(json.length);
+    const old = Buffer.concat([file.subarray(0, 8), head, json, file.subarray(start + length)]);
+
+    const back = (await openProject(old, 'old.caaa')).doc;
+    expect(back.objects.map((o) => [o.name, o.current, o.hidden ?? false])).toEqual([
+      ['кот на крыше', 'p1', false],
+      ['пёс', 'p2', false],
+      ['правка p3', 'p3', true],
+    ]);
+    expect(back.patches.map((p) => p.object)).toEqual(back.objects.map((o) => o.id));
+    expect(back.composite.equals(doc.composite)).toBe(true);
+  });
+});

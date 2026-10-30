@@ -168,10 +168,9 @@ describe('Повтор с поправкой', () => {
     return { s, id, job };
   }
 
-  it('новые варианты идут с поправленной задачей, прежние остаются; принятый слой помнит задачу и скрытие своего варианта', { timeout: 30_000 }, async () => {
+  it('новые варианты идут с поправленной задачей, прежние остаются; версия помнит задачу и скрытие своего варианта', { timeout: 30_000 }, async () => {
     const { s, id, job } = await setup(false);
     expect(job()).toMatchObject({ prompt: 'кот', hide: false });
-    s.selectVariant(id, 0);
     const more = s.moreVariants(id, 1, { prompt: '  пёс  ', hide: true });
     // Пока идёт новый вариант, готовый остаётся на холсте
     expect(job().status).toBe('done');
@@ -183,47 +182,43 @@ describe('Повтор с поправкой', () => {
       ['кот', false],
       ['пёс', true],
     ]);
-    // Задачу поправили — новый вариант сразу на холсте
+    // Задачу поправили — новый вариант сразу на холсте: он текущая версия слоя
     expect(selected).toBe(1);
+    const layer = s.state().objects[0]!;
+    expect(layer.current).toBe(variants[1]!.patch);
 
-    s.accept(id);
-    const patch = s.state().history[0]!;
+    const patch = s.state().history.find((p) => p.id === layer.current)!;
     expect(patch).toMatchObject({ prompt: 'пёс', hide: true });
     const reopened = await openProject(await encodeProject(s.doc!), 'x.caaa');
-    expect(reopened.doc.patches[0]).toMatchObject({ prompt: 'пёс', hide: true });
+    expect(reopened.doc.patches.find((p) => p.id === patch.id)).toMatchObject({ prompt: 'пёс', hide: true });
+    expect(reopened.doc.objects[0]).toMatchObject({ current: patch.id });
 
-    // «Ещё варианты» слоя с поправкой: нынешний слой — вариант по прежней задаче
+    // «Ещё варианты» версии с поправкой: она сама — вариант по прежней задаче
     const again = s.patchVariants(patch.id, { variants: 1, model: 'flash', size: 'auto', prompt: 'лиса', hide: false });
     await until(() => s.state().jobs.find((j) => j.id === again)?.status === 'done');
     const redo = s.state().jobs.find((j) => j.id === again)!;
-    expect(redo).toMatchObject({ prompt: 'лиса', hide: false, replaces: patch.id });
+    expect(redo).toMatchObject({ prompt: 'лиса', hide: false, from: patch.id, object: layer.id });
     expect(redo.variants.map((v) => [v.current ?? false, v.prompt, v.hide])).toEqual([
       [true, 'пёс', true],
       [false, 'лиса', false],
     ]);
   });
 
-  it('картинки для правки маски — в размере куска, с номером состояния маски; мазок отдаёт новый номер', { timeout: 30_000 }, async () => {
-    const { s, id, job } = await setup(true);
-    const { inside, maskRev } = job();
+  it('картинки для правки маски версии — в размере версии, с номером состояния маски; мазок отдаёт новый номер', { timeout: 30_000 }, async () => {
+    const { s, job } = await setup(true);
+    const { inside } = job();
+    const patch = s.state().history[0]!;
     const meta = async (part: string) => {
-      const img = await s.maskEditImage({ job: id, n: job().selected }, part);
+      const img = await s.maskEditImage(patch.id, part);
       return { ...(await sharp(img.data).metadata()), version: img.version };
     };
     for (const part of ['below', 'above', 'layer', 'mask']) {
-      expect(await meta(part)).toMatchObject({ width: inside!.width, height: inside!.height, version: maskRev });
+      expect(await meta(part)).toMatchObject({ width: inside!.width, height: inside!.height, version: 0 });
     }
-    const res = await s.editMask(id, [{ kind: 'stroke', points: [[350, 250], [400, 260]], size: 40, erase: true }]);
-    expect(res).toEqual({ version: maskRev + 1, rev: job().rev });
-    expect((await meta('mask')).version).toBe(maskRev + 1);
-    await expect(s.maskEditImage({ job: id, n: 7 }, 'layer')).rejects.toThrow('не готов');
-
-    s.accept(id);
-    const patch = s.state().history[0]!;
     const before = s.doc!.rev;
-    const edit = await s.editPatchMask(patch.id, [{ kind: 'rect', x: 0, y: 0, width: 5, height: 5 }]);
-    expect(edit.rev).toBeGreaterThanOrEqual(before);
-    const mask = await s.maskEditImage({ patch: patch.id }, 'mask');
-    expect(mask.version).toBe(edit.version);
+    const edit = await s.editPatchMask(patch.id, [{ kind: 'stroke', points: [[350, 250], [400, 260]], size: 40, erase: true }]);
+    expect(edit.rev).toBeGreaterThan(before);
+    expect((await meta('mask')).version).toBe(edit.version);
+    await expect(s.maskEditImage('нет', 'layer')).rejects.toThrow();
   });
 });

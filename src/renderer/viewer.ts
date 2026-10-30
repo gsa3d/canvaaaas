@@ -12,11 +12,12 @@ export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser' | 'sketch' | '
 /** Что фигура делает с выделением: заменяет его, добавляется к нему или вычитается */
 export type SelectOp = 'new' | 'add' | 'sub';
 
-/** Отделённый объект, который можно сдвинуть: его слой и где тот лежит */
+/** Слой, который можно сдвинуть: его версия на холсте (layer) и где она лежит, hit — где за слой можно взяться */
 export interface Movable {
   id: string;
   layer: string;
   rect: RectDto;
+  hit: RectDto;
 }
 
 /** Сдвиг объекта: пока тянут, и после — пока холст не догонит */
@@ -90,11 +91,6 @@ interface Draft {
   op?: SelectOp;
 }
 
-interface Layer {
-  key: string;
-  item?: OpenSeadragon.TiledImage;
-}
-
 type ItemEvent = { item: OpenSeadragon.TiledImage };
 
 function round(v: number): number {
@@ -147,8 +143,9 @@ export class CanvasView {
   private baseCount = 0;
   /** Версия холста, которая догружается; пока она есть, слои принятых правок не убираем */
   private pendingRev: number | null = null;
-  private readonly layers = new Map<string, Layer>();
-  private deferredRemovals: OpenSeadragon.TiledImage[] = [];
+  /** Исходник поверх холста, пока держат «\\» */
+  private compare: OpenSeadragon.TiledImage | null = null;
+  private comparing = false;
 
   private tool: Tool = 'rect';
   /** Режим выделения на панели инструмента; Shift и Alt меняют его на время щелчка */
@@ -332,8 +329,8 @@ export class CanvasView {
     this.baseItems.clear();
     this.baseCount = 0;
     this.pendingRev = null;
-    this.layers.clear();
-    this.deferredRemovals = [];
+    this.compare = null;
+    this.comparing = false;
   }
 
   private finishSwap(item: OpenSeadragon.TiledImage, rev: number): void {
@@ -347,8 +344,6 @@ export class CanvasView {
     }
     this.base = item;
     this.pendingRev = null;
-    for (const it of this.deferredRemovals) this.viewer.world.removeItem(it);
-    this.deferredRemovals = [];
     this.redraw();
   }
 
@@ -371,7 +366,7 @@ export class CanvasView {
     this.jobs = jobs;
     this.numbers = numbers;
     this.focused = focused;
-    this.syncLayers();
+    this.redraw();
   }
 
   /** Правка маски слоя или задачи; null — правку закончили */
@@ -407,60 +402,32 @@ export class CanvasView {
   /** Холст или слой задачи уже показывают всё, что нарисовали в законченной правке */
   private settled(preview: MaskPreview): boolean {
     if (preview.inflight > 0) return false;
-    const { kind, target } = preview.view;
-    if (kind === 'layer') return this.pendingRev === null && (this.doc?.rev ?? 0) >= preview.settleRev;
-    const job = this.jobs.find((j) => j.id === target);
-    if (!job || job.status !== 'done') return true;
-    const layer = this.layers.get(target);
-    return job.rev >= preview.settleRev && !!layer?.item && layer.key === `${job.selected}:${job.rev}`;
+    return this.pendingRev === null && (this.doc?.rev ?? 0) >= preview.settleRev;
   }
 
-  // Слои поверх холста: варианты задач
-  private syncLayers(): void {
-    const jobs = this.jobs;
-    const swapPending = this.pendingRev !== null;
+  /** Пока держат «\\» — исходник всей картинки поверх холста */
+  setCompare(on: boolean): void {
+    this.comparing = on;
+    if (!on) {
+      if (this.compare) this.viewer.world.removeItem(this.compare);
+      this.compare = null;
+      return;
+    }
+    const doc = this.doc;
+    if (!doc || this.compare) return;
+    this.viewer.addTiledImage({
+      tileSource: { ...this.tileSource(doc), getTileUrl: (level: number, x: number, y: number) => this.baseTileUrl(doc, level, x, y) } as object,
+      success: (event) => {
+        const item = (event as unknown as ItemEvent).item;
+        if (!this.comparing || this.doc?.id !== doc.id || this.compare) this.viewer.world.removeItem(item);
+        else this.compare = item;
+      },
+    });
+  }
 
-    const wanted = new Map<string, { key: string; url: string; rect: RectDto }>();
-    for (const job of jobs) {
-      if (job.status !== 'done' || !job.inside) continue;
-      wanted.set(job.id, {
-        key: `${job.selected}:${job.rev}`,
-        url: `/api/jobs/${job.id}/layer/${job.selected}.png?rev=${job.rev}`,
-        rect: job.inside,
-      });
-    }
-    for (const [id, layer] of this.layers) {
-      if (wanted.has(id)) continue;
-      this.layers.delete(id);
-      if (!layer.item) continue;
-      // Принятая правка уже в новом холсте — убираем её слой, когда тот догрузится
-      if (swapPending) this.deferredRemovals.push(layer.item);
-      else this.viewer.world.removeItem(layer.item);
-    }
-    for (const [id, want] of wanted) {
-      const layer = this.layers.get(id);
-      if (layer?.key === want.key) continue;
-      const next: Layer = { key: want.key };
-      this.layers.set(id, next);
-      const W = this.doc?.width ?? 1;
-      this.viewer.addSimpleImage({
-        url: want.url,
-        x: want.rect.x / W,
-        y: want.rect.y / W,
-        width: want.rect.width / W,
-        success: (event) => {
-          const item = (event as unknown as ItemEvent).item;
-          if (this.layers.get(id) !== next) {
-            this.viewer.world.removeItem(item);
-            return;
-          }
-          next.item = item;
-          if (layer?.item) this.viewer.world.removeItem(layer.item);
-          this.redraw();
-        },
-      });
-    }
-    this.redraw();
+  private baseTileUrl(doc: DocDto, level: number, x: number, y: number): string {
+    const maxLevel = Math.ceil(Math.log2(Math.max(doc.width, doc.height)));
+    return `/api/doc/base/${maxLevel - level}/${x}/${y}.jpg?doc=${doc.id}`;
   }
 
   setSelection(shapes: MaskShape[]): void {
@@ -509,7 +476,7 @@ export class CanvasView {
 
   /** Верхний отделённый объект под точкой холста */
   private movableAt(p: [number, number]): Movable | undefined {
-    return this.movable.findLast(({ rect: r }) => p[0] >= r.x && p[1] >= r.y && p[0] < r.x + r.width && p[1] < r.y + r.height);
+    return this.movable.findLast(({ hit: r }) => p[0] >= r.x && p[1] >= r.y && p[0] < r.x + r.width && p[1] < r.y + r.height);
   }
 
   /** Тянут объект прямо сейчас */
@@ -1106,9 +1073,9 @@ export class CanvasView {
       ctx.strokeStyle = ACCENT;
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 4]);
-      for (const { id, rect: r } of this.movable) {
+      for (const { id, hit: r } of this.movable) {
         // Пока сервер не прислал новое место, рамку сдвигаем сами
-        const old = moved?.item.id === id && r.x === moved.item.rect.x && r.y === moved.item.rect.y;
+        const old = moved?.item.id === id && r.x === moved.item.hit.x && r.y === moved.item.hit.y;
         const [dx, dy] = old ? [moved.dx, moved.dy] : [0, 0];
         ctx.strokeRect(Math.round(o.x + (r.x + dx) * s) + 0.5, Math.round(o.y + (r.y + dy) * s) + 0.5, Math.round(r.width * s), Math.round(r.height * s));
       }

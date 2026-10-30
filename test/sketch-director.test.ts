@@ -132,13 +132,12 @@ describe('Директор', () => {
     expect(job()).toMatchObject({ director: false, directed: undefined });
     expect(job().variants[3]!.directed).toBeUndefined();
 
-    s.selectVariant(id, 2);
-    s.accept(id);
-    const patch = s.state().history[0]!;
+    // Каждый вариант — версия слоя; та, что с директором по поправленной задаче, помнит его текст и набросок
+    const patch = s.state().history.find((p) => p.id === job().variants[2]!.patch)!;
     expect(patch).toMatchObject({ prompt: 'парусник', sketch: true });
     expect(patch.directed).toMatch(/парусник.*#2/);
     const reopened = await openProject(await encodeProject(s.doc!), 'x.caaa');
-    expect(reopened.doc.patches[0]).toMatchObject({ directed: patch.directed, sketch });
+    expect(reopened.doc.patches.find((p) => p.id === patch.id)).toMatchObject({ directed: patch.directed, sketch });
 
     // Ещё варианты слоя с той же задачей: директор включён, его текст — слоя, нового вызова нет
     const again = s.patchVariants(patch.id, { variants: 1, model: 'flash', size: 'auto' });

@@ -8,6 +8,7 @@ import {
   IconChevronRight,
   IconClick,
   IconCubePlus,
+  IconDots,
   IconEraser,
   IconEye,
   IconEyeOff,
@@ -20,13 +21,11 @@ import {
   IconMask,
   IconMinus,
   IconPencil,
+  IconPhoto,
   IconPhotoPlus,
   IconPlus,
-  IconRefresh,
   IconScribble,
   IconSquare,
-  IconStackPop,
-  IconTrash,
   IconWand,
   IconX,
   type Icon,
@@ -165,22 +164,6 @@ function layerMaskEdit(layer: PatchDto, layers: PatchDto[]): MaskEditView {
   };
 }
 
-/** То же для задачи: под ней весь холст, слой — выбранный вариант */
-function jobMaskEdit(job: JobDto, doc: DocDto): MaskEditView | null {
-  if (!job.inside) return null;
-  const base = `/api/jobs/${job.id}/edit`;
-  return {
-    kind: 'job',
-    target: job.id,
-    rect: job.inside,
-    feather: job.feather ?? 0,
-    below: `${base}/below.jpg?rev=${doc.rev}`,
-    above: `${base}/above.png?rev=${doc.rev}`,
-    layer: `${base}/layer.jpg?n=${job.selected}`,
-    mask: `${base}/mask.png`,
-  };
-}
-
 function modelOutputs(dto: ModelOutputsDto): ModelOutputs {
   return {
     aspectRatios: Object.keys(dto.outputs),
@@ -224,7 +207,7 @@ const TOOL_ICONS: Record<Tool, Icon> = {
 const TOOLS: { id: Tool; name: string; label: string; key: string }[] = [
   { id: 'object', name: 'Объект', label: 'Объект', key: 'W' },
   { id: 'wand', name: 'Палочка', label: 'Палочка', key: 'Q' },
-  { id: 'move', name: 'Сдвинуть', label: 'Сдвинуть отделённый объект', key: 'V' },
+  { id: 'move', name: 'Сдвинуть', label: 'Сдвинуть слой с дорисованным фоном', key: 'V' },
   { id: 'rect', name: 'Прямоугольник', label: 'Прямоугольник', key: 'R' },
   { id: 'lasso', name: 'Лассо', label: 'Лассо', key: 'L' },
   { id: 'brush', name: 'Кисть', label: 'Кисть', key: 'B' },
@@ -294,7 +277,6 @@ export function App() {
   /** Сколько шагов с критиком, когда включён директор */
   const [steps, setSteps] = useState(3);
   const [focusJob, setFocusJob] = useState<string | null>(null);
-  const [maskJob, setMaskJob] = useState<string | null>(null);
   /** Слой, маску которого сейчас правят */
   const [maskLayer, setMaskLayer] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0);
@@ -306,6 +288,8 @@ export function App() {
   const [refs, setRefs] = useState<string[]>([]);
   /** Объект, на который навели в списке объектов */
   const [litObject, setLitObject] = useState<string | null>(null);
+  /** Держат «\»: на холсте исходник */
+  const [comparing, setComparing] = useState(false);
   const [, setTick] = useState(0);
 
   const stageRef = useRef<HTMLDivElement>(null);
@@ -338,8 +322,7 @@ export function App() {
   const segmentReady = segment?.status === 'ready';
   selectionRef.current = selection;
   const editedLayer = layers.find((p) => p.id === maskLayer && p.active) ?? null;
-  const editedJob = jobs.find((j) => j.id === maskJob && j.status === 'done') ?? null;
-  const maskEdit = editedLayer ? layerMaskEdit(editedLayer, layers) : editedJob && doc ? jobMaskEdit(editedJob, doc) : null;
+  const maskEdit = editedLayer ? layerMaskEdit(editedLayer, layers) : null;
 
   const notify = (text: string, error = true) => {
     setToast({ text, error });
@@ -384,14 +367,12 @@ export function App() {
     setSelection([]);
     setSketch([]);
     formOrder.current = [];
-    setMaskJob(null);
     setMaskLayer(null);
   }, [doc?.id]);
   useEffect(() => {
-    if (maskJob && !editedJob) setMaskJob(null);
     viewRef.current?.setJobs(jobs, numbers.current, focusJob);
-  }, [state?.jobs, focusJob, maskJob]);
-  // Скрытый или отменённый слой маску больше не правит
+  }, [state?.jobs, focusJob]);
+  // Скрытая или удалённая версия маску больше не правит
   useEffect(() => {
     if (maskLayer && !editedLayer) setMaskLayer(null);
   }, [maskLayer, editedLayer?.id]);
@@ -417,8 +398,11 @@ export function App() {
       return next.length === sel.length && next.every((s, i) => s === sel[i]) ? sel : next;
     });
   }, [objectsKey]);
-  // Отделённые объекты, которые видно, — их можно сдвинуть; снизу вверх, как слои
-  const movable: Movable[] = layers.flatMap((p) => (p.lifted && p.active && p.object && objects.some((o) => o.id === p.object) ? [{ id: p.object, layer: p.id, rect: p.rect }] : []));
+  // Видимые слои с дорисованным фоном — их можно сдвинуть; превью — их версия на холсте (или снятый исходник)
+  const movable: Movable[] = objects.flatMap((o) => {
+    const shown = o.layer && !o.hidden ? layers.find((p) => p.id === (o.current ?? o.layer)) : undefined;
+    return shown ? [{ id: o.id, layer: shown.id, rect: shown.rect, hit: o.rect }] : [];
+  });
   const movableKey = JSON.stringify(movable);
   useEffect(() => viewRef.current?.setMovable(movable), [movableKey]);
   const lit = objects.find((o) => o.id === litObject);
@@ -599,7 +583,7 @@ export function App() {
         formOrder.current = formOrder.current.filter((k) => k !== 'shape');
         formOrder.current.push('shape');
         setSelection([objectShape(o)]);
-        notify(`Сохранён объект «${o.name}»`, false);
+        notify(`Слой «${o.name}»`, false);
       }
     } catch (err) {
       fail(err);
@@ -620,23 +604,16 @@ export function App() {
     }
   };
   const selectedObjects = new Set(selection.flatMap((s) => (s.kind === 'mask' && s.id.startsWith('obj:') && !s.erase ? [s.id.slice(4)] : [])));
-  /** Объект в выделении один и он отделён — отделять нечего */
-  const selectedLifted = selection.length === 1 && selectedObjects.size === 1 && objects.some((o) => selectedObjects.has(o.id) && o.layer);
-  /**
-   * Отделить объект: модель дорисует фон под ним, а сам он ляжет своим слоем — его можно сдвигать.
-   * Без объекта — то, что выделено: сначала оно сохраняется объектом
-   */
-  const detach = async (o?: ObjectDto) => {
-    if (!doc) return;
+  /** Выделен ровно один слой: генерация ляжет его версией */
+  const target = selection.length === 1 && selectedObjects.size === 1 ? objects.find((o) => selectedObjects.has(o.id)) : undefined;
+  /** Дорисовать фон под слоем: модель нарисует то, что за ним, — тогда слой можно сдвигать и скрывать */
+  const detach = async (o: ObjectDto) => {
     if (needsKey(model) && !state?.hasKey) {
       setDialog('settings');
       return;
     }
     try {
-      const only = selection.length === 1 && selectedObjects.size === 1 ? [...selectedObjects][0] : undefined;
-      const id = o?.id ?? only ?? (await post<{ id: string }>('/api/objects', { shapes: selection })).id;
-      const { id: job } = await post<{ id: string }>(`/api/objects/${id}/detach`, { variants, model, size: sizeFor(model) });
-      if (!o) clearSelection();
+      const { id: job } = await post<{ id: string }>(`/api/objects/${o.id}/detach`, { variants, model, size: sizeFor(model) });
       setFocusJob(job);
     } catch (err) {
       fail(err);
@@ -672,7 +649,7 @@ export function App() {
 
   const hasSelection = selection.some((s) => !s.erase);
   const hasSketch = sketch.some((s) => !s.erase);
-  const canGenerate = !!doc && hasSelection && prompt.trim().length > 0 && !maskJob && !maskLayer;
+  const canGenerate = !!doc && hasSelection && prompt.trim().length > 0 && !maskLayer;
   // Директор идёт через Codex; у подставной модели — подставной директор
   const canDirect = state?.provider === 'mock' || !!state?.codex;
   // С директором правка идёт шагами с критиком, а не вариантами разом
@@ -715,8 +692,7 @@ export function App() {
 
   // Правки маски слоя — обычные шаги истории документа, поэтому в режиме маски слоя ⌘Z отменяет их
   const undo = () => {
-    if (maskJob) post(`/api/jobs/${maskJob}/mask/undo`).then(maskChanged, fail);
-    else if ((selection.length || sketch.length) && !maskLayer) undoForm();
+    if ((selection.length || sketch.length) && !maskLayer) undoForm();
     else if (state?.canUndo) post('/api/history/undo').then(maskChanged, fail);
   };
   const redo = () => {
@@ -848,11 +824,12 @@ export function App() {
     return () => window.removeEventListener('paste', paste);
   }, []);
 
-  const switchVariant = (job: JobDto, dir: number) => {
-    const done = job.variants.filter((v) => v.status === 'done').map((v) => v.n);
-    const i = done.indexOf(job.selected);
-    const n = done[(i + dir + done.length) % done.length];
-    if (n !== undefined && n !== job.selected) post(`/api/jobs/${job.id}/select`, { n }).catch(fail);
+  /** ← и → — версия выделенного слоя: исходник и версии по кругу */
+  const stepVersion = (o: ObjectDto, dir: number) => {
+    const all: (string | null)[] = [null, ...o.versions];
+    const i = all.indexOf(o.current ?? null);
+    const patch = all[(i + dir + all.length) % all.length] ?? null;
+    if (patch !== (o.current ?? null)) post(`/api/objects/${o.id}/current`, { patch }).catch(fail);
   };
 
   // Горячие клавиши
@@ -865,6 +842,14 @@ export function App() {
       viewRef.current?.setSpace(down);
       return;
     }
+    // Пока держат «\» — на холсте исходник всей картинки
+    if (e.code === 'Backslash' && !typing && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      if (e.repeat) return;
+      viewRef.current?.setCompare(down);
+      setComparing(down);
+      return;
+    }
     if (!down) return;
     if (mod && e.key === 'Enter') {
       e.preventDefault();
@@ -874,7 +859,6 @@ export function App() {
     if (e.key === 'Escape') {
       if (zoomMenu) setZoomMenu(false);
       else if (dialog) setDialog(null);
-      else if (maskJob) setMaskJob(null);
       else if (maskLayer) setMaskLayer(null);
       else clearSelection();
       (document.activeElement as HTMLElement | null)?.blur();
@@ -923,8 +907,10 @@ export function App() {
       else if (tool === 'sketch') setSketchSize((b) => (up ? Math.min(120, Math.round(b * 1.25) + 1) : Math.max(2, Math.round(b / 1.25))));
       else setBrush((b) => (up ? Math.min(400, Math.round(b * 1.25)) : Math.max(4, Math.round(b / 1.25))));
     }
-    const focused = jobs.find((j) => j.id === focusJob);
-    if (focused && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) switchVariant(focused, e.key === 'ArrowLeft' ? -1 : 1);
+    if (target && target.versions.length > 0 && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      e.preventDefault();
+      stepVersion(target, e.key === 'ArrowLeft' ? -1 : 1);
+    }
   };
   useEffect(() => {
     const down = (e: KeyboardEvent) => keys.current(e, true);
@@ -964,14 +950,13 @@ export function App() {
     styleTimer.current = window.setTimeout(() => post('/api/doc/style', { style: value }).catch(fail), 600);
   };
 
-  // Маску слоя правят прежде всего, чтобы скрыть кусок, поэтому сразу ластик
+  // Маску версии правят прежде всего, чтобы скрыть кусок, поэтому сразу ластик
   const editLayerMask = (patch: PatchDto) => {
     if (maskLayer === patch.id) {
       setMaskLayer(null);
       return;
     }
     setMaskLayer(patch.id);
-    setMaskJob(null);
     setTool('eraser');
     viewRef.current?.reveal(patch.rect);
   };
@@ -988,19 +973,19 @@ export function App() {
       ? post(`/api/jobs/${job.id}/more`, { count: countFor(change.director ?? job.director), ...change })
       : post(`/api/jobs/${job.id}/retry`, change);
 
-  // Ещё варианты принятого слоя, можно с поправкой: если они уже в очереди — туда же, а не второй задачей на тот же слой
+  // Ещё варианты версии, можно с поправкой: если они уже в очереди — туда же, а не второй задачей на ту же версию
   const layerVariants = async (patch: PatchDto, change: RedoChange = {}) => {
     if (needsKey(patch.model ?? model) && !state?.hasKey) {
       setDialog('settings');
       return;
     }
-    const open = jobs.find((j) => j.replaces === patch.id);
+    const open = jobs.find((j) => j.from === patch.id);
     try {
       if (open) {
         focus(open);
         const idle = (open.status === 'done' || open.status === 'error') && !open.variants.some((v) => v.status === 'running');
         if (idle) await redoJob(open, change);
-        else notify('Варианты этого слоя уже генерируются', false);
+        else notify('Варианты этой версии уже генерируются', false);
         return;
       }
       const count = countFor(change.director ?? patch.directed !== undefined);
@@ -1012,10 +997,23 @@ export function App() {
     }
   };
 
-  const deleteLayer = (patch: PatchDto) => {
-    const name = patch.lifted ? objects.find((o) => o.id === patch.object)?.name : undefined;
+  const deleteVersion = (patch: PatchDto) => {
     post(`/api/history/${patch.id}/delete`)
-      .then(() => notify(name ? `Объект «${short(name)}» убран с холста. ⌘Z вернёт его` : `Слой «${short(patch.prompt)}» удалён. ⌘Z вернёт его`, false))
+      .then(() => notify('Версия удалена. ⌘Z вернёт её', false))
+      .catch(fail);
+  };
+  const deleteObject = (o: ObjectDto) => {
+    post(`/api/objects/${o.id}/delete`)
+      .then(() => notify(`Слой «${short(o.name)}» ${o.layer ? 'убран с холста' : 'удалён'}. ⌘Z вернёт его`, false))
+      .catch(fail);
+  };
+  const expandVersion = (patch: PatchDto) => {
+    post<{ addedPx: number }>(`/api/history/${patch.id}/expand`)
+      .then(({ addedPx }) => {
+        if (addedPx) maskChanged();
+        const area = patch.rect.width * patch.rect.height;
+        notify(addedPx ? `Маска выросла на ${((100 * addedPx) / area).toFixed(1)}% куска` : 'За краем маски модель ничего не дорисовала', false);
+      })
       .catch(fail);
   };
 
@@ -1049,7 +1047,7 @@ export function App() {
                 class="ghost icon"
                 title="Отменить (⌘Z)"
                 aria-label="Отменить"
-                disabled={!state?.canUndo && !selection.length && !sketch.length && !maskJob}
+                disabled={!state?.canUndo && !selection.length && !sketch.length}
                 onClick={undo}
               >
                 <IconArrowBackUp size={20} stroke={STROKE} />
@@ -1107,18 +1105,12 @@ export function App() {
 
       <div class="optbar" role="toolbar" aria-label="Настройки инструмента">
         {doc &&
-          (maskJob || editedLayer ? (
+          (editedLayer ? (
             <>
               <span class="opt-title">
                 <IconMask size={16} stroke={STROKE} aria-hidden="true" />
-                {maskJob
-                  ? `Маска задачи #${numbers.current.get(maskJob)}`
-                  : `Маска слоя «${short((editedLayer!.lifted && objects.find((o) => o.id === editedLayer!.object)?.name) || editedLayer!.prompt, 24)}»`}
-                <Help>
-                  {maskJob
-                    ? 'Кисть и фигуры добавляют к маске, ластик и Alt стирают. Мягкость кисти — ⇧[ и ⇧].'
-                    : 'Ластик и Alt скрывают часть слоя, кисть и фигуры возвращают её — и за краем прежнего выделения. ⌘Z отменяет мазок.'}
-                </Help>
+                {`Маска «${short(objects.find((o) => o.id === editedLayer.object)?.name ?? editedLayer.prompt, 24)}»`}
+                <Help>Ластик и Alt скрывают часть версии, кисть и фигуры возвращают её — и за краем прежнего выделения. ⌘Z отменяет мазок.</Help>
               </span>
               {(tool === 'brush' || tool === 'eraser') && (
                 <>
@@ -1136,7 +1128,7 @@ export function App() {
                   />
                 </>
               )}
-              <button class="opt-done" onClick={() => (maskJob ? setMaskJob(null) : setMaskLayer(null))}>
+              <button class="opt-done" onClick={() => setMaskLayer(null)}>
                 Готово
               </button>
             </>
@@ -1243,7 +1235,7 @@ export function App() {
           const ToolIcon = TOOL_ICONS[t.id];
           // Набросок — подсказка модели к новой правке, а не выделение: отдельно от инструментов выделения.
           // Набросок, «Объект», «Палочка» и «Сдвинуть» — не для правки маски
-          const formOnly = (t.id === 'sketch' || t.id === 'object' || t.id === 'wand' || t.id === 'move') && !!(maskJob || maskLayer);
+          const formOnly = (t.id === 'sketch' || t.id === 'object' || t.id === 'wand' || t.id === 'move') && !!maskLayer;
           const button = (
             <button
               key={t.id}
@@ -1261,9 +1253,10 @@ export function App() {
         })}
       </nav>
 
-      <main class={maskJob || maskLayer ? 'stage mask-mode' : 'stage'}>
+      <main class={maskLayer ? 'stage mask-mode' : 'stage'}>
         <div ref={stageRef} class="osd" />
-        {doc && tool === 'object' && segment && !maskJob && !maskLayer && segment.status !== 'ready' && <SegmentBanner segment={segment} onError={fail} />}
+        {doc && tool === 'object' && segment && !maskLayer && segment.status !== 'ready' && <SegmentBanner segment={segment} onError={fail} />}
+        {comparing && <div class="stage-banner">Исходник</div>}
         {!doc && state && <StartScreen recent={state.recent} onOpen={openDialog} onOpenRecent={openRecent} onError={fail} />}
         {(busy ?? state?.activity) && <div class="busy">{busy ?? state?.activity}</div>}
         {toast && <div class={toast.error ? 'toast error' : 'toast'}>{toast.text}</div>}
@@ -1319,13 +1312,8 @@ export function App() {
                     <Chip icon={IconMarquee2} label="Выделение" clear="Снять выделение (⌘D)" onClear={clearSelection} />
                   )}
                   {hasSelection && !(selectedObjects.size === 1 && selection.length === 1) && (
-                    <button class="chip-action" title="Сохранить объектом (⌘J)" aria-label="Сохранить объектом" onClick={() => void saveObject()}>
+                    <button class="chip-action" title="Слой из выделения (⌘J)" aria-label="Слой из выделения" onClick={() => void saveObject()}>
                       <IconCubePlus size={15} stroke={STROKE} />
-                    </button>
-                  )}
-                  {hasSelection && !selectedLifted && (
-                    <button class="chip-action" title="Отделить: фон под ним дорисует модель" aria-label="Отделить объект" onClick={() => void detach()}>
-                      <IconStackPop size={15} stroke={STROKE} />
                     </button>
                   )}
                   {sketch.length > 0 && <Chip icon={IconScribble} label="Набросок" clear="Стереть набросок" onClear={clearSketch} />}
@@ -1392,6 +1380,7 @@ export function App() {
               {sizeAdvice && typeof sizeAdvice === 'object' && (
                 <SizeHint advice={sizeAdvice} auto={sizeFor(model) === 'auto'} sizes={state!.models[model].imageSizes} onSize={setSize} />
               )}
+              {hasSelection && <p class="hint">{target ? `В слой «${short(target.name)}»` : 'Новым слоем'}</p>}
               <button class="primary" disabled={!canGenerate} onClick={generate} title="⌘↵">
                 {generateText(stepwise, countFor(stepwise))}
               </button>
@@ -1407,99 +1396,46 @@ export function App() {
                     key={job.id}
                     job={job}
                     canDirect={canDirect}
-                    replacing={job.replaces === undefined ? undefined : (layers.find((p) => p.id === job.replaces) ?? null)}
-                    detaching={job.detach && (objects.find((o) => o.id === job.detach)?.name ?? null)}
+                    target={job.detach ? `Фон под «${objects.find((o) => o.id === job.detach)?.name ?? '…'}»` : (objects.find((o) => o.id === job.object)?.name ?? null)}
                     number={numbers.current.get(job.id) ?? 0}
                     focused={job.id === focusJob}
-                    maskMode={job.id === maskJob}
                     variants={variants}
                     steps={steps}
                     onFocus={() => focus(job)}
-                    onSwitch={(dir) => switchVariant(job, dir)}
-                    onMaskMode={() => {
-                      setMaskJob(maskJob === job.id ? null : job.id);
-                      setMaskLayer(null);
-                      setFocusJob(job.id);
-                      if (tool === 'hand' || tool === 'sketch' || tool === 'object') setTool('brush');
-                    }}
                     onRedo={(change) => {
                       if (needsKey(job.model) && !state?.hasKey) setDialog('settings');
                       else redoJob(job, change).catch(fail);
                     }}
                     onAction={(action) => {
-                      if (action === 'expand') {
-                        post<{ addedPx: number }>(`/api/jobs/${job.id}/mask/expand`)
-                          .then(({ addedPx }) => {
-                            if (addedPx) maskChanged();
-                            const area = job.inside ? job.inside.width * job.inside.height : 1;
-                            notify(
-                              addedPx
-                                ? `Маска выросла на ${((100 * addedPx) / area).toFixed(1)}% куска`
-                                : 'За краем выделения модель ничего не дорисовала',
-                              false,
-                            );
-                          })
-                          .catch(fail);
-                        return;
-                      }
-                      const path = { accept: 'accept', discard: 'discard', retry: 'retry', more: 'more', stop: 'stop', undoMask: 'mask/undo' }[action];
-                      if (action === 'accept' || action === 'discard') setMaskJob(null);
-                      post(`/api/jobs/${job.id}/${path}`, action === 'more' ? { count: countFor(job.director) } : undefined)
-                        .then(() => {
-                          if (action === 'undoMask') maskChanged();
-                          // Отделённый объект сразу можно тянуть
-                          if (action === 'accept' && job.detach) setTool('move');
-                        })
-                        .catch(fail);
+                      post(`/api/jobs/${job.id}/${action}`, action === 'more' ? { count: countFor(job.director) } : undefined).catch(fail);
                     }}
                   />
                 ))}
               </section>
             )}
 
-            {objects.length > 0 && (
-              <ObjectsPanel
-                objects={objects}
-                layers={layers}
-                detaching={new Set(jobs.flatMap((j) => (j.detach ? [j.detach] : [])))}
-                selected={selectedObjects}
-                following={!!segment?.following}
-                onSelect={selectObject}
-                onHover={(o) => setLitObject(o?.id ?? null)}
-                onRename={(o, name) => post(`/api/objects/${o.id}/rename`, { name }).catch(fail)}
-                onDetach={(o) => void detach(o)}
-                onToggle={(o) => o.layer && post(`/api/history/${o.layer}/toggle`).catch(fail)}
-                onDelete={(o) =>
-                  post(`/api/objects/${o.id}/delete`)
-                    .then(() => notify(`Объект «${short(o.name)}» ${o.layer ? 'убран с холста' : 'удалён'}. ⌘Z вернёт его`, false))
-                    .catch(fail)
-                }
-              />
-            )}
-
-            {layers.length > 0 && (
-              <section class="panel">
-                <h2>Слои</h2>
-                <ol class="layers">
-                  {[...layers].reverse().map((p) => (
-                    <LayerItem
-                      key={p.id}
-                      patch={p}
-                      object={objects.find((o) => o.id === p.object)?.name}
-                      canDirect={canDirect}
-                      maskMode={p.id === maskLayer}
-                      variants={variants}
-                      steps={steps}
-                      onToggle={() => post(`/api/history/${p.id}/toggle`).catch(fail)}
-                      onShow={() => viewRef.current?.showRect(p.rect)}
-                      onMask={() => editLayerMask(p)}
-                      onVariants={(change) => void layerVariants(p, change)}
-                      onDelete={() => deleteLayer(p)}
-                    />
-                  ))}
-                </ol>
-              </section>
-            )}
+            <LayersPanel
+              objects={objects}
+              patches={layers}
+              selected={selectedObjects}
+              following={!!segment?.following}
+              maskLayer={maskLayer}
+              detaching={new Set(jobs.flatMap((j) => (j.detach && (j.status === 'queued' || j.status === 'preparing' || j.status === 'running') ? [j.detach] : [])))}
+              canDirect={canDirect}
+              variants={variants}
+              steps={steps}
+              onSelect={selectObject}
+              onHover={(o) => setLitObject(o?.id ?? null)}
+              onRename={(o, name) => post(`/api/objects/${o.id}/rename`, { name }).catch(fail)}
+              onHidden={(o, hidden) => post(`/api/objects/${o.id}/hidden`, { hidden }).catch(fail)}
+              onCurrent={(o, patch) => post(`/api/objects/${o.id}/current`, { patch }).catch(fail)}
+              onMask={editLayerMask}
+              onMore={(patch, change) => void layerVariants(patch, change)}
+              onExpand={expandVersion}
+              onFill={(o) => void detach(o)}
+              onDeleteVersion={deleteVersion}
+              onDelete={deleteObject}
+            />
           </>
         )}
       </aside>
@@ -1562,25 +1498,21 @@ export function App() {
   );
 }
 
-type JobAction = 'accept' | 'discard' | 'retry' | 'more' | 'stop' | 'expand' | 'undoMask';
+type JobAction = 'discard' | 'retry' | 'more' | 'stop';
 
+/** Задача в очереди: ход генерации; готовые варианты сразу ложатся версиями слоя */
 function JobCard(props: {
   job: JobDto;
   /** Директор доступен: есть Codex */
   canDirect: boolean;
-  /** Слой, который заменит принятый вариант; null — его уже удалили */
-  replacing?: PatchDto | null;
-  /** Задача отделяет этот объект (имя); null — объекта уже нет */
-  detaching?: string | null;
+  /** Куда ложатся версии: слой (имя), заплатка фона; null — новый слой появится из выделения */
+  target: string | null;
   number: number;
   focused: boolean;
-  maskMode: boolean;
   /** Сколько вариантов сгенерировать; с директором — сколько шагов */
   variants: number;
   steps: number;
   onFocus: () => void;
-  onSwitch: (dir: number) => void;
-  onMaskMode: () => void;
   onAction: (action: JobAction) => void;
   onRedo: (change: RedoChange) => void;
 }) {
@@ -1589,12 +1521,8 @@ function JobCard(props: {
   const done = job.variants.filter((v) => v.status === 'done');
   const running = job.variants.filter((v) => v.status === 'running').length;
   const selected = job.variants[job.selected];
-  const index = done.findIndex((v) => v.n === job.selected);
   const busy = job.status === 'queued' || job.status === 'preparing' || job.status === 'running';
-  const replacing = props.replacing;
-  // Вариант сделан не с той задачей, что сейчас в карточке: после повтора с поправкой
-  const otherTask = selected && (selected.prompt !== job.prompt || selected.hide !== job.hide) ? selected : null;
-  // Текст директора — того варианта, что на холсте; пока вариантов нет — для следующих
+  // Текст директора и критика — того варианта, что на холсте; пока вариантов нет — директора для следующих
   const directed = (selected?.status === 'done' ? selected.directed : undefined) ?? job.directed;
   const critique = selected?.status === 'done' ? selected.critique : undefined;
   const count = job.director ? props.steps : props.variants;
@@ -1603,21 +1531,6 @@ function JobCard(props: {
   useEffect(() => {
     if (!canRedo) setRedoing(false);
   }, [canRedo]);
-  const redoForm = redoing && canRedo && (
-    <RedoForm
-      prompt={job.prompt}
-      hide={job.hide}
-      director={job.director}
-      canDirect={props.canDirect}
-      variants={props.variants}
-      steps={props.steps}
-      onCancel={() => setRedoing(false)}
-      onSubmit={(change) => {
-        setRedoing(false);
-        props.onRedo(change);
-      }}
-    />
-  );
 
   return (
     <article class={`job ${job.status}${props.focused ? ' focused' : ''}`} onClick={props.onFocus}>
@@ -1641,230 +1554,67 @@ function JobCard(props: {
       </header>
       {directed && !redoing && <Note label="Директор" text={directed} />}
       {critique && !redoing && <Note label={critique.done ? 'Критик: готово' : 'Критик'} text={critique.text} />}
-      {redoForm}
+      {redoing && canRedo && (
+        <RedoForm
+          prompt={job.prompt}
+          hide={job.hide}
+          director={job.director}
+          canDirect={props.canDirect}
+          variants={props.variants}
+          steps={props.steps}
+          onCancel={() => setRedoing(false)}
+          onSubmit={(change) => {
+            setRedoing(false);
+            props.onRedo(change);
+          }}
+        />
+      )}
       <p class="job-status">
         {jobStatus(job)}
-        {job.status === 'running' && !job.chain && `, готово ${done.length} из ${job.variants.length}`}
-        {(busy || job.chain) && `, ${clock(Date.now() - Date.parse(job.createdAt))}`}
-        {job.status === 'done' && running > 0 && !job.chain && `, ещё ${running} в работе`}
+        {(job.status === 'running' || job.status === 'done') && !job.chain && job.variants.length > 0 && `, готово ${done.length} из ${job.variants.length}`}
+        {(busy || job.chain || running > 0) && `, ${clock(Date.now() - Date.parse(job.createdAt))}`}
         {job.modelSize && <span class="dim">, {[job.imageSize, MODELS.find((m) => m.id === job.model)?.tag].filter(Boolean).join(' ')}</span>}
         {job.refs > 0 && <span class="dim">, референсов: {job.refs}</span>}
         {job.sketch && <span class="dim">, с наброском</span>}
         {job.hide && <span class="dim">, под маской стёрто</span>}
       </p>
-      {props.detaching !== undefined && (
-        <p class="hint">
-          {props.detaching === null ? (
-            'Объекта уже нет'
-          ) : (
-            <>
-              Отделить «{short(props.detaching)}»
-              <Help>Варианты — фон под объектом. Выбранный ляжет под него, а объект — своим слоем сверху: его можно сдвигать (V), скрывать и удалять.</Help>
-            </>
-          )}
-        </p>
-      )}
-      {replacing !== undefined && (
-        <p class="hint">
-          {replacing ? (
-            <>
-              Замена слоя
-              <Help>Модель видит холст под слоем. Принятый вариант ляжет на место слоя, «Отклонить» оставит слой как был.</Help>
-            </>
-          ) : (
-            'Слой удалён: вариант ляжет новым слоем'
-          )}
-        </p>
-      )}
+      <p class="hint">{props.target ? `В слой «${short(props.target)}»` : 'Новым слоем'}</p>
       {job.error && <p class="job-error">{job.error}</p>}
       {job.warnings.map((w) => (
         <p class="job-warning">{w}</p>
       ))}
-
-      {job.status === 'done' && (
-        <div class="job-body" onClick={(e) => e.stopPropagation()}>
-          <div class="variants">
-            <button class="icon" aria-label="Предыдущий вариант" disabled={done.length < 2} onClick={() => props.onSwitch(-1)}>
-              <IconChevronLeft size={16} stroke={STROKE} />
-            </button>
-            <span>
-              {selected?.current ? 'Нынешний слой, ' : 'Вариант '}
-              {index + 1} из {done.length}
-              {selected?.elapsedMs !== undefined && <span class="dim">, {Math.round(selected.elapsedMs / 1000)} с</span>}
-            </span>
-            <button class="icon" aria-label="Следующий вариант" disabled={done.length < 2} onClick={() => props.onSwitch(1)}>
-              <IconChevronRight size={16} stroke={STROKE} />
-            </button>
-          </div>
-          {otherTask && (
-            <p class="hint variant-task">
-              {otherTask.prompt === job.prompt ? 'С той же задачей' : `По прежней задаче: «${otherTask.prompt}»`}
-              {otherTask.hide !== job.hide && (otherTask.hide ? ', под маской было стёрто' : ', модель видела, что под маской')}
-            </p>
-          )}
-          {selected?.insideChangedPct !== undefined && selected.insideChangedPct < 2 && (
-            <p class="job-warning">
-              Модель почти ничего не изменила
-              <Help>Опишите, что должно получиться, а не что исправить, или выделите область поменьше.</Help>
-            </p>
-          )}
-          <div class="row">
-            <button class="primary" onClick={() => props.onAction('accept')}>
-              {props.detaching ? 'Отделить' : !replacing ? 'Принять' : selected?.current ? 'Оставить этот' : 'Заменить слой'}
-            </button>
-            <button onClick={() => props.onAction('discard')}>Отклонить</button>
-            {job.chain ? (
-              <button title="Готовые шаги останутся" onClick={() => props.onAction('stop')}>
-                Остановить
-              </button>
-            ) : (
-              <button
-                onClick={() => props.onAction('more')}
-                disabled={running > 0}
-                title={job.director ? `Ещё ${countText(true, count)} от этого варианта` : `Ещё ${countText(false, count)}`}
-              >
-                {job.director ? 'Ещё шаги' : 'Ещё варианты'}
-              </button>
-            )}
-          </div>
-          <div class="row mask-row">
-            <button class={props.maskMode ? 'active' : ''} aria-pressed={props.maskMode} onClick={props.onMaskMode}>
-              {props.maskMode ? 'Закончить с маской' : 'Править маску'}
-            </button>
-            <button title="Добавить к маске то, что модель нарисовала за краем выделения" onClick={() => props.onAction('expand')}>
-              Расширить по правке
-            </button>
+      {selected?.status === 'done' && selected.insideChangedPct !== undefined && selected.insideChangedPct < 2 && (
+        <p class="job-warning">
+          Модель почти ничего не изменила
+          <Help>Опишите, что должно получиться, а не что исправить, или выделите область поменьше.</Help>
+        </p>
+      )}
+      <div class="row" onClick={(e) => e.stopPropagation()}>
+        {job.chain ? (
+          <button title="Готовые шаги останутся версиями" onClick={() => props.onAction('stop')}>
+            Остановить
+          </button>
+        ) : (
+          job.status === 'done' && (
             <button
-              class="icon"
-              title="Отменить правку маски"
-              aria-label="Отменить правку маски"
-              disabled={!job.canUndoMask}
-              onClick={() => props.onAction('undoMask')}
+              onClick={() => props.onAction('more')}
+              disabled={running > 0}
+              title={job.director ? `Ещё ${countText(true, count)} от текущей версии` : `Ещё ${countText(false, count)}`}
             >
-              <IconArrowBackUp size={16} stroke={STROKE} />
+              {job.director ? 'Ещё шаги' : 'Ещё варианты'}
             </button>
-          </div>
-        </div>
-      )}
-
-      {(busy || job.status === 'error') && (
-        <div class="row" onClick={(e) => e.stopPropagation()}>
-          {job.status === 'error' && (
-            <button class="primary" onClick={() => props.onAction(job.inside ? 'more' : 'retry')}>
-              Повторить
-            </button>
-          )}
-          <button onClick={() => props.onAction('discard')}>{busy ? 'Отменить' : 'Убрать'}</button>
-        </div>
-      )}
+          )
+        )}
+        {job.status === 'error' && (
+          <button class="primary" onClick={() => props.onAction(job.inside ? 'more' : 'retry')}>
+            Повторить
+          </button>
+        )}
+        <button title={busy ? 'Отменить генерацию' : 'Убрать из очереди: версии останутся в слое'} onClick={() => props.onAction('discard')}>
+          {busy ? 'Отменить' : 'Убрать'}
+        </button>
+      </div>
     </article>
-  );
-}
-
-function LayerItem(props: {
-  patch: PatchDto;
-  /** Какой объект правили */
-  object?: string;
-  canDirect: boolean;
-  maskMode: boolean;
-  /** Сколько вариантов сгенерировать; с директором — сколько шагов */
-  variants: number;
-  steps: number;
-  onToggle: () => void;
-  onShow: () => void;
-  onMask: () => void;
-  /** Ещё варианты; change — с поправленной задачей */
-  onVariants: (change?: RedoChange) => void;
-  onDelete: () => void;
-}) {
-  const { patch } = props;
-  const [redoing, setRedoing] = useState(false);
-  const time = new Date(patch.createdAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-  // Слой с директором и перерисовывается шагами с критиком, начиная с него самого
-  const director = patch.directed !== undefined;
-  const count = countText(director, director ? props.steps : props.variants);
-  return (
-    <li class={[patch.active ? '' : 'off', props.maskMode ? 'editing' : ''].filter(Boolean).join(' ')}>
-      <button
-        class="layer-icon"
-        title={patch.active ? 'Скрыть слой' : 'Показать слой'}
-        aria-label="Показывать слой"
-        aria-pressed={patch.active}
-        onClick={props.onToggle}
-      >
-        {patch.active ? <IconEye size={18} stroke={STROKE} /> : <IconEyeOff size={18} stroke={STROKE} />}
-      </button>
-      <button
-        class="link"
-        onClick={props.onShow}
-        title={
-          patch.lifted
-            ? 'Отделённый объект: сдвигать — V'
-            : ['Показать на холсте', props.object && `Объект: ${props.object}`, patch.directed && `\nДиректор: ${patch.directed}`].filter(Boolean).join('\n')
-        }
-      >
-        {patch.lifted && <IconStackPop size={14} stroke={STROKE} class="layer-kind" aria-label="Отделённый объект" />}
-        {(patch.lifted && props.object) || patch.prompt}
-      </button>
-      <span class="dim">{time}</span>
-      <button
-        class={props.maskMode ? 'layer-icon active' : 'layer-icon'}
-        title={!patch.active ? 'Слой скрыт: сначала покажите его' : props.maskMode ? 'Закончить с маской (Esc)' : 'Править маску: скрыть часть слоя или вернуть'}
-        aria-label="Править маску слоя"
-        aria-pressed={props.maskMode}
-        disabled={!patch.active}
-        onClick={props.onMask}
-      >
-        <IconMask size={18} stroke={STROKE} />
-      </button>
-      {/* Отделённый объект перерисовывают правкой объекта: выделить его и написать задачу */}
-      {!patch.lifted && (
-        <>
-          <button
-            class="layer-icon"
-            title={`Ещё ${count} этой правки: та же задача и маска; выбранный заменит слой`}
-            aria-label="Ещё варианты слоя"
-            onClick={() => props.onVariants()}
-          >
-            <IconRefresh size={18} stroke={STROKE} />
-          </button>
-          <button
-            class={redoing ? 'layer-icon active' : 'layer-icon'}
-            title={`Ещё ${count} с поправленной задачей; выбранный заменит слой`}
-            aria-label="Перерисовать слой с поправкой"
-            aria-pressed={redoing}
-            onClick={() => setRedoing((v) => !v)}
-          >
-            <IconPencil size={18} stroke={STROKE} />
-          </button>
-        </>
-      )}
-      <button
-        class="layer-icon delete"
-        title={patch.lifted ? 'Убрать объект с холста — под ним фон (⌘Z вернёт)' : 'Удалить слой (⌘Z вернёт его)'}
-        aria-label="Удалить слой"
-        onClick={props.onDelete}
-      >
-        <IconTrash size={18} stroke={STROKE} />
-      </button>
-      {redoing && (
-        <div class="layer-redo">
-          <RedoForm
-            prompt={patch.prompt}
-            hide={patch.hide ?? false}
-            director={director}
-            canDirect={props.canDirect}
-            variants={props.variants}
-            steps={props.steps}
-            onCancel={() => setRedoing(false)}
-            onSubmit={(change) => {
-              setRedoing(false);
-              props.onVariants(change);
-            }}
-          />
-        </div>
-      )}
-    </li>
   );
 }
 
@@ -1967,40 +1717,104 @@ function SegmentBanner(props: { segment: StateDto['segment']; onError: (err: unk
   );
 }
 
-/** Объекты деревом: крупный объект и его части. Щелчок — выделить, ⌘ или Shift — добавить к выделению, двойной щелчок — переименовать */
-function ObjectsPanel(props: {
+/** Переключатель версий слоя: исходник и версии по кругу */
+function VersionSwitch(props: { object: ObjectDto; onCurrent: (patch: string | null) => void }) {
+  const { object } = props;
+  const all: (string | null)[] = [null, ...object.versions];
+  const i = all.indexOf(object.current ?? null);
+  const step = (dir: number) => props.onCurrent(all[(i + dir + all.length) % all.length] ?? null);
+  return (
+    <span class="versions" onClick={(e) => e.stopPropagation()}>
+      <button class="icon" aria-label="Предыдущая версия" title="Предыдущая версия" onClick={() => step(-1)}>
+        <IconChevronLeft size={14} stroke={STROKE} />
+      </button>
+      <span title="Версия на холсте">{object.current ? `${i} из ${object.versions.length}` : 'Исходник'}</span>
+      <button class="icon" aria-label="Следующая версия" title="Следующая версия" onClick={() => step(1)}>
+        <IconChevronRight size={14} stroke={STROKE} />
+      </button>
+    </span>
+  );
+}
+
+/**
+ * Слои деревом и фон под ними. Слой — кусок картинки: щелчок — выделить (генерация ляжет его версией), ⌘ или Shift — добавить
+ * к выделению, двойной щелчок — переименовать. У слоя — видимость, версии (исходник и генерации), маска текущей версии и меню
+ */
+function LayersPanel(props: {
   objects: ObjectDto[];
-  /** Слои: виден ли отделённый объект */
-  layers: PatchDto[];
-  /** Объекты, которые сейчас отделяются */
-  detaching: Set<string>;
+  patches: PatchDto[];
   selected: Set<string>;
   following: boolean;
+  /** Версия, маску которой правят */
+  maskLayer: string | null;
+  /** Слои, под которыми сейчас рисуется фон */
+  detaching: Set<string>;
+  canDirect: boolean;
+  variants: number;
+  steps: number;
   onSelect: (o: ObjectDto, add: boolean) => void;
   onHover: (o: ObjectDto | null) => void;
   onRename: (o: ObjectDto, name: string) => void;
-  onDetach: (o: ObjectDto) => void;
-  /** Скрыть или показать отделённый объект */
-  onToggle: (o: ObjectDto) => void;
+  onHidden: (o: ObjectDto, hidden: boolean) => void;
+  onCurrent: (o: ObjectDto, patch: string | null) => void;
+  onMask: (patch: PatchDto) => void;
+  onMore: (patch: PatchDto, change?: RedoChange) => void;
+  onExpand: (patch: PatchDto) => void;
+  onFill: (o: ObjectDto) => void;
+  onDeleteVersion: (patch: PatchDto) => void;
   onDelete: (o: ObjectDto) => void;
 }) {
-  const shown = new Set(props.layers.filter((p) => p.active).map((p) => p.id));
   const [editing, setEditing] = useState<string | null>(null);
-  const ids = new Set(props.objects.map((o) => o.id));
+  const [menu, setMenu] = useState<string | null>(null);
+  const [redoing, setRedoing] = useState<string | null>(null);
+  /** Скрыть просили у слоя, под которым нет фона: сначала спросить */
+  const [asking, setAsking] = useState<string | null>(null);
+  const patch = (id: string | undefined) => (id ? props.patches.find((p) => p.id === id) : undefined);
+  const content = props.objects.filter((o) => o.kind !== 'fill');
+  const fills = props.objects.filter((o) => o.kind === 'fill');
+  const ids = new Set(content.map((o) => o.id));
   const children = new Map<string | undefined, ObjectDto[]>();
-  for (const o of [...props.objects].reverse()) {
+  for (const o of [...content].reverse()) {
     const parent = o.parent && ids.has(o.parent) ? o.parent : undefined;
     children.set(parent, [...(children.get(parent) ?? []), o]);
   }
-  const tree = (parent: string | undefined, depth: number): ComponentChildren =>
-    (children.get(parent) ?? []).map((o) => (
+
+  const row = (o: ObjectDto, depth: number) => {
+    const current = patch(o.current);
+    const fill = o.kind === 'fill';
+    // Под неотделённым слоем исходник — то же, что под ним: скрыть его нечем, нужен фон
+    const needsFill = !fill && !o.layer && !o.current && !o.hidden;
+    const items: { label: string; run: () => void; danger?: boolean }[] = [
+      ...(current
+        ? [
+            { label: 'Ещё варианты', run: () => props.onMore(current) },
+            { label: 'Поправить задачу…', run: () => setRedoing(o.id) },
+            { label: 'Расширить по правке', run: () => props.onExpand(current) },
+          ]
+        : []),
+      ...(!fill && !props.detaching.has(o.id) ? [{ label: o.layer ? 'Ещё варианты фона' : 'Дорисовать фон под слоем', run: () => props.onFill(o) }] : []),
+      ...(current ? [{ label: 'Удалить версию', run: () => props.onDeleteVersion(current), danger: true }] : []),
+      { label: fill ? 'Удалить заплатку' : o.layer ? 'Убрать с холста' : 'Удалить слой', run: () => props.onDelete(o), danger: true },
+    ];
+    return (
       <Fragment key={o.id}>
         <li
-          class={[props.selected.has(o.id) ? 'selected' : '', o.lost ? 'lost' : '', o.layer && !shown.has(o.layer) ? 'off' : ''].filter(Boolean).join(' ')}
+          class={[props.selected.has(o.id) ? 'selected' : '', o.lost ? 'lost' : '', o.hidden ? 'off' : '', current && props.maskLayer === current.id ? 'editing' : '']
+            .filter(Boolean)
+            .join(' ')}
           style={{ paddingLeft: `${2 + depth * 16}px` }}
           onPointerEnter={() => props.onHover(o)}
           onPointerLeave={() => props.onHover(null)}
         >
+          <button
+            class="layer-icon"
+            title={o.hidden ? 'Показать слой' : 'Скрыть слой'}
+            aria-label="Показывать слой"
+            aria-pressed={!o.hidden}
+            onClick={() => (needsFill ? setAsking(asking === o.id ? null : o.id) : props.onHidden(o, !o.hidden))}
+          >
+            {o.hidden ? <IconEyeOff size={18} stroke={STROKE} /> : <IconEye size={18} stroke={STROKE} />}
+          </button>
           {editing === o.id ? (
             <RenameField
               value={o.name}
@@ -2012,60 +1826,95 @@ function ObjectsPanel(props: {
           ) : (
             <button
               class="link"
-              title={o.lost ? 'После правки объект не нашёлся: маска прежняя' : 'Выделить; ⌘ — добавить к выделению; двойной щелчок — переименовать'}
+              title={o.lost ? 'После правки слой не нашёлся: маска прежняя' : 'Выделить; ⌘ — добавить к выделению; двойной щелчок — переименовать'}
               onClick={(e) => props.onSelect(o, e.metaKey || e.ctrlKey || e.shiftKey)}
               onDblClick={() => setEditing(o.id)}
             >
+              {o.layer && <IconArrowsMove size={13} stroke={STROKE} class="layer-kind" aria-label="Можно сдвигать" />}
               {o.name}
             </button>
           )}
-          {o.layer ? (
-            <button
-              class="layer-icon"
-              title={shown.has(o.layer) ? 'Скрыть объект' : 'Показать объект'}
-              aria-label="Показывать объект"
-              aria-pressed={shown.has(o.layer)}
-              onClick={() => props.onToggle(o)}
-            >
-              {shown.has(o.layer) ? <IconEye size={18} stroke={STROKE} /> : <IconEyeOff size={18} stroke={STROKE} />}
-            </button>
-          ) : (
-            <button
-              class="layer-icon detach"
-              title={props.detaching.has(o.id) ? 'Уже отделяется' : 'Отделить: фон под ним дорисует модель'}
-              aria-label="Отделить объект"
-              disabled={props.detaching.has(o.id)}
-              onClick={() => props.onDetach(o)}
-            >
-              <IconStackPop size={18} stroke={STROKE} />
-            </button>
-          )}
+          {o.versions.length > 0 ? <VersionSwitch object={o} onCurrent={(p) => props.onCurrent(o, p)} /> : <span />}
           <button
-            class="layer-icon delete"
-            title={o.layer ? 'Убрать с холста — под ним фон (⌘Z вернёт)' : 'Удалить объект — пиксели останутся (⌘Z вернёт его)'}
-            aria-label="Удалить объект"
-            onClick={() => props.onDelete(o)}
+            class={current && props.maskLayer === current.id ? 'layer-icon active' : 'layer-icon'}
+            title={current ? 'Править маску версии' : 'У исходника маски нет'}
+            aria-label="Править маску версии"
+            disabled={!current || o.hidden}
+            onClick={() => current && props.onMask(current)}
           >
-            <IconTrash size={18} stroke={STROKE} />
+            <IconMask size={18} stroke={STROKE} />
           </button>
+          <span class="menu-anchor">
+            <button class="layer-icon" title="Ещё" aria-label="Ещё" aria-expanded={menu === o.id} onClick={() => setMenu(menu === o.id ? null : o.id)}>
+              <IconDots size={18} stroke={STROKE} />
+            </button>
+            {menu === o.id && (
+              <ul class="layer-menu" role="menu" onClick={() => setMenu(null)}>
+                {items.map((item) => (
+                  <li role="menuitem" class={item.danger ? 'danger' : ''} onClick={item.run}>
+                    {item.label}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </span>
+          {asking === o.id && (
+            <div class="layer-ask">
+              Под слоем нет фона
+              <button
+                onClick={() => {
+                  setAsking(null);
+                  props.onFill(o);
+                }}
+              >
+                Дорисовать фон
+              </button>
+              <button onClick={() => setAsking(null)}>Отмена</button>
+            </div>
+          )}
+          {redoing === o.id && current && (
+            <div class="layer-redo">
+              <RedoForm
+                prompt={current.prompt}
+                hide={current.hide ?? false}
+                director={current.directed !== undefined}
+                canDirect={props.canDirect}
+                variants={props.variants}
+                steps={props.steps}
+                onCancel={() => setRedoing(null)}
+                onSubmit={(change) => {
+                  setRedoing(null);
+                  props.onMore(current, change);
+                }}
+              />
+            </div>
+          )}
         </li>
-        {tree(o.id, depth + 1)}
+        {(children.get(o.id) ?? []).map((c) => row(c, depth + 1))}
       </Fragment>
-    ));
+    );
+  };
+
   return (
     <section class="panel">
       <h2>
-        Объекты
+        Слои
         {props.following && <span class="dim">пересчитываю…</span>}
         <Help>
-          Объект — имя и маска. Выделите его инструментом «Объект» (W): щелчок — предмет под курсором, щелчок туда же или [ и ] — мельче
-          или крупнее, Shift — добавить ещё предмет, Alt — вычесть, рамка — предмет внутри неё. ⌘J сохраняет
-          выделение объектом; объект из нескольких — выделить их с ⌘ (на холсте или в списке) и ⌘J. После правки маски объектов
-          пересчитываются сами. «Отделить» — модель дорисует фон под объектом, а сам он станет слоем: его можно сдвигать (V), скрывать,
-          стирать часть ластиком по маске слоя и убирать с холста.
+          Слой — кусок картинки. Выделите его щелчком в списке — генерация ляжет его версией; выделенное не слоем станет новым слоем.
+          Стрелки у слоя — версии: исходник и генерации, на холсте — выбранная; удерживайте «\», чтобы увидеть исходник всей картинки.
+          Чтобы скрыть или сдвинуть (V) слой, под ним дорисовывают фон: он ложится заплаткой в «Фон». ⌘J — слой из выделения.
         </Help>
       </h2>
-      <ol class="objects">{tree(undefined, 0)}</ol>
+      {menu && <div class="click-catcher" onClick={() => setMenu(null)} />}
+      <ol class="layers tree">
+        {(children.get(undefined) ?? []).map((o) => row(o, 0))}
+        <li class="background">
+          <IconPhoto size={18} stroke={STROKE} aria-hidden="true" />
+          <span>Фон</span>
+        </li>
+        {[...fills].reverse().map((o) => row(o, 1))}
+      </ol>
     </section>
   );
 }

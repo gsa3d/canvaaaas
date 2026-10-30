@@ -112,7 +112,7 @@ function buildMenu(win: BrowserWindow, session: Session): void {
         { role: 'selectAll', label: 'Выбрать всё' },
         { type: 'separator' },
         { ...item('Снять выделение', 'deselect', 'CmdOrCtrl+D'), enabled: hasDoc },
-        { ...item('Сохранить как объект', 'save-object', 'CmdOrCtrl+J'), enabled: hasDoc },
+        { ...item('Слой из выделения', 'save-object', 'CmdOrCtrl+J'), enabled: hasDoc },
       ],
     },
     {

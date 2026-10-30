@@ -72,18 +72,22 @@ export function ancestors(objects: DocObject[], id: string): DocObject[] {
 /**
  * Список объектов с новым: его родитель — самый маленький объект, внутри которого он лежит, а объекты того же уровня,
  * которые лежат внутри нового, становятся его частями. Так «объединить» — это просто сохранить объект из нескольких.
+ * Слой из генерации (edit) целым не бывает: он не родитель и частей себе не забирает. Заплатки фона — вне дерева.
  */
 export function placeObject(objects: DocObject[], obj: DocObject): DocObject[] {
   const size = area(obj);
-  const areas = new Map(objects.map((o) => [o.id, area(o)]));
+  // Заплатки фона — не в дереве: они лежат под всеми слоями
+  const areas = new Map(objects.filter((o) => o.kind !== 'fill').map((o) => [o.id, area(o)]));
   let parent: DocObject | undefined;
   for (const o of objects) {
+    if (o.kind === 'fill' || o.edit) continue;
     const a = areas.get(o.id)!;
     if (a <= size || overlap(o, obj) < CONTAINED * size) continue;
     if (!parent || a < areas.get(parent.id)!) parent = o;
   }
   const placed = { ...obj, parent: parent?.id };
   const next = objects.map((o) => {
+    if (o.kind === 'fill' || obj.edit) return o;
     const a = areas.get(o.id)!;
     if (o.parent !== placed.parent || a >= size || overlap(o, obj) < CONTAINED * a) return o;
     return { ...o, parent: placed.id };
@@ -123,6 +127,12 @@ export function dilate(b: Bitmap, r: number, bounds: Rect): Bitmap {
   const mask = new Uint8Array(rect.width * rect.height);
   for (let i = 0; i < mask.length; i++) if (d[i]! <= r) mask[i] = 255;
   return { rect, mask };
+}
+
+/** Имя слоя из задачи: первые слова, не длиннее 40 знаков */
+export function layerName(prompt: string): string {
+  const text = prompt.trim().replace(/\s+/g, ' ');
+  return text.length > 40 ? `${text.slice(0, 39).trimEnd()}…` : text || 'Слой';
 }
 
 /** Без объекта: его части переходят к его родителю */

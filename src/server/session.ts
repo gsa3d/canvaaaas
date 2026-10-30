@@ -33,7 +33,7 @@ import { readLedger, withDirectorLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha, featherAlphaRegion, maskBBox } from '../core/mask.ts';
 import { applyShapes, applyShapesRegion, type MaskLookup } from '../core/mask-shapes.ts';
 import { changeEdge, wand } from '../core/lines.ts';
-import { descendants, dilate, placeObject, removeObject, trim } from '../core/objects.ts';
+import { descendants, dilate, layerName, placeObject, removeObject, trim } from '../core/objects.ts';
 import type { Bitmap } from '../core/segment.ts';
 import type { KeyStore } from '../core/secrets.ts';
 import { checkSketch } from '../core/sketch.ts';
@@ -68,7 +68,6 @@ import {
 
 const MAX_RUNNING_JOBS = 2;
 const MAX_VARIANTS_PER_JOB = 8;
-const MASK_UNDO_LIMIT = 30;
 const REFERENCES_KEPT = 30;
 /** Референс уменьшается до этого размера по большей стороне: модели больше не нужно */
 const REFERENCE_SIZE = 1536;
@@ -99,8 +98,10 @@ interface Variant {
   gen?: Buffer;
   outsideChangedPct?: number;
   insideChangedPct?: number;
-  /** Слой, который сейчас на холсте: с ним сравнивают новые варианты */
+  /** Версия, от которой просили ещё вариантов: она сама — вариант №1 */
   current?: boolean;
+  /** Версия слоя, которой вариант лёг */
+  patch?: string;
   /** С какой задачей и показом области сделан: ими же ляжет слой */
   prompt: string;
   hide: boolean;
@@ -119,7 +120,7 @@ interface Critique {
   maskRev: number;
 }
 
-/** Принятый слой, который правка перерисовывает: маска и место — на момент, когда попросили ещё вариантов */
+/** Версия, от которой новые варианты: маска и место — на момент, когда попросили ещё вариантов */
 interface Replaced {
   patchId: string;
   mask: Uint8Array;
@@ -143,11 +144,9 @@ interface Job {
   shapes: MaskShape[];
   /** Маски объектов из выделения: берутся сразу, пока они есть */
   bitmaps: Map<string, Bitmap>;
-  /** Выделение — это сохранённый объект: слой правки его помнит */
+  /** Слой, в который ложатся версии: выделили слой — он; иначе слой появится из выделения с первым готовым вариантом */
   object?: string;
-  /** Объект отделён, и его слой лежал здесь: принятая правка ляжет в этот слой, туда, куда его с тех пор сдвинули */
-  lifted?: { rect: Rect };
-  /** Отделить этот объект: варианты — фон под ним */
+  /** Дорисовать фон под этим слоем: варианты — версии его заплатки фона */
   detach?: string;
   /** Границы выделения — известны сразу, ещё до подготовки куска */
   area: RectDto;
@@ -163,13 +162,12 @@ interface Job {
   reviewing: boolean;
   /** Идут шаги с критиком */
   chain?: { step: number; steps: number };
-  /** Ещё варианты принятого слоя: «Принять» кладёт вариант на его место */
-  replaces?: Replaced;
+  /** Ещё варианты версии: модель видит холст без неё, она сама — вариант №1 */
+  from?: Replaced;
   prep?: PreparedEdit;
   /** Текущая маска части куска внутри холста — её можно править после генерации */
   mask?: Uint8Array;
   alpha?: Float32Array;
-  maskUndo: Uint8Array[];
   /** Растёт при каждой смене маски */
   maskRev: number;
   variants: Variant[];
@@ -177,7 +175,6 @@ interface Job {
   /** Вариант выбрали руками: новые готовые его не перебивают */
   picked: boolean;
   rev: number;
-  layerPngs: Map<number, Buffer>;
   abort: AbortController;
   /** Правки маски идут строго по очереди */
   maskChain: Promise<unknown>;
@@ -280,15 +277,6 @@ export class Session {
   }
 
   private changed(): void {
-    // Превью замены слоя показывает участок холста целиком, поэтому устаревает при любой правке документа
-    if (this.doc?.rev !== this.previewRev) {
-      this.previewRev = this.doc?.rev;
-      for (const job of this.jobs) {
-        if (!job.replaces) continue;
-        job.rev++;
-        job.layerPngs.clear();
-      }
-    }
     if (this.emitTimer) return;
     this.emitTimer = setTimeout(() => {
       this.emitTimer = undefined;
@@ -393,6 +381,7 @@ export class Session {
           outsideChangedPct: v.outsideChangedPct,
           insideChangedPct: v.insideChangedPct,
           current: v.current,
+          patch: v.patch,
           prompt: v.prompt,
           hide: v.hide,
           directed: v.directed,
@@ -404,8 +393,8 @@ export class Session {
         rev: j.rev,
         maskRev: j.maskRev,
         feather: j.prep?.feather,
-        canUndoMask: j.maskUndo.length > 0,
-        replaces: j.replaces?.patchId,
+        from: j.from?.patchId,
+        object: j.object,
         detach: j.detach,
       })),
       history: (doc?.patches ?? []).map((p) => ({
@@ -430,6 +419,11 @@ export class Session {
         parent: o.parent,
         rev: o.version,
         lost: o.lost,
+        hidden: o.hidden,
+        current: o.current,
+        kind: o.kind,
+        under: o.under,
+        versions: doc!.patches.filter((p) => p.object === o.id && !p.lifted).map((p) => p.id),
         layer: liftedLayer(doc!, o.id)?.id,
       })),
       segment: this.segmentation.state(),
@@ -597,10 +591,9 @@ export class Session {
     if (file?.format === PROJECT_EXTENSION) return this.overwrite(file);
     if ((doc.patches.length || doc.objects.length) && !this.flattened && this.host) {
       const answer = await this.host.ask({
-        message: doc.patches.length ? 'Сохранить слои?' : 'Сохранить объекты?',
-        detail: doc.patches.length
-          ? `Слои останутся слоями, только если сохранить документ в формате canvaaaas (.caaa): после повторного открытия их можно будет скрывать и править их маски. В картинке они сольются с холстом${doc.objects.length ? ', а объекты пропадут' : ''}.`
-          : 'Объекты сохранятся, только если сохранить документ в формате canvaaaas (.caaa). В картинку они не попадут.',
+        message: 'Сохранить слои?',
+        detail:
+          'Слои и их версии останутся, только если сохранить документ в формате canvaaaas (.caaa): после повторного открытия их можно будет переключать, скрывать и править. В картинке видимое сольётся с холстом.',
         buttons: ['Сохранить в .caaa…', file && !file.blocker ? `Записать в «${doc.name}»` : 'Сохранить картинкой…', 'Отмена'],
       });
       if (answer === 0) return this.saveAs({ kind: 'project' });
@@ -774,13 +767,19 @@ export class Session {
     });
   }
 
-  /** Удалить слой: обычный шаг истории, ⌘Z его возвращает. Слой отделённого объекта уходит вместе с объектом */
+  /** Удалить версию слоя: если она была на холсте, слой показывает предыдущую (или исходник). Шаг ⌘Z */
   removePatch(patchId: string): Promise<void> {
     return this.serialDoc((doc) => {
       const patch = doc.patch(patchId);
+      if (patch.lifted) throw new Error('Исходник не удалить: удалите слой');
+      const owner = patch.object ? doc.objects.find((o) => o.id === patch.object) : undefined;
       doc.batch(() => {
+        if (owner?.current === patchId) {
+          const versions = doc.patches.filter((p) => p.object === owner.id && !p.lifted);
+          const prev = versions[versions.findIndex((p) => p.id === patchId) - 1];
+          doc.setObjects(doc.objects.map((o) => (o === owner ? { ...o, current: prev?.id } : o)));
+        }
         doc.removePatch(patchId);
-        if (patch.lifted && patch.object && doc.objects.some((o) => o.id === patch.object)) doc.setObjects(withoutTree(doc.objects, patch.object));
       });
       this.changed();
     });
@@ -810,37 +809,19 @@ export class Session {
   }
 
   /**
-   * Картинки, по которым браузер сам показывает правку маски слоя или задачи, не дожидаясь сервера: холст под слоем,
-   * слои над ним, ответ модели на весь кусок и маска до растушёвки — в размере превью. version — чья маска в картинке.
+   * Картинки, по которым браузер сам показывает правку маски версии, не дожидаясь сервера: холст под ней,
+   * версии над ней, ответ модели на весь кусок и маска до растушёвки — в размере превью. version — чья маска в картинке.
    */
-  async maskEditImage(target: { patch: string } | { job: string; n: number }, part: string): Promise<{ data: Buffer; type: string; version: number }> {
+  async maskEditImage(patchId: string, part: string): Promise<{ data: Buffer; type: string; version: number }> {
     const doc = this.requireDoc();
-    let rect: Rect;
-    let skip: string | null;
-    let mask: Uint8Array;
-    let version: number;
-    let rgb: () => Buffer;
-    if ('patch' in target) {
-      const patch = doc.patch(target.patch);
-      ({ rect, mask, maskVersion: version } = patch);
-      skip = patch.id;
-      rgb = () => {
-        const out = Buffer.alloc(rect.width * rect.height * 3);
-        for (let i = 0; i < rect.width * rect.height; i++) patch.layer.copy(out, i * 3, i * 4, i * 4 + 3);
-        return out;
-      };
-    } else {
-      const job = this.readyJob(target.job);
-      rect = job.prep.frame.inside;
-      skip = job.replaces && doc.hasPatch(job.replaces.patchId) ? job.replaces.patchId : null;
-      mask = job.mask;
-      version = job.maskRev;
-      rgb = () => {
-        const gen = job.variants[target.n]?.gen;
-        if (!gen) throw new Error('Вариант не готов');
-        return insideOf(job.prep, gen);
-      };
-    }
+    const patch = doc.patch(patchId);
+    const { rect, mask, maskVersion: version } = patch;
+    const skip = patch.id;
+    const rgb = () => {
+      const out = Buffer.alloc(rect.width * rect.height * 3);
+      for (let i = 0; i < rect.width * rect.height; i++) patch.layer.copy(out, i * 3, i * 4, i * 4 + 3);
+      return out;
+    };
     const k = Math.min(1, EDIT_PREVIEW_MAX / Math.max(rect.width, rect.height));
     const scaled = (data: Uint8Array, channels: 1 | 3 | 4) => {
       const img = sharp(data, { raw: { width: rect.width, height: rect.height, channels } });
@@ -910,7 +891,6 @@ export class Session {
       return ref.image;
     });
     const object = only.startsWith('obj:') ? only.slice(4) : undefined;
-    const lifted = object ? liftedLayer(this.requireDoc(), object) : undefined;
     return this.enqueue({
       prompt: req.prompt.trim(),
       hide: !!req.hide,
@@ -920,7 +900,6 @@ export class Session {
       shapes,
       bitmaps,
       object,
-      lifted: lifted?.active ? { rect: lifted.rect } : undefined,
       area,
       references,
       sketch: checkSketch(req.sketch),
@@ -947,9 +926,9 @@ export class Session {
    */
   patchVariants(patchId: string, req: PatchVariantsRequest): string {
     const patch = this.requireDoc().patch(patchId);
-    if (patch.lifted) throw new Error('Отделённый объект перерисовывают правкой: выделите его и напишите задачу');
+    if (patch.lifted) throw new Error('Исходник перерисовывают правкой: выделите слой и напишите задачу');
     const box = maskBBox(patch.mask, patch.rect.width, patch.rect.height);
-    if (!box) throw new Error('Маска слоя пустая: верните кистью то, что нужно перерисовать');
+    if (!box) throw new Error('Маска версии пустая: верните кистью то, что нужно перерисовать');
     return this.enqueue({
       prompt: req.prompt?.trim() || patch.prompt,
       hide: req.hide ?? patch.hide ?? false,
@@ -964,7 +943,7 @@ export class Session {
       sketch: patch.sketch ?? [],
       director: req.director ?? patch.directed !== undefined,
       directed: patch.directed ? { key: taskKey({ prompt: patch.prompt, hide: patch.hide ?? false }), text: patch.directed } : undefined,
-      replaces: { patchId, mask: patch.mask, rect: patch.rect, feather: patch.feather },
+      from: { patchId, mask: patch.mask, rect: patch.rect, feather: patch.feather },
     });
   }
 
@@ -978,14 +957,13 @@ export class Session {
       | 'shapes'
       | 'bitmaps'
       | 'object'
-      | 'lifted'
       | 'detach'
       | 'area'
       | 'references'
       | 'sketch'
       | 'director'
       | 'directed'
-      | 'replaces'
+      | 'from'
     > & {
       variants: number;
     },
@@ -1003,13 +981,11 @@ export class Session {
       variantsRequested: Math.min(Math.max(Math.round(task.variants), 1), 4),
       directing: false,
       reviewing: false,
-      maskUndo: [],
       maskRev: 0,
       variants: [],
       selected: 0,
       picked: false,
       rev: 1,
-      layerPngs: new Map(),
       abort: new AbortController(),
       maskChain: Promise.resolve(),
     };
@@ -1048,14 +1024,14 @@ export class Session {
     try {
       const doc = this.doc;
       if (!doc || doc.id !== job.docId) throw new Error('Документ уже закрыт');
-      // Слой могли удалить, пока задача ждала очереди: тогда вариант ляжет новым слоем
-      const { replaces } = job;
-      const current = replaces && doc.hasPatch(replaces.patchId) ? doc.patch(replaces.patchId) : null;
+      // Версию могли удалить, пока задача ждала очереди: тогда варианты — просто новые версии
+      const { from } = job;
+      const current = from && doc.hasPatch(from.patchId) ? doc.patch(from.patchId) : null;
       const prep = await prepareEdit({
         image: doc.raw(),
-        mask: replaces ? layerMask(replaces) : await this.rasterize(job, doc),
+        mask: from ? layerMask(from) : await this.rasterize(job, doc),
         crop: current ? (inside) => doc.regionWithout(inside, current.id) : undefined,
-        feather: replaces?.feather,
+        feather: from?.feather,
         prompt: job.prompt,
         guide: guideOf(job.hide),
         style: job.style,
@@ -1074,6 +1050,7 @@ export class Session {
           n: 0,
           status: 'done',
           current: true,
+          patch: current.id,
           gen,
           outsideChangedPct: stats.outsideChangedPct,
           insideChangedPct: stats.insideChangedPct,
@@ -1156,11 +1133,12 @@ export class Session {
           v.outsideChangedPct = stats.outsideChangedPct;
           v.insideChangedPct = stats.insideChangedPct;
           v.status = 'done';
-          // Первый готовый новый вариант сразу на холсте, даже если до него был выбран нынешний слой
-          // (или вариант по прежней задаче), — если только пользователь сам не выбрал другой
+          // Первый готовый новый вариант сразу на холсте, даже если до него была версия, от которой просили ещё
+          // (или вариант по прежней задаче), — если только пользователь сам не выбрал другую
           const selected = job.variants[job.selected];
           if (selected?.status !== 'done' || (!job.picked && (selected.current || (jump && !shown)))) job.selected = v.n;
           shown = true;
+          await this.land(job, v, job.selected === v.n);
         } catch (err) {
           v.status = 'error';
           v.error = message(err);
@@ -1222,8 +1200,9 @@ export class Session {
         const { gen, modelOutput } = await fitGenerated(prep, res.image);
         const stats = await measure(prep, gen, modelOutput);
         Object.assign(step, { gen, elapsedMs: res.elapsedMs, outsideChangedPct: stats.outsideChangedPct, insideChangedPct: stats.insideChangedPct, status: 'done' });
-        // Новый шаг сразу на холсте, если пользователь, пока шли шаги, сам не выбрал другой вариант
+        // Новый шаг сразу на холсте, если пользователь, пока шли шаги, сам не выбрал другую версию
         if (!job.picked || job.variants[job.selected]?.status !== 'done') job.selected = step.n;
+        await this.land(job, step, job.selected === step.n);
         job.status = 'done';
         base = step;
         step = undefined;
@@ -1312,15 +1291,7 @@ export class Session {
     }
   }
 
-  selectVariant(jobId: string, n: number): void {
-    const job = this.job(jobId);
-    if (job.variants[n]?.status !== 'done') throw new Error('Вариант не готов');
-    job.selected = n;
-    job.picked = true;
-    this.changed();
-  }
-
-  /** «Ещё варианты»: та же правка или с поправкой задачи, новые генерации к уже имеющимся */
+  /** «Ещё варианты»: та же правка или с поправкой задачи, новые версии к уже имеющимся */
   async moreVariants(jobId: string, count: number, change: RedoChange = {}): Promise<void> {
     const job = this.job(jobId);
     const busy =
@@ -1344,9 +1315,8 @@ export class Session {
     if (job.status !== 'error') throw new Error('Повторить можно только задачу с ошибкой');
     redo(job, change);
     job.abort = new AbortController();
-    Object.assign(job, { status: 'queued', error: undefined, prep: undefined, mask: undefined, alpha: undefined, variants: [], maskUndo: [], selected: 0, picked: false });
+    Object.assign(job, { status: 'queued', error: undefined, prep: undefined, mask: undefined, alpha: undefined, variants: [], selected: 0, picked: false });
     job.maskRev++;
-    job.layerPngs.clear();
     this.changed();
     this.schedule();
   }
@@ -1359,7 +1329,7 @@ export class Session {
     job.abort = new AbortController();
   }
 
-  /** Убрать задачу: отклонить варианты или отменить генерацию */
+  /** Убрать задачу из очереди: идущая генерация отменяется, готовые варианты остаются версиями слоя */
   discard(jobId: string): void {
     const job = this.job(jobId);
     job.abort.abort();
@@ -1368,16 +1338,14 @@ export class Session {
     this.schedule();
   }
 
-  /** Принять выбранный вариант: новым слоем сверху или, если это ещё варианты слоя, на его место */
-  accept(jobId: string): void {
-    const job = this.readyJob(jobId);
-    const doc = this.requireDoc();
-    if (doc.id !== job.docId) throw new Error('Задача от другого документа');
-    const v = job.variants[job.selected];
-    if (v?.status !== 'done' || !v.gen) throw new Error('Выбранный вариант не готов');
-    const target = job.replaces && doc.hasPatch(job.replaces.patchId) ? job.replaces.patchId : null;
-    // Оставили нынешний слой и маску не трогали — менять нечего
-    if (!(v.current && target && job.mask === job.prep.insideMask)) {
+  /**
+   * Готовый вариант — версией слоя задачи. Слоя нет (выделили не слой) — он появляется из выделения, с именем из задачи.
+   * show — новая версия сразу текущая (если пользователь, пока шли варианты, сам не выбрал другую). У «Дорисовать фон»
+   * вариант — версия заплатки фона под слоем. Маски слоев, чей край версия задела, пересчитываются следом
+   */
+  private land(job: Job, v: Variant, show: boolean): Promise<void> {
+    return this.serialDoc((doc) => {
+      if (doc.id !== job.docId || !v.gen || !job.prep || !job.alpha || !job.mask || v.patch) return;
       const patch: NewPatch = {
         id: randomUUID(),
         rect: job.prep.frame.inside,
@@ -1394,79 +1362,127 @@ export class Session {
         model: job.model,
         size: job.size,
         refs: job.references,
-        object: job.object && doc.objects.some((o) => o.id === job.object) ? job.object : undefined,
       };
       if (job.detach) {
-        this.placeDetached(doc, job.detach, patch);
-      } else if (target || !this.mergeLifted(doc, job, patch)) {
-        // Участок, где холст меняется: по пикселям до и после маски объектов пересчитываются следом
-        const before = target ? doc.patch(target).rect : patch.rect;
-        const region = union(before, patch.rect);
-        const pixels = doc.region(region);
-        const placed = target ? doc.replacePatch(target, patch) : doc.addPatch(patch);
-        void this.followObjects(doc, placed.id, region, pixels, doc.region(region));
+        v.patch = this.landFill(doc, job, patch, show);
+        this.changed();
+        return;
       }
-    }
-    this.discard(jobId);
+      const existing = job.object ? doc.objects.find((o) => o.id === job.object) : undefined;
+      const owner = existing ?? this.layerFromJob(doc, job);
+      const region = patch.rect;
+      const before = doc.region(region);
+      let placed: string | undefined;
+      doc.batch(() => {
+        if (!existing) doc.setObjects(placeObject(doc.objects, owner));
+        placed = doc.addPatch({ ...patch, object: owner.id }).id;
+        if (show) doc.setObjects(doc.objects.map((o) => (o.id === owner.id ? { ...o, current: placed } : o)));
+      });
+      job.object = owner.id;
+      v.patch = placed;
+      this.changed();
+      if (show) void this.followObjects(doc, placed!, region, before, doc.region(region));
+    });
   }
 
-  /** Отделить объект: фон ложится слоем, объект — своим слоем поверх него с пикселями холста; всё одним шагом отмены */
-  private placeDetached(doc: CanvasDocument, objectId: string, fill: NewPatch): void {
-    const obj = doc.objects.find((o) => o.id === objectId);
-    if (!obj) throw new Error('Объекта уже нет: отделять нечего');
-    if (liftedLayer(doc, objectId)) throw new Error('Объект уже отделён');
+  /** Новый слой из выделения задачи: имя — задача */
+  private layerFromJob(doc: CanvasDocument, job: Job & { prep?: PreparedEdit }): DocObject {
+    const bitmap = trim({ rect: job.prep!.frame.inside, mask: job.prep!.insideMask });
+    if (!bitmap) throw new Error('Выделение пустое');
+    return { id: randomUUID(), name: layerName(job.prompt), ...bitmap, createdAt: new Date().toISOString(), version: doc.nextObjectVersion(), edit: true };
+  }
+
+  /**
+   * Вариант фона под слоем — версией его заплатки. Первый вариант снимает исходник слоя (пиксели холста без его текущей
+   * версии, по маске чуть шире) и заводит заплатку; одним шагом отмены. Возвращает id версии
+   */
+  private landFill(doc: CanvasDocument, job: Job, patch: NewPatch, show: boolean): string {
+    const obj = doc.objects.find((o) => o.id === job.detach);
+    if (!obj) throw new Error('Слоя уже нет: дорисовывать фон не под чем');
+    const existing = doc.objects.find((o) => o.kind === 'fill' && o.under === obj.id);
+    let placed = '';
+    doc.batch(() => {
+      if (!liftedLayer(doc, obj.id)) this.lift(doc, obj, job.id);
+      const fill: DocObject = existing ?? {
+        id: randomUUID(),
+        name: `Фон под «${obj.name}»`,
+        kind: 'fill',
+        under: obj.id,
+        ...job.bitmaps.get(`obj:${obj.id}`)!,
+        createdAt: new Date().toISOString(),
+        version: doc.nextObjectVersion(),
+      };
+      if (!existing) doc.setObjects([...doc.objects, fill]);
+      placed = doc.addPatch({ ...patch, object: fill.id }).id;
+      if (show || !fill.current) doc.setObjects(doc.objects.map((o) => (o.id === fill.id ? { ...o, current: placed } : o)));
+    });
+    return placed;
+  }
+
+  /**
+   * Снять исходник слоя: пиксели холста под его маской, чуть шире, чтобы контур не обрезался, — без его текущей версии.
+   * Маска слоя с тех пор — маска этого исходника
+   */
+  private lift(doc: CanvasDocument, obj: DocObject, jobId: string): void {
     const { rect, mask } = dilate(obj, LIFT_GROW, { x: 0, y: 0, width: doc.width, height: doc.height });
-    // Пиксели объекта — с холста, пока под ним ещё не фон
-    const rgb = doc.region(rect);
+    const rgb = obj.current ? doc.regionWithout(rect, obj.current) : doc.region(rect);
     const alpha = featherAlpha(mask, rect.width, rect.height, LIFT_FEATHER);
     const layer = Buffer.alloc(rect.width * rect.height * 4);
     for (let i = 0; i < alpha.length; i++) {
       rgb.copy(layer, i * 4, i * 3, i * 3 + 3);
       layer[i * 4 + 3] = Math.round(alpha[i]! * 255);
     }
-    doc.batch(() => {
-      doc.addPatch(fill);
-      doc.addPatch({
-        id: randomUUID(),
-        rect,
-        layer,
-        mask,
-        feather: LIFT_FEATHER,
-        prompt: obj.name,
-        jobId: fill.jobId,
-        variant: fill.variant,
-        createdAt: fill.createdAt,
-        object: obj.id,
-        lifted: true,
-      });
-      // Маска объекта теперь — маска его слоя: её и правят ластиком по слою
-      doc.setObjects(doc.objects.map((o) => (o === obj ? { ...o, rect, mask, version: doc.nextObjectVersion(), lost: undefined } : o)));
+    doc.addPatch({ id: randomUUID(), rect, layer, mask, feather: LIFT_FEATHER, prompt: obj.name, jobId, variant: 0, createdAt: new Date().toISOString(), object: obj.id, lifted: true });
+    doc.setObjects(doc.objects.map((o) => (o.id === obj.id ? { ...o, rect, mask, version: doc.nextObjectVersion(), lost: undefined } : o)));
+  }
+
+  // ——— Слои ———
+
+  /** Версия слоя на холсте; null — исходник. Шаг ⌘Z */
+  setCurrent(objectId: string, patchId: string | null): Promise<void> {
+    return this.serialDoc((doc) => {
+      const obj = doc.object(objectId);
+      if (patchId !== null) {
+        const p = doc.patch(patchId);
+        if (p.object !== objectId || p.lifted) throw new Error('Это не версия этого слоя');
+      }
+      if ((obj.current ?? null) === patchId) return;
+      doc.setObjects(doc.objects.map((o) => (o.id === objectId ? { ...o, current: patchId ?? undefined } : o)));
+      // Версию выбрали руками: новые варианты её не перебьют
+      for (const j of this.jobs) {
+        const v = j.variants.find((x) => x.patch === patchId);
+        if (j.object === objectId) j.picked = true;
+        if (v) j.selected = v.n;
+      }
+      this.changed();
     });
   }
 
-  /**
-   * Правка отделённого объекта ложится в его слой, а не новым поверх: иначе при сдвиге она осталась бы на прежнем месте.
-   * Слой с тех пор сдвинули — правка едет вместе с ним. false — объект не отделён (или скрыт), правка ложится как обычно
-   */
-  private mergeLifted(doc: CanvasDocument, job: Job, patch: NewPatch): boolean {
-    const lifted = job.object && job.lifted ? liftedLayer(doc, job.object) : undefined;
-    if (!lifted?.active || !job.lifted) return false;
-    const at = { ...patch.rect, x: patch.rect.x + lifted.rect.x - job.lifted.rect.x, y: patch.rect.y + lifted.rect.y - job.lifted.rect.y };
-    const into = lifted.rect;
-    const layer = Buffer.from(lifted.layer);
-    const o = intersect(at, into);
-    for (let y = o.y; y < o.y + o.height; y++) {
-      for (let x = o.x; x < o.x + o.width; x++) {
-        const src = ((y - at.y) * at.width + x - at.x) * 4;
-        const a = patch.layer[src + 3]!;
-        if (!a) continue;
-        const dst = ((y - into.y) * into.width + x - into.x) * 4;
-        for (let c = 0; c < 3; c++) layer[dst + c] = Math.round(layer[dst + c]! + ((patch.layer[src + c]! - layer[dst + c]!) * a) / 255);
-      }
-    }
-    doc.replacePatch(lifted.id, { ...lifted, id: randomUUID(), layer });
-    return true;
+  /** Скрыть слой или показать; с частями. Шаг ⌘Z */
+  setHidden(objectId: string, hidden: boolean): Promise<void> {
+    return this.serialDoc((doc) => {
+      if (!!doc.object(objectId).hidden === hidden) return;
+      doc.setObjects(doc.objects.map((o) => (o.id === objectId ? { ...o, hidden: hidden || undefined } : o)));
+      this.changed();
+    });
   }
+
+  /** Добавить к маске версии то, что модель нарисовала за её краем: сравнивается с холстом без этой версии */
+  expandVersion(patchId: string): Promise<number> {
+    return this.serialDoc((doc) => {
+      const p = doc.patch(patchId);
+      const { width, height } = p.rect;
+      const rgb = Buffer.alloc(width * height * 3);
+      for (let i = 0; i < width * height; i++) p.layer.copy(rgb, i * 3, i * 4, i * 4 + 3);
+      const rect = intersect(p.rect, { x: 0, y: 0, width: doc.width, height: doc.height });
+      if (rect.width !== width || rect.height !== height) throw new Error('Версия выходит за край холста');
+      const { mask, addedPx } = expandMaskByDiff(p.mask, doc.regionWithout(p.rect, p.id), rgb, width, height);
+      if (addedPx > 0) doc.setPatchMask(p.id, mask);
+      this.changed();
+      return addedPx;
+    });
+  }
+
   /**
    * Маски объектов следуют за принятой правкой: те, чей край она задела, пересчитываются по новому холсту.
    * Это часть того же шага отмены: ⌘Z правки возвращает и прежние маски. Если пока считали, правку уже отменили
@@ -1474,7 +1490,7 @@ export class Session {
    */
   private async followObjects(doc: CanvasDocument, patchId: string, region: Rect, before: Buffer, after: Buffer): Promise<void> {
     // Маска отделённого объекта — маска его слоя, её не пересчитывают
-    const objects = doc.objects.filter((o) => !liftedLayer(doc, o.id));
+    const objects = doc.objects.filter((o) => o.kind !== 'fill' && !liftedLayer(doc, o.id));
     if (!objects.length) return;
     const join = doc.historyTop();
     let masks: Map<string, Bitmap | null>;
@@ -1510,17 +1526,17 @@ export class Session {
     return maskPng(this.maskOf(id), max);
   }
 
-  /** Сохранить выделение объектом; объекты внутри него становятся его частями, а он — частью того, в чём лежит */
+  /** Слой из выделения; слои внутри него становятся его частями, а он — частью того, в чём лежит */
   saveObject(input: MaskShape[], name?: string): Promise<string> {
     return this.serialDoc(async (doc) => {
       const bitmap = await this.selectionBitmap(doc, input);
       if (this.doc !== doc) throw new Error('Документ уже закрыт');
       const used = new Set(doc.objects.map((o) => o.name));
-      let n = doc.objects.length + 1;
-      while (used.has(`Объект ${n}`)) n++;
+      let n = doc.objects.filter((o) => o.kind !== 'fill').length + 1;
+      while (used.has(`Слой ${n}`)) n++;
       const obj: DocObject = {
         id: randomUUID(),
-        name: name?.trim() || `Объект ${n}`,
+        name: name?.trim() || `Слой ${n}`,
         ...bitmap,
         createdAt: new Date().toISOString(),
         version: doc.nextObjectVersion(),
@@ -1542,29 +1558,32 @@ export class Session {
   }
 
   /**
-   * Удалить объект — только имя и маску, пиксели холста те же; его части переходят к его родителю.
-   * Отделённый объект уходит с холста: его слой и части вместе с ним, под ним уже фон. ⌘Z возвращает
+   * Удалить слой с его версиями. Неотделённый — на холсте снова исходник, его части переходят к его родителю.
+   * Отделённый уходит с холста вместе с частями — под ним уже фон; заплатка фона — со своими версиями. ⌘Z возвращает
    */
   deleteObject(id: string): Promise<void> {
     return this.serialDoc((doc) => {
-      const layer = liftedLayer(doc, id);
+      const obj = doc.object(id);
+      const whole = obj.kind === 'fill' || !!liftedLayer(doc, id);
+      const gone = new Set(whole ? [id, ...descendants(doc.objects, id).map((o) => o.id)] : [id]);
       doc.batch(() => {
-        if (layer) doc.removePatch(layer.id);
-        doc.setObjects(layer ? withoutTree(doc.objects, id) : removeObject(doc.objects, id));
+        for (const p of doc.patches.filter((x) => x.object && gone.has(x.object))) doc.removePatch(p.id);
+        doc.setObjects(whole ? withoutTree(doc.objects, id) : removeObject(doc.objects, id));
       });
       this.changed();
     });
   }
 
   /**
-   * Отделить объект: задача в очереди, где модель дорисовывает фон под ним — область ей стирают, с запасом вокруг контура.
-   * «Принять» кладёт фон слоем, а объект — своим слоем поверх: его можно сдвигать, скрывать и удалять, не трогая фон
+   * Дорисовать фон под слоем: задача в очереди, где модель рисует то, что за ним, — область ей стирают, с запасом вокруг
+   * контура. Первый готовый вариант снимает исходник слоя и заводит под ним заплатку фона; слой с тех пор можно сдвигать
+   * и скрывать. Уже отделённому — ещё варианты заплатки
    */
   detachObject(objectId: string, req: DetachRequest): string {
     const doc = this.requireDoc();
     const obj = doc.object(objectId);
-    if (liftedLayer(doc, objectId)) throw new Error('Объект уже отделён');
-    if (this.jobs.some((j) => j.detach === objectId)) throw new Error('Этот объект уже отделяется');
+    if (obj.kind === 'fill') throw new Error('Это и есть фон');
+    if (this.jobs.some((j) => j.detach === objectId && j.status !== 'done' && j.status !== 'error')) throw new Error('Фон под этим слоем уже рисуется');
     const grown = dilate(obj, fillGrow(obj.rect), { x: 0, y: 0, width: doc.width, height: doc.height });
     const id = `obj:${objectId}`;
     return this.enqueue({
@@ -1584,23 +1603,26 @@ export class Session {
     });
   }
 
-  /** Сдвинуть отделённый объект: его слой и маски — его и его частей, одним шагом отмены. Слой остаётся целиком на холсте */
+  /**
+   * Сдвинуть отделённый слой: все его версии и снятый исходник, его части с их версиями и маски — одним шагом отмены.
+   * Всё сдвигаемое остаётся на холсте
+   */
   moveObject(objectId: string, dx: number, dy: number): Promise<{ rev: number }> {
     return this.serialDoc((doc) => {
-      const patch = liftedLayer(doc, objectId);
-      if (!patch) throw new Error('Сдвинуть можно только отделённый объект');
-      const { rect } = patch;
-      const x = Math.min(Math.max(0, rect.x + Math.round(dx)), doc.width - rect.width);
-      const y = Math.min(Math.max(0, rect.y + Math.round(dy)), doc.height - rect.height);
-      if (x !== rect.x || y !== rect.y) {
-        const moved = new Set([objectId, ...descendants(doc.objects, objectId).map((o) => o.id)]);
+      if (!liftedLayer(doc, objectId)) throw new Error('Сначала дорисуйте фон под слоем');
+      const moved = new Set([objectId, ...descendants(doc.objects, objectId).map((o) => o.id)]);
+      const patches = doc.patches.filter((p) => p.object && moved.has(p.object));
+      const all = patches.map((p) => p.rect).reduce(union);
+      const sx = Math.min(Math.max(-all.x, Math.round(dx)), doc.width - all.x - all.width);
+      const sy = Math.min(Math.max(-all.y, Math.round(dy)), doc.height - all.y - all.height);
+      if (sx || sy) {
         const bounds = { x: 0, y: 0, width: doc.width, height: doc.height };
         doc.batch(() => {
-          doc.movePatch(patch.id, { ...rect, x, y });
+          for (const p of patches) doc.movePatch(p.id, { ...p.rect, x: p.rect.x + sx, y: p.rect.y + sy });
           doc.setObjects(
             doc.objects.map((o) => {
               if (!moved.has(o.id)) return o;
-              const b = shiftBitmap(o, x - rect.x, y - rect.y, bounds);
+              const b = shiftBitmap(o, sx, sy, bounds);
               return b ? { ...o, ...b, version: doc.nextObjectVersion() } : o;
             }),
           );
@@ -1683,119 +1705,6 @@ export class Session {
     const b = await this.selectionBitmap(doc, req.shapes);
     return this.segmentation.keep(this.segmentation.snap(doc, [b], Math.max(0, Math.min(400, req.reach)))[0]!);
   }
-
-  // ——— Маска задачи после генерации ———
-
-  private serial<T>(job: Job, fn: () => Promise<T> | T): Promise<T> {
-    const next = job.maskChain.then(fn);
-    job.maskChain = next.catch(() => undefined);
-    return next;
-  }
-
-  private remask(job: Job & { prep: PreparedEdit; mask: Uint8Array; alpha: Float32Array }, mask: Uint8Array, changed?: Rect): void {
-    job.maskUndo.push(job.mask);
-    if (job.maskUndo.length > MASK_UNDO_LIMIT) job.maskUndo.shift();
-    this.setMask(job, mask, changed);
-  }
-
-  /** Новая маска задачи; changed — участок, вне которого она не менялась: растушёвка пересчитывается только около него */
-  private setMask(job: Job & { prep: PreparedEdit; alpha: Float32Array }, mask: Uint8Array, changed?: Rect): void {
-    const { inside } = job.prep.frame;
-    if (changed) {
-      const { rect, alpha } = featherAlphaRegion(mask, inside.width, inside.height, job.prep.feather, changed);
-      // Копия: прежняя альфа может быть альфой подготовки куска
-      const next = new Float32Array(job.alpha);
-      for (let row = 0; row < rect.height; row++) next.set(alpha.subarray(row * rect.width, (row + 1) * rect.width), (rect.y + row) * inside.width + rect.x);
-      job.alpha = next;
-    } else {
-      job.alpha = featherAlpha(mask, inside.width, inside.height, job.prep.feather);
-    }
-    job.mask = mask;
-    job.maskRev++;
-    job.rev++;
-    job.layerPngs.clear();
-    this.changed();
-  }
-
-  /** Дорисовать или стереть маску задачи и перевклеить все варианты */
-  editMask(jobId: string, shapes: MaskShape[]): Promise<MaskEditResult> {
-    const job = this.readyJob(jobId);
-    return this.serial(job, async () => {
-      const { mask, changed } = await applyShapesRegion(job.mask, job.prep.frame.inside, shapes);
-      if (changed) this.remask(job, mask, changed);
-      return { version: job.maskRev, rev: job.rev };
-    });
-  }
-
-  /** Добавить к маске то, что модель нарисовала за её краем в выбранном варианте */
-  expandMask(jobId: string): Promise<number> {
-    const job = this.readyJob(jobId);
-    return this.serial(job, () => {
-      const v = job.variants[job.selected];
-      if (v?.status !== 'done' || !v.gen) throw new Error('Выбранный вариант не готов');
-      const { inside } = job.prep.frame;
-      const { mask, addedPx } = expandMaskByDiff(
-        job.mask,
-        insideOf(job.prep, job.prep.frameRgb),
-        insideOf(job.prep, v.gen),
-        inside.width,
-        inside.height,
-      );
-      if (addedPx > 0) this.remask(job, mask);
-      return addedPx;
-    });
-  }
-
-  undoMask(jobId: string): Promise<void> {
-    const job = this.readyJob(jobId);
-    return this.serial(job, () => {
-      const prev = job.maskUndo.pop();
-      if (prev) this.setMask(job, prev);
-    });
-  }
-
-  /**
-   * Слой варианта: цвет ответа модели и растушёванная маска в альфе, PNG размером с часть куска на холсте.
-   * Вариант на замену слоя ложится не поверх него, а вместо: показываем участок холста, каким он станет, — везде,
-   * где лежит новый или прежний слой, иначе у края растушёвки и там, где маску сузили, проглядывал бы прежний.
-   */
-  async layerPng(jobId: string, n: number): Promise<Buffer> {
-    const job = this.readyJob(jobId);
-    const cached = job.layerPngs.get(n);
-    if (cached) return cached;
-    const v = job.variants[n];
-    if (v?.status !== 'done' || !v.gen) throw new Error('Вариант не готов');
-    const { inside } = job.prep.frame;
-    const rev = job.rev;
-    const layer = buildLayer(job.prep, v.gen, job.alpha);
-    const doc = this.requireDoc();
-    const target = job.replaces && doc.hasPatch(job.replaces.patchId) ? doc.patch(job.replaces.patchId) : null;
-    if (target) {
-      const after = doc.regionReplaced(inside, target.id, inside, layer);
-      const old = target.rect;
-      for (let y = 0; y < inside.height; y++) {
-        for (let x = 0; x < inside.width; x++) {
-          const i = y * inside.width + x;
-          const ox = inside.x + x - old.x;
-          const oy = inside.y + y - old.y;
-          const under = ox >= 0 && oy >= 0 && ox < old.width && oy < old.height && target.layer[(oy * old.width + ox) * 4 + 3]! > 0;
-          layer[i * 4] = after[i * 3]!;
-          layer[i * 4 + 1] = after[i * 3 + 1]!;
-          layer[i * 4 + 2] = after[i * 3 + 2]!;
-          layer[i * 4 + 3] = under || layer[i * 4 + 3]! > 0 ? 255 : 0;
-        }
-      }
-    }
-    const png = await sharp(layer, {
-      raw: { width: inside.width, height: inside.height, channels: 4 },
-    })
-      .png({ compressionLevel: 2 })
-      .toBuffer();
-    // Пока кодировали, маска или холст могли измениться: такую картинку не кэшируем
-    if (job.rev === rev) job.layerPngs.set(n, png);
-    return png;
-  }
-
 }
 
 /** Слой отделённого объекта; нет — объект не отделён */

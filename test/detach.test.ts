@@ -34,13 +34,14 @@ async function done(s: Session) {
   return s.state().jobs[0]!.id;
 }
 
-/** Отделённый квадрат: фон под ним и сам он своим слоем */
+/** Квадрат-слой с дорисованным фоном: под ним заплатка фона, сам он — снятый исходник */
 async function detached() {
   const s = await session();
   const id = await s.saveObject([{ kind: 'rect', x: 100, y: 100, width: 60, height: 60 }]);
   s.detachObject(id, { model: 'flash', size: 'auto', variants: 1 });
-  s.accept(await done(s));
-  return { s, doc: s.doc!, id, layer: s.doc!.patches[1]! };
+  await done(s);
+  const doc = s.doc!;
+  return { s, doc, id, layer: doc.patches.find((p) => p.lifted)!, fill: doc.objects.find((o) => o.kind === 'fill')! };
 }
 
 describe('Слой сдвигается', () => {
@@ -84,26 +85,23 @@ describe('Слой сдвигается', () => {
   });
 });
 
-describe('Отделить объект', () => {
-  it('фон — под ним, объект — своим слоем сверху; холст тот же, вокруг — побайтно исходник', async () => {
+describe('Дорисовать фон под слоем', () => {
+  it('заплатка фона — слоем под всеми, исходник слоя снят; холст тот же, вокруг — побайтно исходник; одним шагом ⌘Z', async () => {
     const s = await session();
     const before = Buffer.from(s.doc!.composite);
     const id = await s.saveObject([{ kind: 'rect', x: 100, y: 100, width: 60, height: 60 }]);
     s.detachObject(id, { model: 'flash', size: 'auto', variants: 1 });
-    expect(() => s.detachObject(id, { model: 'flash', size: 'auto', variants: 1 })).toThrow('уже отделяется');
-    const job = await done(s);
-    expect(s.state().jobs[0]!.detach).toBe(id);
-    expect(s.state().jobs[0]!.hide).toBe(true);
-    // Фон — с запасом в 6 px вокруг квадрата
-    expect(s.state().jobs[0]!.bbox).toEqual({ x: 94, y: 94, width: 72, height: 72 });
-    s.accept(job);
+    expect(() => s.detachObject(id, { model: 'flash', size: 'auto', variants: 1 })).toThrow('уже рисуется');
+    await done(s);
+    expect(s.state().jobs[0]).toMatchObject({ detach: id, hide: true, bbox: { x: 94, y: 94, width: 72, height: 72 } });
     const doc = s.doc!;
-    const [fill, layer] = doc.patches;
-    expect(fill!.object).toBe(id);
-    expect(fill!.lifted).toBeUndefined();
-    expect(layer!).toMatchObject({ lifted: true, object: id, rect: { x: 98, y: 98, width: 64, height: 64 } });
-    expect(doc.object(id).rect).toEqual(layer!.rect);
-    expect(s.state().objects[0]!.layer).toBe(layer!.id);
+    const lifted = doc.patches.find((p) => p.lifted)!;
+    const fill = doc.objects.find((o) => o.kind === 'fill')!;
+    expect(lifted).toMatchObject({ object: id, rect: { x: 98, y: 98, width: 64, height: 64 } });
+    expect(fill).toMatchObject({ under: id, name: 'Фон под «Слой 1»' });
+    expect(doc.patch(fill.current!).object).toBe(fill.id);
+    expect(doc.object(id).rect).toEqual(lifted.rect);
+    expect(s.state().objects.find((o) => o.id === id)!.layer).toBe(lifted.id);
     expect(px(doc, 130, 130)).toEqual(RED);
     for (let y = 0; y < H; y += 2) {
       for (let x = 0; x < W; x += 2) {
@@ -111,18 +109,25 @@ describe('Отделить объект', () => {
         expect(doc.composite[(y * W + x) * 3]).toBe(before[(y * W + x) * 3]);
       }
     }
-    // Одним шагом: ⌘Z — ни фона, ни слоя, маска объекта прежняя
+    // Скрыть слой — под ним заплатка, а не квадрат
+    await s.setHidden(id, true);
+    expect(px(doc, 130, 130)).not.toEqual(RED);
+    await s.setHidden(id, false);
+    await s.undo();
+    await s.undo();
     await s.undo();
     expect(doc.patches).toHaveLength(0);
+    expect(doc.objects.map((o) => o.id)).toEqual([id]);
     expect(doc.object(id).rect).toEqual({ x: 100, y: 100, width: 60, height: 60 });
     expect(px(doc, 130, 130)).toEqual(RED);
-    expect(() => s.patchVariants(layer!.id, { variants: 1, model: 'flash', size: 'auto' })).toThrow();
+    expect(() => s.patchVariants(lifted.id, { variants: 1, model: 'flash', size: 'auto' })).toThrow();
   });
 
-  it('сдвиг: объект на новом месте, на старом — фон; части едут с ним; ⌘Z возвращает всё', async () => {
+  it('сдвиг: слой на новом месте, на старом — заплатка; части едут с ним; без фона сдвинуть нельзя; ⌘Z возвращает всё', async () => {
     const { s, doc, id, layer } = await detached();
     const part = await s.saveObject([{ kind: 'rect', x: 110, y: 110, width: 10, height: 10 }]);
     expect(doc.object(part).parent).toBe(id);
+    await expect(s.moveObject(part, 5, 5)).rejects.toThrow('дорисуйте фон');
     const fillAt = [...doc.regionWithout({ x: 130, y: 130, width: 1, height: 1 }, layer.id)];
     await s.moveObject(id, 100, 50.4);
     expect(layer.rect).toMatchObject({ x: 198, y: 148 });
@@ -131,7 +136,6 @@ describe('Отделить объект', () => {
     expect(doc.object(id).rect).toEqual(layer.rect);
     expect(doc.object(part).rect).toEqual({ x: 210, y: 160, width: 10, height: 10 });
     expect(s.dirty).toBe(true);
-    // Не за край холста
     await s.moveObject(id, 1000, 0);
     expect(layer.rect.x).toBe(W - layer.rect.width);
     await s.undo();
@@ -141,8 +145,8 @@ describe('Отделить объект', () => {
     expect(doc.object(part).rect.x).toBe(110);
   });
 
-  it('ластик по слою стирает и маску объекта; удалить объект — уйти с холста вместе со слоем и частями', async () => {
-    const { s, doc, id, layer } = await detached();
+  it('ластик по исходнику стирает и маску слоя; удалить слой — уйти с холста с частями, заплатка остаётся', async () => {
+    const { s, doc, id, layer, fill } = await detached();
     const fillAt = [...doc.regionWithout({ x: 105, y: 130, width: 1, height: 1 }, layer.id)];
     const fillMid = [...doc.regionWithout({ x: 130, y: 130, width: 1, height: 1 }, layer.id)];
     const erase: MaskShape = { kind: 'rect', x: 90, y: 90, width: 40, height: 80, erase: true };
@@ -155,42 +159,70 @@ describe('Отделить объект', () => {
 
     await s.saveObject([{ kind: 'rect', x: 110, y: 110, width: 10, height: 10 }]);
     await s.deleteObject(id);
-    expect(doc.patches).toHaveLength(1);
-    expect(doc.objects).toHaveLength(0);
+    expect(doc.patches.map((p) => p.object)).toEqual([fill.id]);
+    expect(doc.objects.map((o) => o.id)).toEqual([fill.id]);
     expect(px(doc, 130, 130)).toEqual(fillMid);
     await s.undo();
     expect(doc.patches).toHaveLength(2);
-    expect(doc.objects).toHaveLength(2);
-    // Удалить слой объекта — то же самое
-    await s.removePatch(layer.id);
-    expect(doc.objects).toHaveLength(0);
+    expect(doc.objects).toHaveLength(3);
+    await expect(s.removePatch(layer.id)).rejects.toThrow('Исходник');
   });
 
-  it('правка отделённого объекта ложится в его слой и едет вместе с ним', async () => {
-    const { s, doc, id, layer } = await detached();
+  it('правка отделённого слоя — его версия: вместо исходника на холсте и едет вместе с ним', async () => {
+    const { s, doc, id } = await detached();
     const shape: MaskShape = { kind: 'mask', id: `obj:${id}`, x: 0, y: 0, width: 1, height: 1 };
     s.createJob({ shapes: [shape], prompt: 'перекрасить', variants: 1, model: 'flash', size: 'auto' });
-    const job = await done(s);
-    // Пока выбирали вариант, объект сдвинули
-    await s.moveObject(id, 100, 0);
-    s.accept(job);
-    expect(doc.patches).toHaveLength(2);
-    const merged = doc.patches[1]!;
-    expect(merged).toMatchObject({ lifted: true, object: id, rect: { x: 198, y: 98 } });
-    expect(merged.id).not.toBe(layer.id);
-    // Правка — на новом месте объекта, на старом её нет
-    const edited = px(doc, 230, 130);
+    await until(() => s.state().jobs.at(-1)?.status === 'done');
+    const version = doc.object(id).current!;
+    expect(doc.patch(version).object).toBe(id);
+    const edited = px(doc, 130, 130);
     expect(edited).not.toEqual(RED);
+    await s.moveObject(id, 100, 0);
+    expect(px(doc, 230, 130)).toEqual(edited);
     expect(px(doc, 130, 130)).not.toEqual(edited);
-    await s.moveObject(id, -100, 0);
-    expect(px(doc, 130, 130)).toEqual(edited);
+    // Исходник — снова квадрат на новом месте
+    await s.setCurrent(id, null);
+    expect(px(doc, 230, 130)).toEqual(RED);
   });
 
-  it('проект .caaa помнит отделённый объект', async () => {
+  it('заплатка — прямо под своим слоем: старая правка с тем же предметом не проступает ни после сдвига, ни после удаления', async () => {
+    const s = await session();
+    const doc = s.doc!;
+    // Старая правка — слой из генерации, в её пикселях тот же квадрат, только синий
+    const blue = Buffer.alloc(80 * 80 * 4);
+    for (let y = 0; y < 80; y++) for (let x = 0; x < 80; x++) blue.set(x >= 10 && x < 70 && y >= 10 && y < 70 ? [30, 30, 220, 255] : [255, 255, 255, 255], (y * 80 + x) * 4);
+    doc.setObjects([{ id: 'old', name: 'старая правка', rect: { x: 90, y: 90, width: 80, height: 80 }, mask: new Uint8Array(6400).fill(255), createdAt: '', version: 1, current: 'v', edit: true }]);
+    doc.addPatch({ id: 'v', rect: { x: 90, y: 90, width: 80, height: 80 }, layer: blue, prompt: 'синий', jobId: 'j', variant: 0, createdAt: '', object: 'old' });
+    expect(px(doc, 130, 130)).toEqual([30, 30, 220]);
+    const id = await s.saveObject([{ kind: 'rect', x: 100, y: 100, width: 60, height: 60 }]);
+    expect(doc.object(id).parent).toBeUndefined();
+    s.detachObject(id, { model: 'flash', size: 'auto', variants: 1 });
+    await done(s);
+    const under = px(doc, 130, 130);
+    expect(under).toEqual([30, 30, 220]);
+    await s.moveObject(id, 200, 0);
+    expect(px(doc, 330, 130)).toEqual([30, 30, 220]);
+    const fill = [...doc.regionWithout({ x: 130, y: 130, width: 1, height: 1 }, 'v')];
+    expect(px(doc, 130, 130)).not.toEqual([30, 30, 220]);
+    expect(px(doc, 130, 130)).toEqual(fill);
+    await s.deleteObject(id);
+    expect(px(doc, 130, 130)).toEqual(fill);
+  });
+
+  it('проект .caaa помнит слой с дорисованным фоном', async () => {
     const { s, doc, id } = await detached();
     await s.moveObject(id, 40, 0);
     const back = (await openProject(await encodeProject(doc), 'x.caaa')).doc;
-    expect(back.patches[1]).toMatchObject({ lifted: true, object: id, rect: doc.patches[1]!.rect });
+    expect(back.patches.find((p) => p.lifted)).toMatchObject({ object: id, rect: doc.patches.find((p) => p.lifted)!.rect });
+    expect(back.objects.find((o) => o.kind === 'fill')).toMatchObject({ under: id });
     expect(back.composite.equals(doc.composite)).toBe(true);
   });
 });
+
+async function until(check: () => boolean): Promise<void> {
+  const started = Date.now();
+  while (!check()) {
+    if (Date.now() - started > 15_000) throw new Error('Не дождались');
+    await new Promise((r) => setTimeout(r, 30));
+  }
+}

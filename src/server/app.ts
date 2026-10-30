@@ -168,6 +168,12 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     if (!doc) throw new HttpError(404, 'Документ не открыт');
     send(res, 200, await doc.tile(Number(k), Number(x), Number(y)), 'image/jpeg', IMMUTABLE);
   });
+  // Исходник без слоёв — для сравнения; он не меняется, пока документ открыт
+  route('GET', '/api/doc/base/:k/:x/:y.jpg', async (_req, res, [k, x, y]) => {
+    const doc = session.doc;
+    if (!doc) throw new HttpError(404, 'Документ не открыт');
+    send(res, 200, await doc.baseTile(Number(k), Number(x), Number(y)), 'image/jpeg', IMMUTABLE);
+  });
 
   route('GET', '/api/doc/export.png', async (_req, res) => {
     const doc = session.doc;
@@ -229,14 +235,14 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     const { data, type, version } = await image;
     send(res, 200, data, type, { 'Cache-Control': 'no-store', [`${API_HEADER}-version`]: String(version) });
   };
-  route('GET', '/api/history/:id/edit/:part.:ext', (_req, res, [id, part]) => editImage(res, session.maskEditImage({ patch: id! }, part!)));
+  route('GET', '/api/history/:id/edit/:part.:ext', (_req, res, [id, part]) => editImage(res, session.maskEditImage(id!, part!)));
+  route('POST', '/api/history/:id/expand', async (_req, res, [id]) => {
+    json(res, { addedPx: await session.expandVersion(id!) });
+  });
   // Отделённый объект картинкой — для превью сдвига; маска слоя меняется, поэтому не кэшируется
   route('GET', '/api/history/:id/cutout.png', async (_req, res, [id]) => {
     send(res, 200, await session.cutoutPng(id!), 'image/png', { 'Cache-Control': 'no-store' });
   });
-  route('GET', '/api/jobs/:id/edit/:part.:ext', (_req, res, [id, part], url) =>
-    editImage(res, session.maskEditImage({ job: id!, n: Number(url.searchParams.get('n') ?? NaN) }, part!)),
-  );
 
   // Выделение объектов: веса модели скачиваются по просьбе, признаки видимой части считаются заранее,
   // подсветка под курсором — картинкой маски с её местом на холсте в заголовке
@@ -301,6 +307,16 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     const body = await readJson<DetachRequest>(req);
     json(res, { id: session.detachObject(id!, body) });
   });
+  route('POST', '/api/objects/:id/current', async (req, res, [id]) => {
+    const { patch } = await readJson<{ patch: string | null }>(req);
+    await session.setCurrent(id!, typeof patch === 'string' ? patch : null);
+    json(res, { ok: true });
+  });
+  route('POST', '/api/objects/:id/hidden', async (req, res, [id]) => {
+    const { hidden } = await readJson<{ hidden: boolean }>(req);
+    await session.setHidden(id!, hidden === true);
+    json(res, { ok: true });
+  });
   route('POST', '/api/objects/:id/move', async (req, res, [id]) => {
     const { dx, dy } = await readJson<{ dx: number; dy: number }>(req);
     if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new HttpError(400, 'Нет сдвига');
@@ -310,11 +326,6 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   route('POST', '/api/jobs', async (req, res) => {
     const body = await readJson<CreateJobRequest>(req);
     json(res, { id: session.createJob(body) });
-  });
-  route('POST', '/api/jobs/:id/select', async (req, res, [id]) => {
-    const { n } = await readJson<{ n: number }>(req);
-    session.selectVariant(id!, n);
-    json(res, { ok: true });
   });
   route('POST', '/api/jobs/:id/more', async (req, res, [id]) => {
     const { count, ...change } = await readJson<MoreVariantsRequest>(req);
@@ -332,27 +343,9 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     session.stop(id!);
     json(res, { ok: true });
   });
-  route('POST', '/api/jobs/:id/accept', (_req, res, [id]) => {
-    session.accept(id!);
-    json(res, { ok: true });
-  });
   route('POST', '/api/jobs/:id/discard', (_req, res, [id]) => {
     session.discard(id!);
     json(res, { ok: true });
-  });
-  route('POST', '/api/jobs/:id/mask', async (req, res, [id]) => {
-    const { shapes } = await readJson<{ shapes: MaskShape[] }>(req);
-    json(res, await session.editMask(id!, shapes));
-  });
-  route('POST', '/api/jobs/:id/mask/expand', async (_req, res, [id]) => {
-    json(res, { addedPx: await session.expandMask(id!) });
-  });
-  route('POST', '/api/jobs/:id/mask/undo', async (_req, res, [id]) => {
-    await session.undoMask(id!);
-    json(res, { ok: true });
-  });
-  route('GET', '/api/jobs/:id/layer/:n.png', async (_req, res, [id, n]) => {
-    send(res, 200, await session.layerPng(id!, Number(n)), 'image/png', IMMUTABLE);
   });
 
   async function serveStatic(res: ServerResponse, pathname: string): Promise<void> {

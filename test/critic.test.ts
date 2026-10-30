@@ -148,30 +148,32 @@ describe('Шаги с критиком', () => {
     expect(director.reviews[1]!.fixes).toBe(v1!.fixes);
     expect(director.reviews[1]!.directed).toBe(job().directed);
 
-    // Маску поправили — прежний ответ критика не годится: он смотрит выбранный шаг заново
-    await s.editMask(id, [{ kind: 'rect', x: 300, y: 200, width: 40, height: 40, erase: true }]);
+    // Ещё шаг от выбранного: прежний ответ критика с замечаниями годится, нового вызова нет
     await s.moreVariants(id, 1);
-    expect(director.reviews).toHaveLength(5);
-    expect(director.reviews[3]!.mustFix).toBe(true);
+    expect(director.reviews).toHaveLength(4);
     expect(job().variants[3]).toMatchObject({ base: 2, status: 'done' });
 
-    // Принятый шаг: вне маски холст не тронут
-    s.accept(id);
+    // Каждый шаг — версия слоя, на холсте — последний: вне маски холст не тронут
+    const layer = s.state().objects[0]!;
+    expect(layer.versions).toEqual(job().variants.map((v) => v.patch));
+    expect(layer.current).toBe(job().variants[3]!.patch);
     const { data, width } = s.doc!.raw();
     const px = (x: number, y: number) => [...data.subarray((y * width + x) * 3, (y * width + x) * 3 + 3)];
     expect(px(290, 190)).toEqual(BG);
-    expect(px(310, 210)).toEqual(BG);
     expect(px(420, 290)).not.toEqual(BG);
+    // Ластик по маске версии открывает исходник
+    await s.editPatchMask(layer.current!, [{ kind: 'rect', x: 300, y: 200, width: 40, height: 40, erase: true }]);
+    expect(px(310, 210)).toEqual(BG);
 
-    // Ещё шаги слоя с той же задачей: критик сначала смотрит сам слой, первый шаг исправляет его
-    const patch = s.state().history[0]!;
-    const again = s.patchVariants(patch.id, { variants: 1, model: 'flash', size: 'auto' });
+    // Ещё шаги версии с той же задачей: критик сначала смотрит её саму, первый шаг исправляет её
+    const again = s.patchVariants(layer.current!, { variants: 1, model: 'flash', size: 'auto' });
     const redo = jobOf(s, again);
     await until(() => redo().status === 'done' && !redo().chain);
     expect(redo().variants[0]).toMatchObject({ current: true });
     expect(redo().variants[1]).toMatchObject({ base: 0, status: 'done' });
-    expect(redo().variants[1]!.fixes).toMatch(/critic #6/);
+    expect(redo().variants[1]!.fixes).toMatch(/critic #5/);
     expect(director.calls).toHaveLength(1);
+    expect(s.state().objects[0]!.versions).toHaveLength(5);
   });
 
   it('критик доволен — шаги кончаются раньше; ещё шаги от выбранного: критик обязан найти, что улучшить', { timeout: 30_000 }, async () => {
@@ -189,8 +191,8 @@ describe('Шаги с критиком', () => {
     expect(job().variants[2]!.fixes).toMatch(/critic #3/);
     expect(provider.calls).toHaveLength(3);
 
-    // От выбранного руками первого шага — его замечания уже есть, критика заново не зовут
-    s.selectVariant(id, 0);
+    // От выбранной руками первой версии — её замечания уже есть, критика заново не зовут
+    await s.setCurrent(s.state().objects[0]!.id, job().variants[0]!.patch!);
     const reviews = director.reviews.length;
     await s.moreVariants(id, 1);
     expect(job().variants[3]).toMatchObject({ base: 0, fixes: job().variants[0]!.critique!.text });

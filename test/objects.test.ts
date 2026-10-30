@@ -217,7 +217,7 @@ describe('Объекты в сессии', () => {
     expect(s.dirty).toBe(false);
     const a = await s.saveObject([{ kind: 'rect', x: 10, y: 10, width: 100, height: 80 }]);
     const b = await s.saveObject([{ kind: 'ellipse', cx: 250, cy: 150, rx: 40, ry: 30 }]);
-    expect(s.state().objects.map((o) => o.name)).toEqual(['Объект 1', 'Объект 2']);
+    expect(s.state().objects.map((o) => o.name)).toEqual(['Слой 1', 'Слой 2']);
     expect(s.doc!.object(a).rect).toEqual({ x: 10, y: 10, width: 100, height: 80 });
     expect(s.dirty).toBe(true);
 
@@ -233,7 +233,7 @@ describe('Объекты в сессии', () => {
     expect(parents(s.doc!.objects)).toEqual({ [a]: null, [b]: null });
     await s.undo();
     await s.undo();
-    expect(s.doc!.object(pair).name).toBe('Объект 3');
+    expect(s.doc!.object(pair).name).toBe('Слой 3');
     await s.undo();
     await s.undo();
     await s.undo();
@@ -241,11 +241,11 @@ describe('Объекты в сессии', () => {
     expect(s.dirty).toBe(false);
   });
 
-  it('правка объекта — с его маской, и слой помнит объект', async () => {
+  it('правка слоя — с его маской, вариант ложится его версией и сразу виден', async () => {
     const s = await session();
     const goose = await s.saveObject([{ kind: 'ellipse', cx: 200, cy: 150, rx: 60, ry: 40 }]);
     const shape: MaskShape = { kind: 'mask', id: `obj:${goose}`, x: 0, y: 0, width: 1, height: 1 };
-    const id = s.createJob({ shapes: [shape], prompt: 'убери бант', variants: 1, model: 'flash', size: 'auto' });
+    s.createJob({ shapes: [shape], prompt: 'убери бант', variants: 1, model: 'flash', size: 'auto' });
     const started = Date.now();
     while (s.state().jobs[0]?.status !== 'done') {
       if (Date.now() - started > 15_000) throw new Error('Не дождались');
@@ -253,8 +253,8 @@ describe('Объекты в сессии', () => {
     }
     // Рамка задачи — по маске объекта на сервере, а не по тому, что прислал интерфейс
     expect(s.state().jobs[0]!.bbox).toEqual({ x: 140, y: 110, width: 120, height: 80 });
-    s.accept(id);
     expect(s.doc!.patches[0]!.object).toBe(goose);
+    expect(s.doc!.object(goose).current).toBe(s.doc!.patches[0]!.id);
     // Вне маски объекта пиксели холста — побайтно исходник
     const p = s.doc!.patches[0]!;
     for (let y = 0; y < p.rect.height; y += 3) {

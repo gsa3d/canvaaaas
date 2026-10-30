@@ -820,6 +820,11 @@ button.swap {
   font-weight: 600;
 }
 
+.panel h2 .dim {
+  margin-left: 6px;
+  font-weight: 400;
+}
+
 /* ——— Подсказка «?» ——— */
 
 .help {
@@ -1157,6 +1162,106 @@ button.redo-toggle.active {
 
 .layers li.off .link {
   color: var(--muted);
+}
+
+/* Слои деревом: глаз, имя, версии, маска, меню */
+.layers.tree li {
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  gap: 4px;
+  padding: 2px 2px;
+  border-bottom: none;
+  border-radius: var(--radius);
+}
+
+.layers.tree li.selected {
+  background: var(--accent-soft);
+}
+
+.layers.tree li.lost .link {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.layers.tree li .link {
+  text-align: left;
+}
+
+.layers.tree li.background {
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 6px 6px;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  color: var(--muted);
+}
+
+.versions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.versions span {
+  min-width: 52px;
+  text-align: center;
+}
+
+.versions button.icon {
+  min-height: 0;
+  width: 20px;
+  height: 22px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+}
+
+.menu-anchor {
+  position: relative;
+}
+
+.layer-menu {
+  position: absolute;
+  right: 0;
+  top: 28px;
+  z-index: 30;
+  min-width: 200px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+}
+
+.layer-menu li {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.layer-menu li:hover {
+  background: var(--accent-soft);
+}
+
+.layer-menu li.danger {
+  color: var(--danger);
+}
+
+.layer-ask {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0 6px 32px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 /* Глаз и маска — как у слоёв в графических редакторах */

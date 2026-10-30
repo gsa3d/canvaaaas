@@ -1,7 +1,11 @@
-// Документ: исходная картинка, принятые правки отдельными слоями и итоговый холст.
-// Правки недеструктивные: любой участок можно пересобрать из исходника и включённых слоёв,
-// поэтому откат правки — это просто её выключение, а маску слоя можно править и после принятия. Для просмотра держим пирамиду уменьшенных
-// копий и режем из неё тайлы по запросу.
+// Документ: исходная картинка (фон), слои поверх неё и итоговый холст.
+// Слой (DocObject, objects) — кусок картинки по маске: имя, части, видимость и версии. Версия (Patch, patches) — пиксели генерации
+// с маской; на холсте у слоя видна одна — текущая (current), без неё слой показывает исходник, то есть ничего не меняет.
+// Порядок на холсте задают слои: по порядку появления — новый сверху, но часть не ниже того, частью чего она является;
+// заплатка фона (слой kind: 'fill') — прямо под слоем, под которым её дорисовали: она закрывает всё, что было под ним;
+// слой удалили — заплатка остаётся там, где её дорисовали.
+// Всё недеструктивно: любой участок пересобирается из исходника и видимых версий, поэтому смена версии, скрытие слоя и
+// правка маски версии — просто пересборка участка. Для просмотра держим пирамиду уменьшенных копий и режем из неё тайлы.
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { InputImage } from '../providers/types.ts';
@@ -42,18 +46,18 @@ export interface Patch {
   /** Задача, как её расписал директор: с ней же идут «Ещё варианты» с той же задачей */
   directed?: string;
   sketch?: SketchStroke[];
-  /** Правили этот объект: его маска была выделением */
+  /** Слой, чья это версия. Версия без слоя (так кладут правки тесты) видна по active и лежит под всеми слоями */
   object?: string;
   /**
-   * Отделённый объект (object): пиксели холста под его маской, а под слоем — дорисованный фон.
-   * Такой слой сдвигают целиком; правка объекта ложится в него же
+   * Исходник отделённого слоя (object): пиксели холста под его маской, снятые, когда под ним дорисовали фон.
+   * Виден, когда у слоя нет текущей версии; со слоем сдвигается
    */
   lifted?: boolean;
 }
 
 /**
- * Объект на холсте: имя и маска поверх пикселей, сами пиксели — холст и слои правок. Запись не меняется на месте:
- * правка объекта кладёт новую, поэтому шаг отмены — просто прежний список.
+ * Слой: имя и маска куска картинки, его части (parent), видимость и текущая версия. Запись не меняется на месте:
+ * изменение кладёт новую, поэтому шаг отмены — просто прежний список.
  */
 export interface DocObject {
   id: string;
@@ -69,6 +73,16 @@ export interface DocObject {
   version: number;
   /** После правки на холсте объект не нашёлся: маска прежняя */
   lost?: boolean;
+  /** Слой скрыт — с частями */
+  hidden?: boolean;
+  /** Текущая версия (id в patches); нет — исходник */
+  current?: string;
+  /** Заплатка фона под отделённым слоем: лежит прямо на исходнике, под всеми слоями, частей у неё нет */
+  kind?: 'fill';
+  /** Под каким слоем эта заплатка */
+  under?: string;
+  /** Слой появился из генерации по выделению: частью другого стать может, а другие его частями — нет */
+  edit?: boolean;
 }
 
 interface Level {
@@ -124,6 +138,20 @@ function downsample(src: Level, dst: Level, rect: Rect): void {
   }
 }
 
+/** Уровни уменьшенных вдвое копий, пока картинка не влезет в один тайл */
+function pyramid(data: Buffer, width: number, height: number): Level[] {
+  const levels: Level[] = [{ width, height, data }];
+  while (true) {
+    const prev = levels[levels.length - 1]!;
+    if (Math.max(prev.width, prev.height) <= TILE_SIZE) break;
+    const level = { width: Math.ceil(prev.width / 2), height: Math.ceil(prev.height / 2), data: Buffer.alloc(0) };
+    level.data = Buffer.alloc(level.width * level.height * 3);
+    downsample(prev, level, { x: 0, y: 0, width: level.width, height: level.height });
+    levels.push(level);
+  }
+  return levels;
+}
+
 /** Положить слой правки (RGBA) поверх прозрачного RGBA-участка dst: так несколько слоёв сводятся в один с той же картинкой поверх холста */
 function overLayer(dst: Buffer, rect: Rect, layerRect: Rect, layer: Buffer): void {
   const o = intersect(rect, layerRect);
@@ -158,6 +186,8 @@ export class CanvasDocument {
   rev = 1;
   private readonly levels: Level[];
   private readonly tiles = new Map<string, Buffer>();
+  /** Пирамида исходника — для сравнения «до»; строится при первом запросе */
+  private baseLevels: Level[] | null = null;
   private undoStack: HistoryOp[] = [];
   private redoStack: HistoryOp[] = [];
   private maskVersions = 0;
@@ -173,18 +203,9 @@ export class CanvasDocument {
     this.composite = Buffer.from(base);
     this.patches = patches;
     this.objects = objects;
-    for (const p of patches) {
-      if (p.active) applyLayer({ data: this.composite, rect: this.bounds(), channels: 3 }, p.rect, p.layer);
-    }
-    this.levels = [{ width, height, data: this.composite }];
-    while (true) {
-      const prev = this.levels[this.levels.length - 1]!;
-      if (Math.max(prev.width, prev.height) <= TILE_SIZE) break;
-      const level = { width: Math.ceil(prev.width / 2), height: Math.ceil(prev.height / 2), data: Buffer.alloc(0) };
-      level.data = Buffer.alloc(level.width * level.height * 3);
-      downsample(prev, level, { x: 0, y: 0, width: level.width, height: level.height });
-      this.levels.push(level);
-    }
+    this.sync();
+    for (const p of this.drawOrder()) applyLayer({ data: this.composite, rect: this.bounds(), channels: 3 }, p.rect, p.layer);
+    this.levels = pyramid(this.composite, width, height);
   }
 
   /** Открыть картинку: прозрачность ложится на белый, всё приводится к sRGB 8 бит */
@@ -246,10 +267,9 @@ export class CanvasDocument {
     return this.levels.length;
   }
 
-  /** Холст однозначно задан исходником и включёнными правками с их масками по порядку: одинаковый ключ — одинаковые пиксели */
+  /** Холст однозначно задан исходником и видимыми версиями с их масками по порядку: одинаковый ключ — одинаковые пиксели */
   get contentKey(): string {
-    return this.patches
-      .filter((p) => p.active)
+    return this.drawOrder()
       .map((p) => `${p.id}:${p.maskVersion}@${p.rect.x},${p.rect.y}`)
       .join(',');
   }
@@ -261,7 +281,7 @@ export class CanvasDocument {
 
   /** Объекты с именами, частями и масками: меняется — проекту .caaa есть что сохранить */
   get objectsKey(): string {
-    return this.objects.map((o) => `${o.id}:${o.version}:${o.parent ?? ''}:${o.lost ? 1 : 0}:${o.name}`).join('\n');
+    return this.objects.map((o) => `${o.id}:${o.version}:${o.parent ?? ''}:${o.lost ? 1 : 0}:${o.hidden ? 1 : 0}:${o.current ?? ''}:${o.name}`).join('\n');
   }
 
   get canUndo(): boolean {
@@ -272,21 +292,22 @@ export class CanvasDocument {
     return this.redoStack.length > 0;
   }
 
-  /** Принять правку: слой ложится поверх текущего холста */
+  /** Новая версия слоя (или правка без слоя — поверх других таких); видна ли она, решает её слой */
   addPatch(patch: NewPatch): Patch {
     const full = this.complete(patch);
     this.patches.push(full);
-    applyLayer({ data: this.composite, rect: this.bounds(), channels: 3 }, full.rect, full.layer);
-    this.refresh(full.rect);
+    this.sync();
+    if (full.active) this.recompute(this.clip(full.rect));
     this.record({ kind: 'add', patch: full, index: this.patches.length - 1 });
     return full;
   }
 
-  /** Удалить слой; ⌘Z возвращает его на прежнее место */
+  /** Удалить версию; ⌘Z возвращает её */
   removePatch(patchId: string): void {
     const index = this.indexOf(patchId);
     const [patch] = this.patches.splice(index, 1);
-    this.recompute(patch!.rect);
+    this.sync();
+    this.recompute(this.clip(patch!.rect));
     this.record({ kind: 'remove', patch: patch!, index });
   }
 
@@ -296,7 +317,8 @@ export class CanvasDocument {
     const before = this.patches[index]!;
     const after = this.complete(patch);
     this.patches[index] = after;
-    this.recompute(union(before.rect, after.rect));
+    this.sync();
+    this.recompute(this.clip(union(before.rect, after.rect)));
     this.record({ kind: 'replace', before, after, index });
     return after;
   }
@@ -341,11 +363,13 @@ export class CanvasDocument {
    * прозрачно, где их нет) — чтобы браузер показывал правку маски сразу. Без слоя — весь холст под новым слоем сверху.
    */
   regionAround(rect: Rect, patchId: string | null): { below: Buffer; above: Buffer } {
-    const index = patchId === null ? this.patches.length : this.indexOf(patchId);
+    const order = this.drawOrder();
+    const found = patchId === null ? -1 : order.findIndex((p) => p.id === patchId);
+    const index = found < 0 ? order.length : found;
     const below = this.compose(rect, undefined, undefined, index).data;
     const above = Buffer.alloc(rect.width * rect.height * 4);
-    for (const p of this.patches.slice(index + 1)) {
-      if (p.active && intersect(p.rect, rect).width > 0) overLayer(above, rect, p.rect, p.layer);
+    for (const p of order.slice(index + 1)) {
+      if (intersect(p.rect, rect).width > 0) overLayer(above, rect, p.rect, p.layer);
     }
     return { below, above };
   }
@@ -369,7 +393,7 @@ export class CanvasDocument {
    */
   setObjects(next: DocObject[], opts: { join?: unknown } = {}): void {
     const op: HistoryOp = { kind: 'objects', before: this.objects, after: next };
-    this.objects = next;
+    this.placeObjects(next);
     const top = this.undoStack.at(-1);
     if (opts.join && top === opts.join) {
       this.undoStack[this.undoStack.length - 1] = { kind: 'group', ops: [top, op] };
@@ -426,16 +450,19 @@ export class CanvasDocument {
     if (op.kind === 'group') {
       for (const o of [...op.ops].reverse()) this.revert(o);
     } else if (op.kind === 'objects') {
-      this.objects = op.before;
+      this.placeObjects(op.before);
     } else if (op.kind === 'add') {
       this.patches.splice(op.index, 1);
-      this.recompute(op.patch.rect);
+      this.sync();
+      this.recompute(this.clip(op.patch.rect));
     } else if (op.kind === 'remove') {
       this.patches.splice(op.index, 0, op.patch);
-      this.recompute(op.patch.rect);
+      this.sync();
+      this.recompute(this.clip(op.patch.rect));
     } else if (op.kind === 'replace') {
       this.patches[op.index] = op.before;
-      this.recompute(union(op.before.rect, op.after.rect));
+      this.sync();
+      this.recompute(this.clip(union(op.before.rect, op.after.rect)));
     } else if (op.kind === 'mask') {
       this.applyMask(this.patch(op.patchId), op.before, op.changed);
     } else if (op.kind === 'move') {
@@ -449,16 +476,19 @@ export class CanvasDocument {
     if (op.kind === 'group') {
       for (const o of op.ops) this.apply(o);
     } else if (op.kind === 'objects') {
-      this.objects = op.after;
+      this.placeObjects(op.after);
     } else if (op.kind === 'add') {
       this.patches.splice(op.index, 0, op.patch);
-      this.recompute(op.patch.rect);
+      this.sync();
+      this.recompute(this.clip(op.patch.rect));
     } else if (op.kind === 'remove') {
       this.patches.splice(op.index, 1);
-      this.recompute(op.patch.rect);
+      this.sync();
+      this.recompute(this.clip(op.patch.rect));
     } else if (op.kind === 'replace') {
       this.patches[op.index] = op.after;
-      this.recompute(union(op.before.rect, op.after.rect));
+      this.sync();
+      this.recompute(this.clip(union(op.before.rect, op.after.rect)));
     } else if (op.kind === 'mask') {
       this.applyMask(this.patch(op.patchId), op.after, op.changed);
     } else if (op.kind === 'move') {
@@ -479,13 +509,23 @@ export class CanvasDocument {
   }
 
   /** Тайл уровня k (0 — полное разрешение), JPEG */
-  async tile(k: number, tx: number, ty: number): Promise<Buffer> {
-    const level = this.levels[k];
+  tile(k: number, tx: number, ty: number): Promise<Buffer> {
+    return this.cut(this.levels, '', k, tx, ty);
+  }
+
+  /** Тайл исходника — его показывают, пока держат «\» */
+  baseTile(k: number, tx: number, ty: number): Promise<Buffer> {
+    this.baseLevels ??= pyramid(this.base, this.width, this.height);
+    return this.cut(this.baseLevels, 'base:', k, tx, ty);
+  }
+
+  private async cut(levels: Level[], prefix: string, k: number, tx: number, ty: number): Promise<Buffer> {
+    const level = levels[k];
     if (!level) throw new Error(`Нет уровня ${k}`);
     const x = tx * TILE_SIZE;
     const y = ty * TILE_SIZE;
     if (x >= level.width || y >= level.height || tx < 0 || ty < 0) throw new Error('Тайл за пределами холста');
-    const key = `${k}/${tx}/${ty}`;
+    const key = `${prefix}${k}/${tx}/${ty}`;
     const cached = this.tiles.get(key);
     if (cached) {
       this.tiles.delete(key);
@@ -534,13 +574,15 @@ export class CanvasDocument {
   /** Слой на месте to вместо from: холст пересобирается на обоих */
   private place(patch: Patch, to: Rect, from: Rect): void {
     patch.rect = to;
-    if (patch.active) this.recompute(union(from, to));
+    if (patch.active) this.recompute(this.clip(union(from, to)));
   }
 
+  /** Скрыть или показать правку без слоя; у версии слоя видимость решает слой */
   private flip(patchId: string): void {
     const patch = this.patch(patchId);
+    if (patch.object) throw new Error('Версию слоя показывает её слой');
     patch.active = !patch.active;
-    this.recompute(patch.rect);
+    this.recompute(this.clip(patch.rect));
   }
 
   /** Поставить маску слою: альфа слоя пересчитывается с растушёвкой, участок пересобирается; changed — где маска менялась */
@@ -559,15 +601,102 @@ export class CanvasDocument {
     if (patch.active) this.recompute({ ...rect, x: patch.rect.x + rect.x, y: patch.rect.y + rect.y });
   }
 
-  /** Участок из исходника и включённых правок по порядку (первые until); слой skip пропускается, а на его место ложится swap */
-  private compose(rect: Rect, skip?: string, swap?: { rect: Rect; layer: Buffer }, until = this.patches.length): RawRegion {
+  /**
+   * Что видно на холсте снизу вверх: правки без слоя, затем слои (stack); у слоя — текущая версия
+   * или, у отделённого без неё, снятый исходник
+   */
+  drawOrder(): Patch[] {
+    const loose = this.patches.filter((p) => !p.object && p.active);
+    const byLayer = new Map<string, Patch>();
+    for (const p of this.patches) if (p.object && p.active) byLayer.set(p.object, p);
+    return [...loose, ...this.stack().flatMap((o) => byLayer.get(o.id) ?? [])];
+  }
+
+  /**
+   * Слои снизу вверх: по порядку появления, новый — сверху всех. Часть, появившаяся раньше того, частью чего стала
+   * (объединили ⌘J), встаёт сразу над ним: часть не прячется под целым. Заплатка фона — прямо под своим слоем,
+   * а без него — там, где появилась
+   */
+  private stack(): DocObject[] {
+    const index = new Map(this.objects.map((o, i) => [o.id, i]));
+    const byId = new Map(this.objects.map((o) => [o.id, o]));
+    const rank = new Map<string, number>();
+    const rankOf = (o: DocObject, depth = 0): number => {
+      const known = rank.get(o.id);
+      if (known !== undefined) return known;
+      const own = index.get(o.id)!;
+      let r = own;
+      if (depth < 64 && o.kind === 'fill') {
+        const under = o.under ? byId.get(o.under) : undefined;
+        if (under && under.kind !== 'fill') r = rankOf(under, depth + 1) - 0.25;
+      } else if (depth < 64) {
+        const parent = o.parent ? byId.get(o.parent) : undefined;
+        if (parent && parent.kind !== 'fill') r = Math.max(own, rankOf(parent, depth + 1) + 0.5);
+      }
+      rank.set(o.id, r);
+      return r;
+    };
+    return [...this.objects].sort((a, b) => rankOf(a) - rankOf(b) || index.get(a.id)! - index.get(b.id)!);
+  }
+
+  /**
+   * Какие версии видны, — по слоям: у видимого слоя (и всех, частью которых он является) — текущая версия, а без неё —
+   * снятый исходник отделённого. У правок без слоя — своё active
+   */
+  private sync(): void {
+    const byId = new Map(this.objects.map((o) => [o.id, o]));
+    const visible = (o: DocObject | undefined): boolean => {
+      for (let i = 0; o && i < 64; i++) {
+        if (o.hidden) return false;
+        o = o.parent ? byId.get(o.parent) : undefined;
+      }
+      return true;
+    };
+    for (const p of this.patches) {
+      if (!p.object) continue;
+      const o = byId.get(p.object);
+      p.active = !!o && visible(o) && (o.current ? o.current === p.id : !!p.lifted);
+    }
+  }
+
+  /** Новый список слоев: участки, где видимые версии или их порядок поменялись, пересобираются */
+  private placeObjects(next: DocObject[]): void {
+    const before = this.drawOrder();
+    this.objects = next;
+    this.sync();
+    const after = this.drawOrder();
+    const was = new Set(before);
+    const now = new Set(after);
+    const changed = [...before.filter((p) => !now.has(p)), ...after.filter((p) => !was.has(p))];
+    // Порядок тех же версий поменялся (слой стал частью другого) — пересобрать их все
+    const kept = before.filter((p) => now.has(p));
+    const common = after.filter((p) => was.has(p));
+    if (common.some((p, i) => p !== kept[i])) changed.push(...common);
+    for (const p of new Set(changed)) this.recompute(this.clip(p.rect));
+  }
+
+  /** Участок, обрезанный по холсту */
+  private clip(rect: Rect): Rect {
+    return intersect(rect, this.bounds());
+  }
+
+  /** Участок из исходника и видимых версий по порядку (первые until); версия skip пропускается, а на её место ложится swap */
+  private compose(rect: Rect, skip?: string, swap?: { rect: Rect; layer: Buffer }, until?: number): RawRegion {
     const region = { data: Buffer.alloc(rect.width * rect.height * 3), rect, channels: 3 };
     for (let row = 0; row < rect.height; row++) {
       const from = ((rect.y + row) * this.width + rect.x) * 3;
       this.base.copy(region.data, row * rect.width * 3, from, from + rect.width * 3);
     }
-    for (const p of this.patches.slice(0, until)) {
-      const layer = p.id === skip ? swap : p.active ? p : undefined;
+    const order: { id: string; rect: Rect; layer: Buffer }[] = this.drawOrder();
+    // Заменяемая версия может быть и не видна сейчас — тогда замена ложится туда, где лежит текущая версия её слоя
+    if (skip && swap && !order.some((p) => p.id === skip)) {
+      const owner = this.patches.find((p) => p.id === skip)?.object;
+      const at = owner ? order.findIndex((p) => this.patches.find((q) => q.id === p.id)?.object === owner) : -1;
+      if (at < 0) order.push({ id: skip, ...swap });
+      else order.splice(at, 1, { id: skip, ...swap });
+    }
+    for (const p of order.slice(0, until ?? order.length)) {
+      const layer = p.id === skip ? swap : p;
       if (layer && intersect(layer.rect, rect).width > 0) applyLayer(region, layer.rect, layer.layer);
     }
     return region;
