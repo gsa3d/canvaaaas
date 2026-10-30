@@ -34,7 +34,7 @@ import { readLedger, withDirectorLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha, featherAlphaRegion, maskBBox } from '../core/mask.ts';
 import { applyShapes, applyShapesRegion, type MaskLookup } from '../core/mask-shapes.ts';
 import { changeEdge } from '../core/lines.ts';
-import { area, descendants, dilate, layerName, overlap, placeObject, removeObject, trim, unionBitmap } from '../core/objects.ts';
+import { area, descendants, dilate, layerName, overlap, removeObject, trim, unionBitmap } from '../core/objects.ts';
 import type { Bitmap } from '../core/segment.ts';
 import type { KeyStore } from '../core/secrets.ts';
 import { checkSketch } from '../core/sketch.ts';
@@ -43,9 +43,10 @@ import { mockDirector, type PromptDirector } from '../providers/director.ts';
 import { laozhangGemini } from '../providers/laozhang-gemini.ts';
 import { mockProvider } from '../providers/mock.ts';
 import type { ImageProvider, InputImage } from '../providers/types.ts';
-import { maskPng, Segmentation } from './segmentation.ts';
+import { maskPng, Segmentation, type Scope } from './segmentation.ts';
 import {
   MAX_REFERENCES,
+  OUTSIDE_LAYER,
   shapesBBox,
   type CreateJobRequest,
   type DetachRequest,
@@ -77,6 +78,8 @@ const EDIT_PREVIEW_MAX = 2560;
 const FILL_TASK = 'Пустое место: продолжить то, что вокруг (землю, стены, фон), как будто здесь ничего не стояло. Нового предмета не рисовать.';
 /** Слой отделённого объекта берёт пиксели чуть шире маски, чтобы контур не обрезался, и гаснет к краю на столько же */
 const LIFT_GROW = 2;
+/** Подсветка слоя под курсором — не больше этого по большей стороне, как у объекта под курсором */
+const HOVER_LAYER_MAX = 1600;
 const LIFT_FEATHER = 2;
 
 /** Насколько шире объекта модель дорисовывает фон: контур и сглаживание вокруг него тоже уходят */
@@ -430,6 +433,7 @@ export class Session {
         under: o.under,
         versions: doc!.patches.filter((p) => p.object === o.id && !p.lifted).map((p) => p.id),
         layer: liftedLayer(doc!, o.id)?.id,
+        filled: doc!.objects.some((f) => f.kind === 'fill' && f.under === o.id) || undefined,
       })),
       segment: this.segmentation.state(),
       canUndo: doc?.canUndo ?? false,
@@ -1400,7 +1404,8 @@ export class Session {
       const before = doc.region(region);
       let placed: string | undefined;
       doc.batch(() => {
-        if (!existing) doc.setObjects(placeObject(doc.objects, owner));
+        // Новый слой — сверху, остальные не трогаются
+        if (!existing) doc.setObjects([...doc.objects, owner]);
         if (grown) doc.setObjects(doc.objects.map((o) => (o.id === owner.id ? { ...o, ...grown, version: doc.nextObjectVersion(), lost: undefined } : o)));
         placed = doc.addPatch({ ...version, object: owner.id }).id;
         if (show) doc.setObjects(doc.objects.map((o) => (o.id === owner.id ? { ...o, current: placed } : o)));
@@ -1408,7 +1413,6 @@ export class Session {
       job.object = owner.id;
       v.patch = placed;
       this.changed();
-      if (show) void this.followObjects(doc, placed!, region, before, doc.region(region));
     });
   }
 
@@ -1515,36 +1519,6 @@ export class Session {
     });
   }
 
-  /**
-   * Маски объектов следуют за принятой правкой: те, чей край она задела, пересчитываются по новому холсту.
-   * Это часть того же шага отмены: ⌘Z правки возвращает и прежние маски. Если пока считали, правку уже отменили
-   * или скрыли, пересчёт не нужен; если после неё успели сделать что-то ещё — ложится отдельным шагом.
-   */
-  private async followObjects(doc: CanvasDocument, patchId: string, region: Rect, before: Buffer, after: Buffer): Promise<void> {
-    // Маска отделённого объекта — маска его слоя, её не пересчитывают
-    const objects = doc.objects.filter((o) => o.kind !== 'fill' && !liftedLayer(doc, o.id));
-    if (!objects.length) return;
-    const join = doc.historyTop();
-    let masks: Map<string, Bitmap | null>;
-    try {
-      masks = await this.segmentation.remask(doc, objects, region, before, after);
-    } catch {
-      // Без пересчёта маски объектов просто остаются прежними
-      return;
-    }
-    if (!masks.size) return;
-    await this.serialDoc((d) => {
-      if (d !== doc || !doc.hasPatch(patchId) || !doc.patch(patchId).active) return;
-      const next = doc.objects.map((o): DocObject => {
-        if (!masks.has(o.id)) return o;
-        const b = masks.get(o.id);
-        return b ? { ...o, rect: b.rect, mask: b.mask, version: doc.nextObjectVersion(), lost: undefined } : { ...o, lost: true };
-      });
-      doc.setObjects(next, { join });
-      this.changed();
-    });
-  }
-
   // ——— Объекты ———
 
   /** Маска фигуры kind: 'mask': сохранённого объекта (obj:id) или объекта под щелчком */
@@ -1558,7 +1532,10 @@ export class Session {
     return maskPng(this.maskOf(id), max);
   }
 
-  /** Слой из выделения; слои внутри него становятся его частями, а он — частью того, в чём лежит */
+  /**
+   * Слой из выделения: копия того, что сейчас видно под ним, — своими пикселями, сверху всех. Другие слои не трогаются;
+   * правки под ним его больше не меняют. Одним шагом ⌘Z
+   */
   saveObject(input: MaskShape[], name?: string): Promise<string> {
     return this.serialDoc(async (doc) => {
       const bitmap = await this.selectionBitmap(doc, input);
@@ -1573,7 +1550,10 @@ export class Session {
         createdAt: new Date().toISOString(),
         version: doc.nextObjectVersion(),
       };
-      doc.setObjects(placeObject(doc.objects, obj));
+      doc.batch(() => {
+        doc.setObjects([...doc.objects, obj]);
+        this.lift(doc, obj, `copy:${obj.id}`);
+      });
       this.changed();
       return obj.id;
     });
@@ -1641,7 +1621,9 @@ export class Session {
    */
   moveObject(objectId: string, dx: number, dy: number): Promise<{ rev: number }> {
     return this.serialDoc((doc) => {
-      if (!liftedLayer(doc, objectId)) throw new Error('Сначала дорисуйте фон под слоем');
+      const obj = doc.object(objectId);
+      if (obj.kind === 'fill') throw new Error('Заплатка фона лежит на месте: сдвигают её слой');
+      if (!liftedLayer(doc, objectId) && !obj.current) throw new Error('В слое нечего сдвигать: у него нет своих пикселей');
       const moved = new Set([objectId, ...descendants(doc.objects, objectId).map((o) => o.id)]);
       const patches = doc.patches.filter((p) => p.object && moved.has(p.object));
       const all = patches.map((p) => p.rect).reduce(union);
@@ -1685,17 +1667,34 @@ export class Session {
     return this.segmentation.prepare(this.requireDoc(), view);
   }
 
-  /** within — слой, в котором работают: объект ищется только в его границах */
-  hoverObject(view: RectDto, x: number, y: number, within?: string): Promise<{ png: Buffer; rect: RectDto } | null> {
+  /**
+   * Подсветка под курсором — то, что выделит щелчок: в слое, где работают, или на фоне — объект только там,
+   * над другим слоем — весь этот слой. within — слой, в котором работают
+   */
+  async hoverObject(view: RectDto, x: number, y: number, within?: string): Promise<{ png: Buffer; rect: RectDto } | null> {
     const doc = this.requireDoc();
-    return this.segmentation.hover(doc, view, x, y, within ? doc.object(within) : undefined);
+    const owner = doc.layerAt(x, y);
+    if (owner && owner.id !== within) return { png: await maskPng(owner, HOVER_LAYER_MAX), rect: owner.rect };
+    return this.segmentation.hover(doc, view, x, y, scopeOf(doc, owner));
   }
 
+  /**
+   * Щелчок палочкой. Чей пиксель под ним — верхнего видимого слоя или фона: объект ищется только там, поэтому
+   * объекты разных слоёв в одно выделение не попадают. Щелчок по другому слою — вход в него, без модели.
+   * Добавить и вычесть — только там же, где работают (в слое within или на фоне); рамка — тоже
+   */
   async pickObject(req: PickRequest): Promise<PickResult> {
     const doc = this.requireDoc();
+    const active = req.within ? doc.objects.find((o) => o.id === req.within && o.kind !== 'fill') : undefined;
+    const point = req.points?.find((p) => p.positive);
+    const changing = req.op === 'add' || req.op === 'sub';
+    const owner = point && !req.box ? doc.layerAt(point.x, point.y) : (active ?? null);
+    if (changing && (owner?.id ?? null) !== (active?.id ?? null)) throw new Error(OUTSIDE_LAYER);
+    if (owner && owner.id !== active?.id) return { levels: [{ id: `obj:${owner.id}`, rect: owner.rect }], level: 0, owner: owner.id, enter: true };
     // Выделение, к которому объект добавят или из которого вычтут; устаревшее — просто без него
-    const selection = req.op && req.op !== 'new' && req.selection?.length ? await this.selectionBitmap(doc, req.selection).catch(() => undefined) : undefined;
-    return this.segmentation.pick(doc, req, selection, req.within ? doc.object(req.within) : undefined);
+    const selection = changing && req.selection?.length ? await this.selectionBitmap(doc, req.selection).catch(() => undefined) : undefined;
+    const res = await this.segmentation.pick(doc, req, selection, scopeOf(doc, owner));
+    return { ...res, owner: owner?.id ?? null };
   }
 
   refineObject(id: string, snap = false): Promise<MaskResult> {
@@ -1734,6 +1733,11 @@ export class Session {
 /** Слой отделённого объекта; нет — объект не отделён */
 function liftedLayer(doc: CanvasDocument, objectId: string): Patch | undefined {
   return doc.patches.findLast((p) => p.lifted && p.object === objectId);
+}
+
+/** Где ищет палочка: в слое owner или на фоне — всё, кроме видимых слоёв */
+function scopeOf(doc: CanvasDocument, owner: DocObject | null): Scope {
+  return owner ? { layer: owner } : { outside: doc.visibleLayers() };
 }
 
 /** Версия слоя, которую видно: текущая, а без неё у отделённого — снятый исходник */

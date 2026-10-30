@@ -23,6 +23,7 @@ import {
   IconPencil,
   IconPhoto,
   IconPhotoPlus,
+  IconScissors,
   IconPlus,
   IconScribble,
   IconSquare,
@@ -209,7 +210,7 @@ const TOOL_ICONS: Record<Tool, Icon> = {
 /** name — на панели настроек, label — во всплывающей подсказке */
 const TOOLS: { id: Tool; name: string; label: string; key: string }[] = [
   { id: 'object', name: 'Палочка', label: 'Палочка: объект под щелчком', key: 'W' },
-  { id: 'move', name: 'Сдвинуть', label: 'Сдвинуть слой с дорисованным фоном', key: 'V' },
+  { id: 'move', name: 'Сдвинуть', label: 'Сдвинуть слой', key: 'V' },
   { id: 'rect', name: 'Прямоугольник', label: 'Прямоугольник', key: 'R' },
   { id: 'lasso', name: 'Лассо', label: 'Лассо', key: 'L' },
   { id: 'brush', name: 'Кисть', label: 'Кисть', key: 'B' },
@@ -379,6 +380,10 @@ export function App() {
     if (active && state && !activeObj) setActive(null);
   }, [active, !!activeObj]);
   useEffect(() => viewRef.current?.setLayer(activeObj && !maskLayer ? objectShape(activeObj) : null), [activeObj?.id, activeObj?.rev, !!maskLayer]);
+  // Слой, в который вошли щелчком на холсте, виден и в списке
+  useEffect(() => {
+    if (active) document.querySelector(`.layers li[data-layer="${active}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [active]);
   useEffect(() => {
     viewRef.current?.setJobs(jobs, numbers.current, focusJob);
   }, [state?.jobs, focusJob]);
@@ -410,7 +415,7 @@ export function App() {
   }, [objectsKey]);
   // Видимые слои с дорисованным фоном — их можно сдвинуть; превью — их версия на холсте (или снятый исходник)
   const movable: Movable[] = objects.flatMap((o) => {
-    const shown = o.layer && !o.hidden ? layers.find((p) => p.id === (o.current ?? o.layer)) : undefined;
+    const shown = o.kind !== 'fill' && !o.hidden ? layers.find((p) => p.id === (o.current ?? o.layer)) : undefined;
     return shown ? [{ id: o.id, layer: shown.id, rect: shown.rect, hit: o.rect }] : [];
   });
   const movableKey = JSON.stringify(movable);
@@ -520,11 +525,20 @@ export function App() {
       const within = activeObj && !maskLayer ? activeObj : undefined;
       const res = await post<PickResult>('/api/segment/pick', { view: e.view, points, box: e.box, snap: objectSnap, op: e.op, selection, within: within?.id }).catch(
         (err: unknown) => {
-          if (within && err instanceof Error && err.message === OUTSIDE_LAYER) notify(`Вне слоя «${short(within.name, 24)}»`, false);
+          // Добавить или вычесть можно только там же, где работают: объекты разных слоёв не смешиваются
+          if (err instanceof Error && err.message === OUTSIDE_LAYER) notify(within ? `Вне слоя «${short(within.name, 24)}»` : 'Здесь слой: щелчок без Shift откроет его', false);
           else throw err;
         },
       );
       if (!res) return;
+      // Щелчок по другому слою — работа в нём
+      if (res.enter) {
+        const o = objects.find((x) => x.id === res.owner);
+        if (o) enterLayer(o);
+        return;
+      }
+      // Объект нашёлся на фоне — работа вне слоя
+      if (e.op === 'new' && res.owner !== (within?.id ?? null)) setActive(res.owner);
       // Уровень, который ничего не меняет, всё равно ложится в выделение: [ и ] переключат его на другой
       if (res.unchanged) notify(`${e.op === 'add' ? 'Это уже в выделении' : 'Этого нет в выделении'}: [ и ] — мельче или крупнее`, false);
       await showPick({ ...res, points, box: e.box, erase: e.op === 'sub', snap: objectSnap, at: p }, e.op === 'new' ? 'all' : 'add');
@@ -575,8 +589,8 @@ export function App() {
 
   // ——— Объекты ———
 
-  /** ⌘J: выделение становится объектом; несколько объектов в выделении — объект из них, а они — его части */
-  const saveObject = async () => {
+  /** ⌘J: то, что видно в выделении, — копией новым слоем сверху; работа сразу в нём */
+  const saveObject = async (): Promise<ObjectDto | undefined> => {
     if (!doc || !selection.some((s) => !s.erase)) return;
     try {
       const { id } = await post<{ id: string }>('/api/objects', { shapes: selection });
@@ -592,9 +606,15 @@ export function App() {
         setActive(o.id);
         notify(`Слой «${o.name}»`, false);
       }
+      return o;
     } catch (err) {
       fail(err);
     }
+  };
+  /** ⌘⇧J: то же, а под новым слоем модель дорисует фон — его можно сдвигать и скрывать */
+  const cutObject = async () => {
+    const o = await saveObject();
+    if (o) await detach(o);
   };
   /**
    * Щелчок по слою в списке — работа в нём: его маска становится выделением; с ⌘ или Shift — маска добавляется
@@ -603,16 +623,22 @@ export function App() {
   const selectObject = (o: ObjectDto, add: boolean) => {
     const shape = objectShape(o);
     if (add) {
+      // Несколько слоёв вместе правят новым слоем поверх них
       const has = selection.some((s) => s.kind === 'mask' && s.id === shape.id && !s.erase);
       if (!has) formOrder.current.push('shape');
-      setSelection((sel) => (has ? sel.filter((s) => !(s.kind === 'mask' && s.id === shape.id)) : [...sel, shape]));
+      updateSelection((sel) => (has ? sel.filter((s) => !(s.kind === 'mask' && s.id === shape.id)) : [...sel, shape]));
+      setActive(null);
     } else {
-      formOrder.current = formOrder.current.filter((k) => k !== 'shape');
-      formOrder.current.push('shape');
-      setSelection([shape]);
-      setActive(o.id);
+      enterLayer(o);
       viewRef.current?.reveal(o.rect);
     }
+  };
+  /** Работа в слое: он выделен целиком, генерация ляжет его версией */
+  const enterLayer = (o: ObjectDto) => {
+    formOrder.current = formOrder.current.filter((k) => k !== 'shape');
+    formOrder.current.push('shape');
+    updateSelection(() => [objectShape(o)]);
+    setActive(o.id);
   };
   const selectedObjects = new Set(selection.flatMap((s) => (s.kind === 'mask' && s.id.startsWith('obj:') && !s.erase ? [s.id.slice(4)] : [])));
 
@@ -797,6 +823,9 @@ export function App() {
       case 'save-object':
         void saveObject();
         break;
+      case 'cut-object':
+        void cutObject();
+        break;
       case 'zoom-fit':
         view?.fit();
         break;
@@ -897,7 +926,8 @@ export function App() {
         '+': 'zoom-in',
         '-': 'zoom-out',
       };
-      const command = e.shiftKey && key === 's' ? 'save-as' : e.shiftKey && key === 'e' ? 'export' : e.shiftKey || e.altKey ? undefined : byKey[key];
+      const command =
+        e.shiftKey && key === 's' ? 'save-as' : e.shiftKey && key === 'e' ? 'export' : e.shiftKey && key === 'j' ? 'cut-object' : e.shiftKey || e.altKey ? undefined : byKey[key];
       if (command) {
         e.preventDefault();
         run(command);
@@ -1020,7 +1050,7 @@ export function App() {
   };
   const deleteObject = (o: ObjectDto) => {
     post(`/api/objects/${o.id}/delete`)
-      .then(() => notify(`Слой «${short(o.name)}» ${o.layer ? 'убран с холста' : 'удалён'}. ⌘Z вернёт его`, false))
+      .then(() => notify(`Слой «${short(o.name)}» ${o.filled ? 'убран с холста' : 'удалён'}. ⌘Z вернёт его`, false))
       .catch(fail);
   };
   const expandVersion = (patch: PatchDto) => {
@@ -1222,9 +1252,14 @@ export function App() {
               {selection.length > 0 && (
                 <span class="opt-actions">
                   {hasSelection && !(selectedObjects.size === 1 && selection.length === 1) && (
-                    <button class="icon" title="Слой из выделения (⌘J)" aria-label="Слой из выделения" onClick={() => void saveObject()}>
-                      <IconCubePlus size={16} stroke={STROKE} />
-                    </button>
+                    <>
+                      <button class="icon" title="Слой из выделения: копия того, что видно (⌘J)" aria-label="Слой из выделения" onClick={() => void saveObject()}>
+                        <IconCubePlus size={16} stroke={STROKE} />
+                      </button>
+                      <button class="icon" title="Вырезать в слой: под ним модель дорисует фон (⌘⇧J)" aria-label="Вырезать в слой" onClick={() => void cutObject()}>
+                        <IconScissors size={16} stroke={STROKE} />
+                      </button>
+                    </>
                   )}
                   <button class="icon" title="Снять выделение (⌘D)" aria-label="Снять выделение" onClick={clearSelection}>
                     <IconMarqueeOff size={16} stroke={STROKE} />
@@ -1317,7 +1352,7 @@ export function App() {
                   Выделите предмет «Палочкой» (W), область — прямоугольником (R), лассо (L) или кистью (B). Shift добавляет к
                   выделению, Alt вычитает; режим и край выделения — на панели над холстом. Набросок (S) — подсказка
                   модели: где и каким должно быть то, что в задаче; с Alt он стирается. Модель видит кусок в пунктирной рамке, меняет —
-                  только выделенное. В слое (щелчок по нему в «Слоях») правка ложится его версией, без слоя — новым слоем. ⌘Z убирает
+                  только выделенное. Палочка по слою открывает его, и правка ложится его версией; по фону — новым слоем. ⌘Z убирает
                   последнее, ⌘D снимает выделение, ⌘↵ — сгенерировать.
                 </Help>
               </h2>
@@ -1757,8 +1792,9 @@ function VersionSwitch(props: { object: ObjectDto; onCurrent: (patch: string | n
 }
 
 /**
- * Слои деревом и фон под ними. Слой — кусок картинки: щелчок — выделить (генерация ляжет его версией), ⌘ или Shift — добавить
- * к выделению, двойной щелчок — переименовать. У слоя — видимость, версии (исходник и генерации), маска текущей версии и меню
+ * Слои и фон под ними. Слой — кусок картинки со своими пикселями: щелчок — работа в нём (генерация ляжет его версией),
+ * ⌘ или Shift — добавить к выделению, двойной щелчок — переименовать. У слоя — видимость, версии (исходник и генерации),
+ * маска текущей версии и меню
  */
 function LayersPanel(props: {
   objects: ObjectDto[];
@@ -1804,7 +1840,7 @@ function LayersPanel(props: {
     const current = patch(o.current);
     const fill = o.kind === 'fill';
     // Под неотделённым слоем исходник — то же, что под ним: скрыть его нечем, нужен фон
-    const needsFill = !fill && !o.layer && !o.current && !o.hidden;
+    const needsFill = !fill && !o.filled && !o.current && !o.hidden;
     const items: { label: string; run: () => void; danger?: boolean }[] = [
       ...(current
         ? [
@@ -1813,9 +1849,9 @@ function LayersPanel(props: {
             { label: 'Расширить по правке', run: () => props.onExpand(current) },
           ]
         : []),
-      ...(!fill && !props.detaching.has(o.id) ? [{ label: o.layer ? 'Ещё варианты фона' : 'Дорисовать фон под слоем', run: () => props.onFill(o) }] : []),
+      ...(!fill && !props.detaching.has(o.id) ? [{ label: o.filled ? 'Ещё варианты фона' : 'Дорисовать фон под слоем', run: () => props.onFill(o) }] : []),
       ...(current ? [{ label: 'Удалить версию', run: () => props.onDeleteVersion(current), danger: true }] : []),
-      { label: fill ? 'Удалить заплатку' : o.layer ? 'Убрать с холста' : 'Удалить слой', run: () => props.onDelete(o), danger: true },
+      { label: fill ? 'Удалить заплатку' : o.filled ? 'Убрать с холста' : 'Удалить слой', run: () => props.onDelete(o), danger: true },
     ];
     return (
       <Fragment key={o.id}>
@@ -1823,6 +1859,7 @@ function LayersPanel(props: {
           class={[props.selected === o.id ? 'selected' : '', o.lost ? 'lost' : '', o.hidden ? 'off' : '', current && props.maskLayer === current.id ? 'editing' : '']
             .filter(Boolean)
             .join(' ')}
+          data-layer={o.id}
           style={{ paddingLeft: `${2 + depth * 16}px` }}
           onPointerEnter={() => props.onHover(o)}
           onPointerLeave={() => props.onHover(null)}
@@ -1851,7 +1888,7 @@ function LayersPanel(props: {
               onClick={(e) => props.onSelect(o, e.metaKey || e.ctrlKey || e.shiftKey)}
               onDblClick={() => setEditing(o.id)}
             >
-              {o.layer && <IconArrowsMove size={13} stroke={STROKE} class="layer-kind" aria-label="Можно сдвигать" />}
+              {o.filled && <IconArrowsMove size={13} stroke={STROKE} class="layer-kind" aria-label="Под ним фон: можно сдвигать" />}
               {o.name}
             </button>
           )}
@@ -1922,10 +1959,10 @@ function LayersPanel(props: {
         Слои
         {props.following && <span class="dim">пересчитываю…</span>}
         <Help>
-          Слой — кусок картинки. Щелчок по слою — работа в нём: палочка ищет только в нём, генерация ляжет его версией, остальное
-          в слое останется. Вне слоя (Esc) генерация даёт новый слой.
-          Стрелки у слоя — версии: исходник и генерации, на холсте — выбранная; удерживайте «\», чтобы увидеть исходник всей картинки.
-          Чтобы скрыть или сдвинуть (V) слой, под ним дорисовывают фон: он ложится заплаткой в «Фон». ⌘J — слой из выделения.
+          Слой — кусок картинки со своими пикселями поверх остального. Щелчок по слою здесь или палочкой на холсте — работа в нём:
+          палочка ищет только в нём, генерация ложится его версией. Палочка по фону ищет мимо слоёв, генерация там даёт новый слой.
+          ⌘J — копия выделенного новым слоем; ⌘⇧J — вырезать: под слоем дорисуется фон, его можно сдвигать (V) и скрывать.
+          Стрелки у слоя — версии; удерживайте «\», чтобы увидеть исходник всей картинки.
         </Help>
       </h2>
       {menu && <div class="click-catcher" onClick={() => setMenu(null)} />}

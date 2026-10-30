@@ -1,13 +1,12 @@
 // Выделение объектов на сервере: модель SAM (веса скачиваются по просьбе пользователя), признаки видимой части холста,
-// объект под курсором и под щелчком с его уровнями, второй проход для мелких объектов и пересчёт масок объектов после правки.
+// объект под курсором и под щелчком с его уровнями, второй проход для мелких объектов.
 // Признаки считаются по видимой части, а не по всей картинке: на 6000×4000 целиком края объектов становятся кашей.
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
-import type { CanvasDocument, DocObject } from '../core/document.ts';
+import type { CanvasDocument } from '../core/document.ts';
 import { intersect, type Rect } from '../core/frame.ts';
 import { lineMap, snapToLines } from '../core/lines.ts';
-import { MASK_THRESHOLD } from '../core/mask.ts';
-import { area, changedPixels, clipBitmap, clipScaled, overlap, touchedEdge } from '../core/objects.ts';
+import { area, clipBitmap, clipOut, clipScaled, overlap } from '../core/objects.ts';
 import { levels, rasterize, Segmenter, type Backend, type Bitmap, type Candidate, type Embedding, type SegmentPrompt } from '../core/segment.ts';
 import { installModel, modelFiles, modelInstalled } from '../core/segment-model.ts';
 import { OUTSIDE_LAYER, type MaskResult, type PickRequest, type PickResult, type RectDto, type SegmentDto, type SegmentPoint } from '../shared/api.ts';
@@ -37,8 +36,8 @@ interface StoredMask {
   box?: Rect;
   crop: Rect;
   refined: boolean;
-  /** Слой, в границах которого искали объект */
-  within?: Bitmap;
+  /** Где искали объект */
+  scope?: Scope;
 }
 
 function message(err: unknown): string {
@@ -196,19 +195,18 @@ export class Segmentation {
 
   /**
    * Подсветка объекта под курсором: маска в масштабе не больше HOVER_MAX и где она лежит на холсте; null — ничего.
-   * within — слой, в котором работают: подсвечивается только то, что в нём
+   * scope — где ищет палочка: подсвечивается только то, что там
    */
-  async hover(doc: CanvasDocument, view: RectDto, x: number, y: number, within?: Bitmap): Promise<{ png: Buffer; rect: RectDto } | null> {
+  async hover(doc: CanvasDocument, view: RectDto, x: number, y: number, scope?: Scope): Promise<{ png: Buffer; rect: RectDto } | null> {
     const crop = this.viewRect(doc, view);
     if (x < crop.x || y < crop.y || x >= crop.x + crop.width || y >= crop.y + crop.height) return null;
-    if (within && !covers(within, x, y)) return null;
     const emb = await this.embedding(doc, crop, { view: true, need: { x: Math.floor(x), y: Math.floor(y), width: 1, height: 1 } });
     const lv = levels(await (await this.segmenter()).decode(emb, { points: [{ x, y, positive: true }] }));
     const c = lv.levels[lv.best];
     if (!c) return null;
     const k = Math.min(1, HOVER_MAX / Math.max(crop.width, crop.height));
     const raw = rasterize(c, k);
-    const b = raw && within ? clipScaled(raw, within, k) : raw;
+    const b = raw && scope ? scoped(raw, scope, k) : raw;
     if (!b) return null;
     return {
       png: await maskPng(b),
@@ -220,14 +218,12 @@ export class Segmentation {
    * Объект по точкам и (или) рамке: его уровни от мелкого к крупному, каждый — маской с id.
    * selection — выделение одной маской, если объект к нему добавят или из него вычтут (req.op): тогда первым идёт уровень,
    * который его заметно меняет, — иначе щелчок рядом с выделенным давал бы крупный уровень, который уже весь в нём.
-   * within — слой, в котором работают: уровни обрезаются по нему, одинаковые после этого сливаются
+   * scope — где ищет палочка: уровни обрезаются по нему, одинаковые после этого сливаются
    */
-  async pick(doc: CanvasDocument, req: PickRequest, selection?: Bitmap, within?: Bitmap): Promise<PickResult> {
+  async pick(doc: CanvasDocument, req: PickRequest, selection?: Bitmap, scope?: Scope): Promise<Omit<PickResult, 'owner' | 'enter'>> {
     const points = req.points ?? [];
     const box = req.box && intersect(req.box, { x: 0, y: 0, width: doc.width, height: doc.height });
     if (!points.length && !box?.width) throw new Error('Нет подсказки для выделения');
-    // Мимо слоя — сразу: крупный уровень (фон) задевает слой, и щелчок снаружи выделил бы его весь
-    if (within && (points.some((p) => p.positive && !covers(within, p.x, p.y)) || (box && !intersect(box, within.rect).width))) throw new Error(OUTSIDE_LAYER);
     // Точки прежнего вида (Shift и Alt после прокрутки) тоже должны попасть в участок
     let crop = this.viewRect(doc, req.view);
     const need = [...points.map((p) => ({ x: Math.floor(p.x), y: Math.floor(p.y), width: 1, height: 1 })), ...(box?.width ? [box] : [])].reduce(union);
@@ -249,9 +245,9 @@ export class Segmentation {
       const snapped = this.snap(doc, found.map((f) => f.bitmap));
       found = found.map((f, i) => ({ ...f, bitmap: snapped[i]! }));
     }
-    if (within) {
+    if (scope) {
       found = found.flatMap((f) => {
-        const bitmap = clipBitmap(f.bitmap, within);
+        const bitmap = scoped(f.bitmap, scope);
         return bitmap ? [{ ...f, bitmap }] : [];
       });
       if (!found.length) throw new Error(OUTSIDE_LAYER);
@@ -273,7 +269,7 @@ export class Segmentation {
       }
     }
     return {
-      levels: bitmaps.map((bitmap) => ({ id: this.store({ bitmap, points, box, crop, refined: false, within }), rect: bitmap.rect })),
+      levels: bitmaps.map((bitmap) => ({ id: this.store({ bitmap, points, box, crop, refined: false, scope }), rect: bitmap.rect })),
       level,
       unchanged: unchanged || undefined,
     };
@@ -311,7 +307,7 @@ export class Segmentation {
     const raw = rasterize(c, 1, { x: 0, y: 0, width: doc.width, height: doc.height });
     if (!raw) return { id, rect: b.rect };
     const snapped = snap ? this.snap(doc, [raw])[0]! : raw;
-    const bitmap = stored.within ? clipBitmap(snapped, stored.within) : snapped;
+    const bitmap = stored.scope ? scoped(snapped, stored.scope) : snapped;
     if (!bitmap) return { id, rect: b.rect };
     return { id: this.store({ ...stored, bitmap, crop, refined: true }), rect: bitmap.rect };
   }
@@ -333,50 +329,15 @@ export class Segmentation {
   bitmap(id: string): Bitmap {
     return this.stored(id).bitmap;
   }
-
-  /**
-   * Маски объектов после правки участка region: before и after — его пиксели до и после (RGB).
-   * Пересчитываются объекты, чей край правка задела: по рамке старой маски вместе с тем, что модель изменила рядом,
-   * и самой старой маской как подсказкой там, где пиксели те же (так бант гуся уходит из маски, IoU 0,97 с новым щелчком).
-   * null — объект не нашёлся. Объекты, которых правка не коснулась, в ответ не попадают.
-   */
-  async remask(doc: CanvasDocument, objects: DocObject[], region: Rect, before: Buffer, after: Buffer): Promise<Map<string, Bitmap | null>> {
-    const out = new Map<string, Bitmap | null>();
-    const touched = objects.filter((o) => intersect(o.rect, region).width > 0 && intersect(o.rect, region).height > 0);
-    if (!touched.length || !modelInstalled()) return out;
-    const changed = changedPixels(before, after, region.width, region.height);
-    const bounds = { x: 0, y: 0, width: doc.width, height: doc.height };
-    this.following++;
-    this.changed();
-    try {
-      for (const obj of touched) {
-        const edge = touchedEdge(obj, changed, region);
-        if (!edge) continue;
-        // Объект мог вырасти: в рамку идёт и то, что правка изменила рядом с ним (в пределах четверти его размера)
-        const near = grow(obj.rect, 0.25 * Math.max(obj.rect.width, obj.rect.height), doc);
-        const grown = changedBox(changed, region, intersect(near, region));
-        const target = grown ? union(obj.rect, grown) : obj.rect;
-        const box = grow(target, 0.08 * Math.max(target.width, target.height), doc);
-        const crop = grow(box, Math.max(32, 0.25 * Math.max(box.width, box.height)), doc);
-        const emb = await this.embedding(doc, crop, { need: box });
-        // Где правка поменяла пиксели, прежняя маска не подсказка: объект мог туда вырасти или оттуда уйти
-        const c = best(await (await this.segmenter()).decode(emb, { box, hint: obj, unsure: { rect: region, mask: changed } }));
-        const bitmap = rasterize(c, 1, bounds);
-        out.set(obj.id, bitmap && area(bitmap) >= 0.02 * area(obj) ? bitmap : null);
-      }
-    } finally {
-      this.following--;
-      this.changed();
-    }
-    return out;
-  }
 }
 
-/** Точка холста внутри маски */
-function covers(b: Bitmap, x: number, y: number): boolean {
-  const lx = Math.floor(x) - b.rect.x;
-  const ly = Math.floor(y) - b.rect.y;
-  return lx >= 0 && ly >= 0 && lx < b.rect.width && ly < b.rect.height && b.mask[ly * b.rect.width + lx]! >= MASK_THRESHOLD;
+/** Где ищет палочка: в слое, где работают, или на фоне — всё, кроме видимых слоёв */
+export type Scope = { layer: Bitmap } | { outside: Bitmap[] };
+
+/** Маска в пределах scope; k — масштаб маски от холста (у подсветки под курсором) */
+function scoped(b: Bitmap, scope: Scope, k = 1): Bitmap | null {
+  if ('outside' in scope) return clipOut(b, scope.outside, k);
+  return k === 1 ? clipBitmap(b, scope.layer) : clipScaled(b, scope.layer, k);
 }
 
 /** Уровни, обрезанные по слою, часто совпадают (часть и целое — весь слой): из почти одинаковых остаётся мельчайший */
@@ -392,25 +353,6 @@ function dedupe<T extends { bitmap: Bitmap; best: boolean }>(found: T[]): T[] {
     out.push(f);
   }
   return out;
-}
-
-/** Рамка изменённых пикселей участка region внутри within; null — их там нет */
-function changedBox(changed: Uint8Array, region: Rect, within: Rect): Rect | null {
-  let x0 = Infinity;
-  let y0 = Infinity;
-  let x1 = -Infinity;
-  let y1 = -Infinity;
-  for (let y = within.y; y < within.y + within.height; y++) {
-    const row = (y - region.y) * region.width - region.x;
-    for (let x = within.x; x < within.x + within.width; x++) {
-      if (!changed[row + x]) continue;
-      x0 = Math.min(x0, x);
-      y0 = Math.min(y0, y);
-      x1 = Math.max(x1, x);
-      y1 = Math.max(y1, y);
-    }
-  }
-  return x1 < x0 ? null : { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
 }
 
 /** Маска для браузера: белая, прозрачная там, где её нет (серый с альфой) */

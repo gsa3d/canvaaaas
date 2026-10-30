@@ -35,7 +35,7 @@ const iou = (a: Bitmap, b: Bitmap) => {
 };
 
 describe.skipIf(!modelInstalled())('SAM', () => {
-  it('щелчок выделяет круг; правка, после которой он вырос, растит и маску объекта, ⌘Z возвращает прежнюю', async () => {
+  it('щелчок выделяет круг; добавить то, что уже выделено, или вычесть то, чего нет, — выделение не меняется', async () => {
     const s = new Session('mock', envOnlyStore());
     await s.newDocument(W, H, [235, 232, 225]);
     const doc = s.doc!;
@@ -59,27 +59,9 @@ describe.skipIf(!modelInstalled())('SAM', () => {
     const added = await s.pickObject({ view, points: [{ x: 620, y: 200, positive: true }], op: 'add', selection: disc });
     expect(added.unchanged).toBeUndefined();
 
-    const id = await s.saveObject([{ kind: 'mask', id: level.id, ...level.rect }]);
-    // Правка: круг стал радиусом 110
-    const rect = { x: 160, y: 160, width: 280, height: 280 };
-    const layer = Buffer.alloc(rect.width * rect.height * 4);
-    for (let y = 0; y < rect.height; y++) {
-      for (let x = 0; x < rect.width; x++) {
-        const on = Math.hypot(rect.x + x - 300, rect.y + y - 300) <= 110;
-        layer.set(on ? [40, 90, 160, 255] : [235, 232, 225, 255], (y * rect.width + x) * 4);
-      }
-    }
-    const before = doc.region(rect);
-    const patch = doc.addPatch({ id: 'grow', rect, layer, prompt: 'больше', jobId: 'j', variant: 0, createdAt: '' });
-    await (s as unknown as { followObjects: (...a: unknown[]) => Promise<void> }).followObjects(doc, patch.id, rect, before, doc.region(rect));
-    expect(iou(doc.object(id), discMask(110))).toBeGreaterThan(0.9);
-
-    await s.undo();
-    expect(doc.patches).toHaveLength(0);
-    expect(iou(doc.object(id), discMask(80))).toBeGreaterThan(0.9);
   }, 60_000);
 
-  it('в слое палочка ищет только в нём: круг обрезается по слою, щелчок мимо слоя — ошибка', async () => {
+  it('палочка ищет у хозяина точки: в слое — внутри него, по другому слою — входит в него, по фону — мимо слоёв', async () => {
     const s = new Session('mock', envOnlyStore());
     await s.newDocument(W, H, [235, 232, 225]);
     const doc = s.doc!;
@@ -89,15 +71,29 @@ describe.skipIf(!modelInstalled())('SAM', () => {
     // Слой — левая половина круга
     const half = await s.saveObject([{ kind: 'rect', x: 200, y: 200, width: 100, height: 200 }]);
     const view = { x: 0, y: 0, width: W, height: H };
-    const pick = await s.pickObject({ view, points: [{ x: 270, y: 300, positive: true }], within: half });
-    for (const level of pick.levels) {
-      const b = s.segmentation.bitmap(level.id);
-      expect(b.rect.x).toBeGreaterThanOrEqual(200);
-      expect(b.rect.x + b.rect.width).toBeLessThanOrEqual(300);
-    }
-    // Самый крупный уровень — вся левая половина круга
-    const whole = s.segmentation.bitmap(pick.levels.at(-1)!.id);
-    expect(area(whole)).toBeGreaterThan(0.85 * (Math.PI * 80 * 80) / 2);
-    await expect(s.pickObject({ view, points: [{ x: 620, y: 200, positive: true }], within: half })).rejects.toThrow(OUTSIDE_LAYER);
+
+    // Вне слоя щелчок по нему — вход в слой, без модели
+    const enter = await s.pickObject({ view, points: [{ x: 270, y: 300, positive: true }] });
+    expect(enter).toMatchObject({ enter: true, owner: half, levels: [{ id: `obj:${half}` }] });
+
+    // В слое — уровни в его границах
+    const inside = await s.pickObject({ view, points: [{ x: 270, y: 300, positive: true }], within: half });
+    expect(inside.owner).toBe(half);
+    expect(inside.enter).toBeUndefined();
+    const right = (id: string) => {
+      const b = s.segmentation.bitmap(id);
+      return b.rect.x + b.rect.width;
+    };
+    for (const level of inside.levels) expect(right(level.id)).toBeLessThanOrEqual(302);
+
+    // По фону — круг без слоя: его левой половины в выделении нет
+    const outside = await s.pickObject({ view, points: [{ x: 340, y: 300, positive: true }], within: half });
+    expect(outside.owner).toBeNull();
+    const disc = s.segmentation.bitmap(outside.levels[outside.level]!.id);
+    expect(disc.rect.x).toBeGreaterThanOrEqual(298);
+    expect(area(disc)).toBeGreaterThan(0.8 * (Math.PI * 80 * 80) / 2);
+
+    // Добавить к выделению слоя то, что на фоне, — нельзя: объекты разных слоёв не смешиваются
+    await expect(s.pickObject({ view, points: [{ x: 620, y: 200, positive: true }], within: half, op: 'add', selection: [] })).rejects.toThrow(OUTSIDE_LAYER);
   }, 60_000);
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CanvasDocument, type DocObject } from '../src/core/document.ts';
 import { applyShapes } from '../src/core/mask-shapes.ts';
-import { changedPixels, overlap, placeObject, removeObject, touchedEdge, trim } from '../src/core/objects.ts';
+import { overlap, trim } from '../src/core/objects.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
 import { LOW, cleanLogits, levels, rasterize, type Bitmap, type Candidate } from '../src/core/segment.ts';
 import { envOnlyStore } from '../src/core/secrets.ts';
@@ -27,29 +27,7 @@ function obj(id: string, b: Bitmap, parent?: string): DocObject {
 
 const parents = (list: DocObject[]) => Object.fromEntries(list.map((o) => [o.id, o.parent ?? null]));
 
-describe('Дерево объектов', () => {
-  it('объект встаёт частью того, в чём лежит, и забирает себе то, что лежит в нём', () => {
-    let list: DocObject[] = [];
-    list = placeObject(list, obj('окно', box(120, 120, 60, 40)));
-    list = placeObject(list, obj('трамвай', box(100, 100, 400, 150)));
-    list = placeObject(list, obj('кролик', box(130, 125, 20, 20)));
-    list = placeObject(list, obj('гусь', box(600, 100, 80, 80)));
-    expect(parents(list)).toEqual({ окно: 'трамвай', трамвай: null, кролик: 'окно', гусь: null });
-
-    // Удалили окно — кролик становится частью трамвая
-    expect(parents(removeObject(list, 'окно'))).toEqual({ трамвай: null, кролик: 'трамвай', гусь: null });
-  });
-
-  it('объект из нескольких — их общий родитель: так они объединяются', () => {
-    let list: DocObject[] = [];
-    list = placeObject(list, obj('левый', box(0, 0, 50, 50)));
-    list = placeObject(list, obj('правый', box(60, 0, 50, 50)));
-    const both = trim({ rect: { x: 0, y: 0, width: 110, height: 50 }, mask: new Uint8Array(110 * 50) });
-    expect(both).toBeNull();
-    list = placeObject(list, obj('пара', { rect: { x: 0, y: 0, width: 110, height: 50 }, mask: union([box(0, 0, 50, 50), box(60, 0, 50, 50)], 110, 50) }));
-    expect(parents(list)).toEqual({ левый: 'пара', правый: 'пара', пара: null });
-  });
-
+describe('Маски слоёв', () => {
   it('пересечение масок считается по пикселям, а не по рамкам', () => {
     expect(overlap(disc(50, 50, 20), box(30, 30, 41, 41))).toBe(overlap(disc(50, 50, 20), disc(50, 50, 20)));
     expect(overlap(box(0, 0, 10, 10), box(5, 5, 10, 10))).toBe(25);
@@ -98,31 +76,6 @@ describe('Маска объекта в выделении', () => {
 });
 
 describe('Маски объектов и отмена', () => {
-  it('пересчёт масок после правки отменяется вместе с ней', () => {
-    const doc = CanvasDocument.blank(200, 200, [255, 255, 255], 'test');
-    doc.setObjects([obj('гусь', disc(100, 100, 40))]);
-    const layer = Buffer.alloc(50 * 50 * 4, 200);
-    doc.addPatch({ id: 'p', rect: { x: 75, y: 75, width: 50, height: 50 }, layer, prompt: 'бант', jobId: 'j', variant: 0, createdAt: '' });
-    const join = doc.historyTop();
-    const moved = { ...doc.object('гусь'), ...disc(100, 100, 30), version: doc.nextObjectVersion() };
-    doc.setObjects([moved], { join });
-    expect(doc.object('гусь').rect.width).toBe(61);
-
-    doc.undo();
-    expect(doc.patches).toHaveLength(0);
-    expect(doc.object('гусь').rect.width).toBe(81);
-    doc.redo();
-    expect(doc.patches).toHaveLength(1);
-    expect(doc.object('гусь').rect.width).toBe(61);
-
-    // После правки успели сделать что-то ещё — пересчёт ложится отдельным шагом
-    doc.togglePatch('p');
-    doc.setObjects([{ ...moved, name: 'гусыня' }], { join: doc.patches[0] });
-    doc.undo();
-    expect(doc.object('гусь').name).toBe('гусь');
-    expect(doc.patches[0]!.active).toBe(false);
-  });
-
   it('объекты сохраняются в .caaa и открываются теми же', async () => {
     const doc = CanvasDocument.blank(200, 160, [255, 255, 255], 'test');
     doc.setObjects([obj('трамвай', box(10, 10, 150, 80)), { ...obj('окно', disc(50, 40, 15), 'трамвай'), lost: true }]);
@@ -135,23 +88,6 @@ describe('Маски объектов и отмена', () => {
     expect(Buffer.from(back.object('окно').mask).equals(Buffer.from(doc.object('окно').mask))).toBe(true);
     expect(back.patches[0]!.object).toBe('окно');
     expect(back.objectsKey).toBe(doc.objectsKey);
-  });
-});
-
-describe('Задела ли правка край объекта', () => {
-  const region = { x: 0, y: 0, width: 300, height: 300 };
-  const house = box(20, 20, 260, 260);
-  const changeAt = (x: number, y: number, w: number, h: number) => {
-    const before = Buffer.alloc(300 * 300 * 3, 255);
-    const after = Buffer.from(before);
-    for (let r = y; r < y + h; r++) after.fill(0, (r * 300 + x) * 3, (r * 300 + x + w) * 3);
-    return changedPixels(before, after, 300, 300);
-  };
-
-  it('окно глубоко внутри дома — нет, пристройка у стены — да', () => {
-    expect(touchedEdge(house, changeAt(120, 120, 40, 40), region)).toBeNull();
-    // Край — полоса в 2% размера объекта (5 px) по обе стороны стены на x = 280
-    expect(touchedEdge(house, changeAt(270, 100, 25, 40), region)).toEqual({ x: 275, y: 100, width: 10, height: 40 });
   });
 });
 
@@ -218,19 +154,20 @@ describe('Объекты в сессии', () => {
     const a = await s.saveObject([{ kind: 'rect', x: 10, y: 10, width: 100, height: 80 }]);
     const b = await s.saveObject([{ kind: 'ellipse', cx: 250, cy: 150, rx: 40, ry: 30 }]);
     expect(s.state().objects.map((o) => o.name)).toEqual(['Слой 1', 'Слой 2']);
-    expect(s.doc!.object(a).rect).toEqual({ x: 10, y: 10, width: 100, height: 80 });
+    // Слой — копия того, что видно, с контуром: маска на 2 px шире выделения
+    expect(s.doc!.object(a).rect).toEqual({ x: 8, y: 8, width: 104, height: 84 });
     expect(s.dirty).toBe(true);
 
-    // Объект из двух объектов — их родитель
+    // Слой из двух слоёв — новый слой сверху, сами они не меняются и частями не становятся
     const pair = await s.saveObject([
       { kind: 'mask', id: `obj:${a}`, x: 0, y: 0, width: 1, height: 1 },
       { kind: 'mask', id: `obj:${b}`, x: 0, y: 0, width: 1, height: 1 },
     ]);
-    expect(parents(s.doc!.objects)).toEqual({ [a]: pair, [b]: pair, [pair]: null });
+    expect(parents(s.doc!.objects)).toEqual({ [a]: null, [b]: null, [pair]: null });
 
     await s.renameObject(pair, 'пара');
     await s.deleteObject(pair);
-    expect(parents(s.doc!.objects)).toEqual({ [a]: null, [b]: null });
+    expect(s.doc!.objects.map((o) => o.id)).toEqual([a, b]);
     await s.undo();
     await s.undo();
     expect(s.doc!.object(pair).name).toBe('Слой 3');
@@ -252,16 +189,17 @@ describe('Объекты в сессии', () => {
       await new Promise((r) => setTimeout(r, 50));
     }
     // Рамка задачи — по маске объекта на сервере, а не по тому, что прислал интерфейс
-    expect(s.state().jobs[0]!.bbox).toEqual({ x: 140, y: 110, width: 120, height: 80 });
-    expect(s.doc!.patches[0]!.object).toBe(goose);
-    expect(s.doc!.object(goose).current).toBe(s.doc!.patches[0]!.id);
-    // Вне маски объекта пиксели холста — побайтно исходник
-    const p = s.doc!.patches[0]!;
+    expect(s.state().jobs[0]!.bbox).toEqual({ x: 138, y: 108, width: 124, height: 84 });
+    // Первая версия слоя — его копия, вторая — правка
+    const p = s.doc!.patches.find((x) => !x.lifted)!;
+    expect(p.object).toBe(goose);
+    expect(s.doc!.object(goose).current).toBe(p.id);
+    // Вне маски слоя пиксели холста — побайтно исходник
     for (let y = 0; y < p.rect.height; y += 3) {
       for (let x = 0; x < p.rect.width; x += 3) {
+        if (p.mask[y * p.rect.width + x]) continue;
         const cx = p.rect.x + x;
         const cy = p.rect.y + y;
-        if (((cx + 0.5 - 200) / 60) ** 2 + ((cy + 0.5 - 150) / 40) ** 2 <= 1.05) continue;
         const i = (cy * 400 + cx) * 3;
         expect([...s.doc!.composite.subarray(i, i + 3)]).toEqual([255, 255, 255]);
       }

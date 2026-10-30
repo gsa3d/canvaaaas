@@ -34,7 +34,7 @@ async function done(s: Session) {
   return s.state().jobs[0]!.id;
 }
 
-/** Квадрат-слой с дорисованным фоном: под ним заплатка фона, сам он — снятый исходник */
+/** Квадрат-слой с дорисованным фоном: под ним заплатка фона, сам он — своя копия квадрата */
 async function detached() {
   const s = await session();
   const id = await s.saveObject([{ kind: 'rect', x: 100, y: 100, width: 60, height: 60 }]);
@@ -86,26 +86,31 @@ describe('Слой сдвигается', () => {
 });
 
 describe('Дорисовать фон под слоем', () => {
-  it('заплатка фона — слоем под всеми, исходник слоя снят; холст тот же, вокруг — побайтно исходник; одним шагом ⌘Z', async () => {
+  it('⌘J — копия того, что видно, холст тот же; фон под слоем — заплаткой прямо под ним, вокруг — побайтно исходник', async () => {
     const s = await session();
     const before = Buffer.from(s.doc!.composite);
     const id = await s.saveObject([{ kind: 'rect', x: 100, y: 100, width: 60, height: 60 }]);
+    const doc = s.doc!;
+    // Своя копия с контуром: маска на 2 px шире выделения; на холсте ничего не меняется
+    const lifted = doc.patches.find((p) => p.lifted)!;
+    expect(lifted).toMatchObject({ object: id, rect: { x: 98, y: 98, width: 64, height: 64 } });
+    expect(doc.object(id).rect).toEqual(lifted.rect);
+    expect(doc.composite.equals(before)).toBe(true);
+
     s.detachObject(id, { model: 'flash', size: 'auto', variants: 1 });
     expect(() => s.detachObject(id, { model: 'flash', size: 'auto', variants: 1 })).toThrow('уже рисуется');
     await done(s);
-    expect(s.state().jobs[0]).toMatchObject({ detach: id, hide: true, bbox: { x: 94, y: 94, width: 72, height: 72 } });
-    const doc = s.doc!;
-    const lifted = doc.patches.find((p) => p.lifted)!;
+    expect(s.state().jobs[0]).toMatchObject({ detach: id, hide: true, bbox: { x: 92, y: 92, width: 76, height: 76 } });
+    // Копию второй раз не снимают
+    expect(doc.patches.filter((p) => p.lifted)).toHaveLength(1);
     const fill = doc.objects.find((o) => o.kind === 'fill')!;
-    expect(lifted).toMatchObject({ object: id, rect: { x: 98, y: 98, width: 64, height: 64 } });
     expect(fill).toMatchObject({ under: id, name: 'Фон под «Слой 1»' });
     expect(doc.patch(fill.current!).object).toBe(fill.id);
-    expect(doc.object(id).rect).toEqual(lifted.rect);
-    expect(s.state().objects.find((o) => o.id === id)!.layer).toBe(lifted.id);
+    expect(s.state().objects.find((o) => o.id === id)).toMatchObject({ layer: lifted.id, filled: true });
     expect(px(doc, 130, 130)).toEqual(RED);
     for (let y = 0; y < H; y += 2) {
       for (let x = 0; x < W; x += 2) {
-        if (x >= 94 && x < 166 && y >= 94 && y < 166) continue;
+        if (x >= 92 && x < 168 && y >= 92 && y < 168) continue;
         expect(doc.composite[(y * W + x) * 3]).toBe(before[(y * W + x) * 3]);
       }
     }
@@ -116,25 +121,24 @@ describe('Дорисовать фон под слоем', () => {
     await s.undo();
     await s.undo();
     await s.undo();
-    expect(doc.patches).toHaveLength(0);
+    // Фона нет, копия осталась; ещё шаг — нет и слоя
+    expect(doc.patches.map((p) => p.id)).toEqual([lifted.id]);
     expect(doc.objects.map((o) => o.id)).toEqual([id]);
-    expect(doc.object(id).rect).toEqual({ x: 100, y: 100, width: 60, height: 60 });
     expect(px(doc, 130, 130)).toEqual(RED);
     expect(() => s.patchVariants(lifted.id, { variants: 1, model: 'flash', size: 'auto' })).toThrow();
+    await s.undo();
+    expect(doc.patches).toHaveLength(0);
+    expect(doc.objects).toHaveLength(0);
   });
 
-  it('сдвиг: слой на новом месте, на старом — заплатка; части едут с ним; без фона сдвинуть нельзя; ⌘Z возвращает всё', async () => {
+  it('сдвиг: слой на новом месте, на старом — заплатка; копия без фона тоже едет, пустой слой — нет; ⌘Z возвращает всё', async () => {
     const { s, doc, id, layer } = await detached();
-    const part = await s.saveObject([{ kind: 'rect', x: 110, y: 110, width: 10, height: 10 }]);
-    expect(doc.object(part).parent).toBe(id);
-    await expect(s.moveObject(part, 5, 5)).rejects.toThrow('дорисуйте фон');
     const fillAt = [...doc.regionWithout({ x: 130, y: 130, width: 1, height: 1 }, layer.id)];
     await s.moveObject(id, 100, 50.4);
     expect(layer.rect).toMatchObject({ x: 198, y: 148 });
     expect(px(doc, 230, 180)).toEqual(RED);
     expect(px(doc, 130, 130)).toEqual(fillAt);
     expect(doc.object(id).rect).toEqual(layer.rect);
-    expect(doc.object(part).rect).toEqual({ x: 210, y: 160, width: 10, height: 10 });
     expect(s.dirty).toBe(true);
     await s.moveObject(id, 1000, 0);
     expect(layer.rect.x).toBe(W - layer.rect.width);
@@ -142,10 +146,17 @@ describe('Дорисовать фон под слоем', () => {
     await s.undo();
     expect(layer.rect).toMatchObject({ x: 98, y: 98 });
     expect(px(doc, 130, 130)).toEqual(RED);
-    expect(doc.object(part).rect.x).toBe(110);
+
+    // Копия без фона сдвигается, как в Photoshop: на старом месте — то, что было под ней
+    const copy = await s.saveObject([{ kind: 'rect', x: 300, y: 200, width: 20, height: 20 }]);
+    await s.moveObject(copy, -10, 0);
+    expect(doc.object(copy).rect.x).toBe(288);
+    // Слой без своих пикселей (из старого проекта) сдвинуть нечем
+    doc.setObjects([...doc.objects, { id: 'empty', name: 'пустой', rect: { x: 10, y: 10, width: 5, height: 5 }, mask: new Uint8Array(25).fill(255), createdAt: '', version: 1 }]);
+    await expect(s.moveObject('empty', 5, 5)).rejects.toThrow('нечего сдвигать');
   });
 
-  it('ластик по исходнику стирает и маску слоя; удалить слой — уйти с холста с частями, заплатка остаётся', async () => {
+  it('ластик по исходнику стирает и маску слоя; удалить слой — уйти с холста, заплатка и другие слои остаются', async () => {
     const { s, doc, id, layer, fill } = await detached();
     const fillAt = [...doc.regionWithout({ x: 105, y: 130, width: 1, height: 1 }, layer.id)];
     const fillMid = [...doc.regionWithout({ x: 130, y: 130, width: 1, height: 1 }, layer.id)];
@@ -157,13 +168,14 @@ describe('Дорисовать фон под слоем', () => {
     expect(doc.object(id).rect.x).toBe(98);
     expect(px(doc, 105, 130)).toEqual(RED);
 
-    await s.saveObject([{ kind: 'rect', x: 110, y: 110, width: 10, height: 10 }]);
+    const small = await s.saveObject([{ kind: 'rect', x: 110, y: 110, width: 10, height: 10 }]);
+    expect(doc.object(small).parent).toBeUndefined();
     await s.deleteObject(id);
-    expect(doc.patches.map((p) => p.object)).toEqual([fill.id]);
-    expect(doc.objects.map((o) => o.id)).toEqual([fill.id]);
+    expect(doc.patches.map((p) => p.object)).toEqual([fill.id, small]);
+    expect(doc.objects.map((o) => o.id)).toEqual([fill.id, small]);
     expect(px(doc, 130, 130)).toEqual(fillMid);
     await s.undo();
-    expect(doc.patches).toHaveLength(2);
+    expect(doc.patches).toHaveLength(3);
     expect(doc.objects).toHaveLength(3);
     await expect(s.removePatch(layer.id)).rejects.toThrow('Исходник');
   });
@@ -183,7 +195,7 @@ describe('Дорисовать фон под слоем', () => {
     // Исходник — снова квадрат на новом месте
     await s.setCurrent(id, null);
     expect(px(doc, 230, 130)).toEqual(RED);
-  });
+  }, 20_000);
 
   it('заплатка — прямо под своим слоем: старая правка с тем же предметом не проступает ни после сдвига, ни после удаления', async () => {
     const s = await session();

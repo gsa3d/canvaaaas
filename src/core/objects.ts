@@ -1,14 +1,10 @@
-// Объекты на холсте — дерево масок: крупный объект и его части. Здесь — что считается над масками:
-// площадь и пересечение, куда объект встаёт в дереве, задела ли правка его край.
+// Слои на холсте — маски: здесь то, что считается над масками: площадь, пересечение, обрезка и объединение,
+// части слоя (дерево из проектов, где слои вкладывались друг в друга).
 import type { DocObject } from './document.ts';
 import { intersect, type Rect } from './frame.ts';
 import { insideDistance, MASK_THRESHOLD } from './mask.ts';
 import type { Bitmap } from './segment.ts';
 
-/** Часть должна лежать внутри объекта хотя бы на такую долю своей площади */
-const CONTAINED = 0.9;
-/** Насколько пиксель должен измениться, чтобы правка его «задела» (как в expand.ts) */
-const DIFF_THRESHOLD = 28;
 
 export function area(b: Bitmap): number {
   let n = 0;
@@ -69,32 +65,6 @@ export function ancestors(objects: DocObject[], id: string): DocObject[] {
   return out;
 }
 
-/**
- * Список объектов с новым: его родитель — самый маленький объект, внутри которого он лежит, а объекты того же уровня,
- * которые лежат внутри нового, становятся его частями. Так «объединить» — это просто сохранить объект из нескольких.
- * Слой из генерации (edit) целым не бывает: он не родитель и частей себе не забирает. Заплатки фона — вне дерева.
- */
-export function placeObject(objects: DocObject[], obj: DocObject): DocObject[] {
-  const size = area(obj);
-  // Заплатки фона — не в дереве: они лежат под всеми слоями
-  const areas = new Map(objects.filter((o) => o.kind !== 'fill').map((o) => [o.id, area(o)]));
-  let parent: DocObject | undefined;
-  for (const o of objects) {
-    if (o.kind === 'fill' || o.edit) continue;
-    const a = areas.get(o.id)!;
-    if (a <= size || overlap(o, obj) < CONTAINED * size) continue;
-    if (!parent || a < areas.get(parent.id)!) parent = o;
-  }
-  const placed = { ...obj, parent: parent?.id };
-  const next = objects.map((o) => {
-    if (o.kind === 'fill' || obj.edit) return o;
-    const a = areas.get(o.id)!;
-    if (o.parent !== placed.parent || a >= size || overlap(o, obj) < CONTAINED * a) return o;
-    return { ...o, parent: placed.id };
-  });
-  return [...next, placed];
-}
-
 /** Части объекта, части частей и так далее */
 export function descendants(objects: DocObject[], id: string): DocObject[] {
   const out: DocObject[] = [];
@@ -135,6 +105,28 @@ export function clipScaled(b: Bitmap, within: Bitmap, k: number): Bitmap | null 
       if (!mask[i]) continue;
       const cx = Math.floor((rect.x + x + 0.5) / k) - w.x;
       if (cx < 0 || cy < 0 || cx >= w.width || cy >= w.height || within.mask[cy * w.width + cx]! < MASK_THRESHOLD) mask[i] = 0;
+    }
+  }
+  return trim({ rect, mask });
+}
+
+/** Маска без того, что накрывают маски cut (фон — всё, кроме слоёв); k — масштаб маски от холста, как у подсветки */
+export function clipOut(b: Bitmap, cut: Bitmap[], k = 1): Bitmap | null {
+  const { rect } = b;
+  const mask = new Uint8Array(b.mask);
+  for (const c of cut) {
+    // Участок c в масштабе маски, пересечённый с её рамкой
+    const x0 = Math.max(rect.x, Math.floor(c.rect.x * k));
+    const y0 = Math.max(rect.y, Math.floor(c.rect.y * k));
+    const x1 = Math.min(rect.x + rect.width, Math.ceil((c.rect.x + c.rect.width) * k));
+    const y1 = Math.min(rect.y + rect.height, Math.ceil((c.rect.y + c.rect.height) * k));
+    for (let y = y0; y < y1; y++) {
+      const cy = Math.floor((y + 0.5) / k) - c.rect.y;
+      if (cy < 0 || cy >= c.rect.height) continue;
+      for (let x = x0; x < x1; x++) {
+        const cx = Math.floor((x + 0.5) / k) - c.rect.x;
+        if (cx >= 0 && cx < c.rect.width && c.mask[cy * c.rect.width + cx]! >= MASK_THRESHOLD) mask[(y - rect.y) * rect.width + x - rect.x] = 0;
+      }
     }
   }
   return trim({ rect, mask });
@@ -185,60 +177,4 @@ export function removeObject(objects: DocObject[], id: string): DocObject[] {
   const gone = objects.find((o) => o.id === id);
   if (!gone) throw new Error('Нет такого объекта');
   return objects.filter((o) => o.id !== id).map((o) => (o.parent === id ? { ...o, parent: gone.parent } : o));
-}
-
-/** Где правка заметно поменяла пиксели: 1 — поменяла; before и after — RGB размером с участок */
-export function changedPixels(before: Uint8Array, after: Uint8Array, width: number, height: number): Uint8Array {
-  const out = new Uint8Array(width * height);
-  for (let i = 0; i < out.length; i++) {
-    const d = Math.max(Math.abs(before[i * 3]! - after[i * 3]!), Math.abs(before[i * 3 + 1]! - after[i * 3 + 1]!), Math.abs(before[i * 3 + 2]! - after[i * 3 + 2]!));
-    if (d > DIFF_THRESHOLD) out[i] = 1;
-  }
-  return out;
-}
-
-/**
- * Задела ли правка край объекта: изменённые пиксели ближе band к границе маски — изнутри или снаружи.
- * Правка глубоко внутри большого объекта (окно в доме) его контур не меняет — такой объект пересчитывать незачем.
- * changed — изменённые пиксели участка region. Возвращает рамку задевших пикселей или null.
- */
-export function touchedEdge(obj: Bitmap, changed: Uint8Array, region: Rect, band = Math.max(4, Math.round(0.02 * Math.max(obj.rect.width, obj.rect.height)))): Rect | null {
-  // Участок вокруг объекта с запасом band: снаружи считается расстояние до маски, внутри — до её края
-  const box = intersect(region, { x: obj.rect.x - band, y: obj.rect.y - band, width: obj.rect.width + 2 * band, height: obj.rect.height + 2 * band });
-  if (!box.width || !box.height) return null;
-  const inside = new Uint8Array(box.width * box.height);
-  const outside = new Uint8Array(box.width * box.height);
-  for (let y = 0; y < box.height; y++) {
-    for (let x = 0; x < box.width; x++) {
-      const ox = box.x + x - obj.rect.x;
-      const oy = box.y + y - obj.rect.y;
-      const on = ox >= 0 && oy >= 0 && ox < obj.rect.width && oy < obj.rect.height && obj.mask[oy * obj.rect.width + ox]! >= MASK_THRESHOLD;
-      inside[y * box.width + x] = on ? 255 : 0;
-      outside[y * box.width + x] = on ? 0 : 255;
-    }
-  }
-  const din = insideDistance(inside, box.width, box.height);
-  const dout = insideDistance(outside, box.width, box.height);
-  let x0 = Infinity;
-  let y0 = Infinity;
-  let x1 = -Infinity;
-  let y1 = -Infinity;
-  let hits = 0;
-  for (let y = 0; y < box.height; y++) {
-    const row = (box.y + y - region.y) * region.width + box.x - region.x;
-    for (let x = 0; x < box.width; x++) {
-      if (!changed[row + x]) continue;
-      const i = y * box.width + x;
-      // У края участка вокруг объекта расстояние наружу ограничено им самим: дальше band — не край
-      if ((inside[i] ? din[i]! : dout[i]!) > band) continue;
-      hits++;
-      x0 = Math.min(x0, box.x + x);
-      y0 = Math.min(y0, box.y + y);
-      x1 = Math.max(x1, box.x + x);
-      y1 = Math.max(y1, box.y + y);
-    }
-  }
-  // Пара случайных пикселей сжатия — не правка
-  if (hits < 16) return null;
-  return { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
 }

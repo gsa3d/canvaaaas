@@ -13,7 +13,7 @@ import type { ModelChoice, SizeChoice, SketchStroke } from '../shared/api.ts';
 import { applyLayer, type RawImage, type RawRegion } from './edit-region.ts';
 import { intersect, type Rect } from './frame.ts';
 import { encodeImage } from './image-file.ts';
-import { featherAlpha, featherAlphaRegion } from './mask.ts';
+import { featherAlpha, featherAlphaRegion, MASK_THRESHOLD } from './mask.ts';
 
 export const TILE_SIZE = 512;
 const TILE_CACHE_LIMIT = 600;
@@ -393,20 +393,11 @@ export class CanvasDocument {
     this.record({ kind: 'mask', patchId, before, after, changed });
   }
 
-  /**
-   * Новый список объектов — шаг отмены. join — шаг, к которому его присоединить (historyTop() после правки):
-   * если он всё ещё последний, отмена уберёт оба разом; если после него было что-то ещё — обычный отдельный шаг.
-   */
-  setObjects(next: DocObject[], opts: { join?: unknown } = {}): void {
+  /** Новый список объектов — шаг отмены */
+  setObjects(next: DocObject[]): void {
     const op: HistoryOp = { kind: 'objects', before: this.objects, after: next };
     this.placeObjects(next);
-    const top = this.undoStack.at(-1);
-    if (opts.join && top === opts.join) {
-      this.undoStack[this.undoStack.length - 1] = { kind: 'group', ops: [top, op] };
-      this.redoStack = [];
-    } else {
-      this.record(op);
-    }
+    this.record(op);
   }
 
   /** Номер для новой маски объекта */
@@ -431,11 +422,6 @@ export class CanvasDocument {
       this.collecting = null;
       if (ops.length) this.record(ops.length === 1 ? ops[0]! : { kind: 'group', ops });
     }
-  }
-
-  /** Последний шаг истории — чтобы потом присоединить к нему пересчёт масок объектов */
-  historyTop(): unknown {
-    return this.undoStack.at(-1);
   }
 
   undo(): void {
@@ -645,19 +631,46 @@ export class CanvasDocument {
     return [...this.objects].sort((a, b) => rankOf(a) - rankOf(b) || index.get(a.id)! - index.get(b.id)!);
   }
 
-  /**
-   * Какие версии видны, — по слоям: у видимого слоя (и всех, частью которых он является) — текущая версия, а без неё —
-   * снятый исходник отделённого. У правок без слоя — своё active
-   */
-  private sync(): void {
+  /** Видимые слои сверху вниз, без заплаток фона: что не их, то фон */
+  visibleLayers(): DocObject[] {
+    const visible = this.visibility();
+    return this.stack()
+      .filter((o) => o.kind !== 'fill' && visible(o))
+      .reverse();
+  }
+
+  /** Чей пиксель (x, y): верхнего видимого слоя, чья маска его накрывает; null — фона */
+  layerAt(x: number, y: number): DocObject | null {
+    const px = Math.floor(x);
+    const py = Math.floor(y);
+    return (
+      this.visibleLayers().find((o) => {
+        const lx = px - o.rect.x;
+        const ly = py - o.rect.y;
+        return lx >= 0 && ly >= 0 && lx < o.rect.width && ly < o.rect.height && o.mask[ly * o.rect.width + lx]! >= MASK_THRESHOLD;
+      }) ?? null
+    );
+  }
+
+  /** Виден ли слой: он сам и всё, частью чего он является, не скрыто */
+  private visibility(): (o: DocObject | undefined) => boolean {
     const byId = new Map(this.objects.map((o) => [o.id, o]));
-    const visible = (o: DocObject | undefined): boolean => {
+    return (o) => {
       for (let i = 0; o && i < 64; i++) {
         if (o.hidden) return false;
         o = o.parent ? byId.get(o.parent) : undefined;
       }
       return true;
     };
+  }
+
+  /**
+   * Какие версии видны, — по слоям: у видимого слоя (и всех, частью которых он является) — текущая версия, а без неё —
+   * снятый исходник. У правок без слоя — своё active
+   */
+  private sync(): void {
+    const byId = new Map(this.objects.map((o) => [o.id, o]));
+    const visible = this.visibility();
     for (const p of this.patches) {
       if (!p.object) continue;
       const o = byId.get(p.object);

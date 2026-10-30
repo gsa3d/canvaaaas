@@ -113,6 +113,7 @@ function buildMenu(win: BrowserWindow, session: Session): void {
         { type: 'separator' },
         { ...item('Снять выделение', 'deselect', 'CmdOrCtrl+D'), enabled: hasDoc },
         { ...item('Слой из выделения', 'save-object', 'CmdOrCtrl+J'), enabled: hasDoc },
+        { ...item('Вырезать в слой', 'cut-object', 'CmdOrCtrl+Shift+J'), enabled: hasDoc },
       ],
     },
     {

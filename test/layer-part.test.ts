@@ -95,8 +95,8 @@ describe('Правка части слоя', () => {
     // Выделенное перерисовано, остальной слой — как в первой версии, вне слоя — исходник
     expect(px(doc, 230, 150)).not.toEqual([...withFirst.subarray((150 * 400 + 230) * 3, (150 * 400 + 230) * 3 + 3)]);
     expect(restAsFirst()).toBeNull();
-    // Слой выделение не перерос — его маска прежняя
-    expect(doc.object(id).rect).toEqual({ x: 100, y: 80, width: 200, height: 140 });
+    // Слой выделение не перерос — его маска прежняя (копия с контуром — на 2 px шире выделения)
+    expect(doc.object(id).rect).toEqual({ x: 98, y: 78, width: 204, height: 144 });
 
     // «Ещё варианты» этой версии: кусок — только правка, поверх первой версии
     const withSecond = px(doc, 230, 150);
@@ -124,7 +124,7 @@ describe('Правка части слоя', () => {
     const id = await s.saveObject([{ kind: 'rect', x: 100, y: 80, width: 100, height: 100 }]);
     s.createJob({ shapes: [{ kind: 'rect', x: 150, y: 80, width: 100, height: 100 }], object: id, prompt: 'хвост', variants: 1, model: 'flash', size: 'auto' });
     await until(() => s.state().jobs.at(-1)?.status === 'done');
-    expect(doc.object(id).rect).toEqual({ x: 100, y: 80, width: 150, height: 100 });
+    expect(doc.object(id).rect).toEqual({ x: 98, y: 78, width: 152, height: 104 });
     expect(doc.objects).toHaveLength(1);
 
     s.createJob({ shapes: [{ kind: 'rect', x: 300, y: 200, width: 40, height: 40 }], prompt: 'рядом', variants: 1, model: 'flash', size: 'auto' });
