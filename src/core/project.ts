@@ -57,7 +57,7 @@ interface Manifest {
     object?: string;
     /** Снятый исходник отделённого слоя object */
     lifted?: boolean;
-    /** Правка части слоя: версия, поверх которой она легла, и маска самой правки */
+    /** Версия слоя, которую видела модель; у правки части слоя — та, поверх которой она легла, и маска самой правки */
     base?: string;
     part?: Part;
   }[];
@@ -162,7 +162,7 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
       sketch: p.sketch?.length ? p.sketch : undefined,
       object: p.object,
       lifted: p.lifted || undefined,
-      base: p.part ? p.base : undefined,
+      base: p.base,
     })),
   };
   const first = 1 + patches.length * 2;
@@ -284,7 +284,7 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       sketch: readSketch(l.sketch),
       object: typeof l.object === 'string' && ids.has(l.object) ? l.object : undefined,
       lifted: (l.lifted === true && typeof l.object === 'string' && ids.has(l.object)) || undefined,
-      base: partMasks[i] && layerIds.has(l.base!) ? l.base : undefined,
+      base: typeof l.base === 'string' && layerIds.has(l.base) ? l.base : undefined,
       part: partMasks[i] && layerIds.has(l.base!) ? new Uint8Array(partMasks[i]!) : undefined,
     };
   });

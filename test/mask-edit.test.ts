@@ -75,4 +75,56 @@ describe('expandMaskByDiff', () => {
     expect(out[3 * w + 3]).toBe(0);
     expect(out[100 * w + 100 + 70]).toBe(0);
   });
+
+  /** Белый кусок в косую линейку (штрих 3 px через 16 px), сдвинутую на shift, — как линейный рисунок */
+  function ruled(w: number, h: number, shift: number): Uint8Array {
+    const out = new Uint8Array(w * h * 3).fill(255);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if ((x + y + shift) % 16 < 3) out.fill(0, (y * w + x) * 3, (y * w + x) * 3 + 3);
+    return out;
+  }
+
+  it('сдвиг линий на пару пикселей изменением не считается: маска не разливается по перерисованному куску', () => {
+    const w = 240;
+    const h = 200;
+    const original = ruled(w, h, 0);
+    // Модель перерисовала весь кусок со сдвигом линий на 2 px и нарисовала круг крупнее выделения
+    const generated = ruled(w, h, 2);
+    const mask = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const r = Math.hypot(x - 120, y - 100);
+        if (r <= 30) mask[y * w + x] = 255;
+        if (r <= 50) generated.fill(r > 46 ? 0 : 255, (y * w + x) * 3, (y * w + x) * 3 + 3);
+      }
+    }
+    const { mask: out } = expandMaskByDiff(mask, original, generated, w, h);
+    // Круг взят целиком с контуром и запасом, перерисованные линии вдали — нет
+    for (let x = 120 - 50; x <= 120 + 50; x++) expect(out[100 * w + x]).toBe(255);
+    expect(out[100 * w + 120 + 90]).toBe(0);
+    expect(out[22 * w + 200]).toBe(0);
+    // Пиксель в пиксель сдвинутые линии — изменение, и маска уходит по ним через весь кусок
+    const exact = expandMaskByDiff(mask, original, generated, w, h, { tolerance: 0 });
+    expect(exact.mask[22 * w + 200]).toBe(255);
+  });
+
+  it('к закрытому краю куска маска вплотную не подходит', () => {
+    const w = 100;
+    const h = 60;
+    const original = new Uint8Array(w * h * 3).fill(100);
+    // Модель нарисовала полосу через весь кусок, выделена её середина
+    const generated = new Uint8Array(original);
+    const mask = new Uint8Array(w * h);
+    for (let y = 20; y < 40; y++) {
+      for (let x = 0; x < w; x++) {
+        generated.fill(230, (y * w + x) * 3, (y * w + x) * 3 + 3);
+        if (x >= 40 && x < 60) mask[y * w + x] = 255;
+      }
+    }
+    const open = expandMaskByDiff(mask, original, generated, w, h, { grow: 4 });
+    expect(open.mask[30 * w]).toBe(255);
+    const closed = expandMaskByDiff(mask, original, generated, w, h, { grow: 4, closed: { left: true, top: true, right: false, bottom: true } });
+    expect(closed.mask[30 * w]).toBe(0);
+    expect(closed.mask[30 * w + 1]).toBe(255);
+    expect(closed.mask[30 * w + w - 1]).toBe(255);
+  });
 });

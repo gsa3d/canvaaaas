@@ -1,4 +1,5 @@
 // Работа в слое: правка части слоя ложится его версией поверх прежней, слой растёт за выделением, палочка — в границах слоя.
+import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
 import { CanvasDocument } from '../src/core/document.ts';
 import { applyLayer, layerOver, type MaskedLayer } from '../src/core/edit-region.ts';
@@ -6,6 +7,7 @@ import { featherAlpha } from '../src/core/mask.ts';
 import { clipBitmap, clipScaled, unionBitmap } from '../src/core/objects.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
 import { envOnlyStore } from '../src/core/secrets.ts';
+import type { MockProvider } from '../src/providers/mock.ts';
 import { Session } from '../src/server/session.ts';
 import type { MaskShape } from '../src/shared/api.ts';
 
@@ -116,6 +118,73 @@ describe('Правка части слоя', () => {
     expect(Buffer.from(again.part!).equals(Buffer.from(third.part!))).toBe(true);
     expect(back.composite.equals(doc.composite)).toBe(true);
   }, 20_000);
+
+  it('весь слой в выделении — версия его заменяет: прежняя в неё не копируется, «Расширить» открывает ответ модели', async () => {
+    const W = 400;
+    const H = 300;
+    const RED = [220, 30, 30];
+    const page = Buffer.alloc(W * H * 3, 255);
+    for (let y = 80; y < 220; y++) for (let x = 100; x < 300; x++) page.set(RED, (y * W + x) * 3);
+    const s = new Session('mock', envOnlyStore());
+    await s.openDocument(await sharp(page, { raw: { width: W, height: H, channels: 3 } }).png().toBuffer(), 'a.png');
+    const doc = s.doc!;
+    // Вырезанный красный квадрат: в фоне под ним белая дыра, его «исх» — красный
+    const id = await s.cutObject([{ kind: 'rect', x: 100, y: 80, width: 200, height: 140 }]);
+    const lifted = doc.patches.find((p) => p.lifted && p.object === id)!.id;
+    const layer: MaskShape = { kind: 'mask', id: `obj:${id}`, x: 0, y: 0, width: 1, height: 1 };
+    s.createJob({ shapes: [layer], object: id, prompt: 'весь', variants: 1, model: 'flash', size: 'auto' });
+    await until(() => s.state().jobs.at(-1)?.status === 'done');
+    const first = doc.patch(doc.object(id).current!);
+    expect(first.part).toBeUndefined();
+    expect(first.base).toBe(lifted);
+    // В растушёвке у края слоя версия полупрозрачна, и под ней — белая дыра, а не прежний красный: он в версию
+    // не скопирован (с ним зелёный упал бы до ~135)
+    const at = (x: number, y: number) => ((y - first.rect.y) * first.rect.width + x - first.rect.x) * 4;
+    const alpha = first.layer[at(110, 150) + 3]!;
+    expect(alpha).toBeGreaterThan(50);
+    expect(alpha).toBeLessThan(200);
+    expect(px(doc, 110, 150)).toEqual([0, 1, 2].map((c) => Math.round(255 + ((first.layer[at(110, 150) + c]! - 255) * alpha) / 255)));
+    expect(px(doc, 110, 150)[1]).toBeGreaterThan(200);
+
+    // Маска шире по ответу модели: на бывшем краю — ответ модели целиком, такой же, как глубже в слое
+    expect(await s.expandVersion(first.id)).toBeGreaterThan(0);
+    expect(px(doc, 110, 150)).toEqual(px(doc, 120, 150));
+
+    // «Ещё варианты» — так же: модель снова видит прежний красный слой, версии его заменяют
+    const more = s.patchVariants(first.id, { variants: 1, model: 'flash', size: 'auto' });
+    await until(() => s.state().jobs.find((j) => j.id === more)?.status === 'done');
+    const second = doc.patch(doc.object(id).current!);
+    expect(second.id).not.toBe(first.id);
+    expect(second.part).toBeUndefined();
+    expect(second.base).toBe(lifted);
+    const seen = (s as unknown as { provider(model: string): MockProvider }).provider('flash').calls.at(-1)!.images[0]!;
+    const { data, info } = await sharp(seen.data).raw().toBuffer({ resolveWithObject: true });
+    const mid = ((info.height >> 1) * info.width + (info.width >> 1)) * info.channels;
+    expect(data[mid]).toBeGreaterThan(180);
+    expect(data[mid + 1]).toBeLessThan(80);
+
+    // Проект помнит, что видела модель
+    const { doc: back } = await openProject(await encodeProject(doc), 'проект.caaa');
+    expect(back.patch(second.id).base).toBe(lifted);
+    expect(back.patch(second.id).part).toBeUndefined();
+    expect(back.composite.equals(doc.composite)).toBe(true);
+
+    // Версия из прежних: весь слой правкой поверх «исх» — её «Ещё варианты» тоже заменяют слой
+    const o = doc.object(id);
+    const whole = new Uint8Array(first.rect.width * first.rect.height);
+    for (let y = 0; y < o.rect.height; y++) {
+      for (let x = 0; x < o.rect.width; x++) whole[(y + o.rect.y - first.rect.y) * first.rect.width + x + o.rect.x - first.rect.x] = o.mask[y * o.rect.width + x]!;
+    }
+    const old = layerOver(doc.patch(lifted), { rect: first.rect, layer: first.layer, mask: whole });
+    const glued = doc.addPatch({ ...old, id: 'склеенная', feather: 24, prompt: 'весь', jobId: 'old', variant: 1, createdAt: '', object: id, base: lifted });
+    await s.setCurrent(id, glued.id);
+    const again = s.patchVariants(glued.id, { variants: 1, model: 'flash', size: 'auto' });
+    await until(() => s.state().jobs.find((j) => j.id === again)?.status === 'done');
+    const third = doc.patch(doc.object(id).current!);
+    expect(third.id).not.toBe(glued.id);
+    expect(third.part).toBeUndefined();
+    expect(third.base).toBe(lifted);
+  }, 30_000);
 
   it('выделение за краем слоя — слой растёт; без слоя — новый слой', async () => {
     const s = new Session('mock', envOnlyStore());

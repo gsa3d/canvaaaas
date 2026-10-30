@@ -156,10 +156,15 @@ interface Job {
   /** Слой, в который ложатся версии: работают в слое — он; иначе слой появится из выделения с первым готовым вариантом */
   object?: string;
   /**
-   * Версия слоя, поверх которой ложатся варианты, — та, что была видна, когда кусок ушёл модели: правят часть слоя,
-   * остальное остаётся от неё
+   * Версия слоя, которую видела модель, — та, что была видна, когда кусок ушёл модели. Правка части слоя ложится
+   * поверх неё: остальное остаётся от неё
    */
   base?: string;
+  /**
+   * Перерисовывают весь слой: варианты его заменяют, base в них не копируется — иначе её край просвечивал бы сквозь
+   * растушёвку, и ни кисть, ни «Расширить по правке» его уже не убрали бы. Не задано — решает, весь ли слой в выделении
+   */
+  whole?: boolean;
   /** Фон под этим слоем: вариант ложится версией слоя с дырой под ним (object) или новым слоем в самом низу (bottom) */
   fillFor?: string;
   bottom?: boolean;
@@ -949,9 +954,12 @@ export class Session {
     const doc = this.requireDoc();
     const patch = doc.patch(patchId);
     if (patch.lifted) throw new Error('Исходник перерисовывают правкой: выделите слой и напишите задачу');
-    // Правка части слоя: перерисовывается только сама правка поверх той же прежней версии
-    const base = patch.base && patch.part && doc.hasPatch(patch.base) ? patch.base : undefined;
-    const mask = base ? patch.part! : patch.mask;
+    // Модель снова видит прежнюю версию слоя; у правки части слоя перерисовывается только сама правка поверх неё
+    const base = patch.base && doc.hasPatch(patch.base) ? patch.base : undefined;
+    const mask = base && patch.part ? patch.part : patch.mask;
+    // Версия всего слоя — и новые его заменяют; так же правка из прежних версий, накрывшая слой целиком
+    const owner = patch.object ? doc.objects.find((o) => o.id === patch.object) : undefined;
+    const whole = !patch.part || (!!owner && overlap(owner, { rect: patch.rect, mask: patch.part }) === area(owner));
     const box = maskBBox(mask, patch.rect.width, patch.rect.height);
     if (!box) throw new Error('Маска версии пустая: верните кистью то, что нужно перерисовать');
     return this.enqueue({
@@ -969,6 +977,7 @@ export class Session {
       director: req.director ?? patch.directed !== undefined,
       directed: patch.directed ? { key: taskKey({ prompt: patch.prompt, hide: patch.hide ?? false }), text: patch.directed } : undefined,
       base,
+      whole,
       from: { patchId, mask, rect: patch.rect, feather: patch.feather },
     });
   }
@@ -991,6 +1000,7 @@ export class Session {
       | 'director'
       | 'directed'
       | 'base'
+      | 'whole'
       | 'from'
     > & {
       variants: number;
@@ -1402,12 +1412,14 @@ export class Session {
       const freed = job.fillFor ? doc.objects.find((o) => o.id === job.fillFor) : undefined;
       // Фон, под которым нет других слоёв, — новым слоем в самом низу, с именем того, под кем он
       const owner = existing ?? { ...this.layerFromJob(doc, job), ...(freed ? { name: `Фон под «${freed.name}»` } : {}) };
-      // Правка части слоя ложится поверх версии, которую модель видела: остальной слой остаётся от неё
-      const below = existing && job.base && doc.hasPatch(job.base) ? doc.patch(job.base) : undefined;
-      const over = below ? layerOver(below, { rect: patch.rect, layer: patch.layer, mask: job.mask }) : undefined;
-      const version: NewPatch = over ? { ...patch, rect: over.rect, layer: over.layer, mask: over.mask, base: below!.id, part: over.part } : patch;
-      // Выделение за краем слоя — слой растёт
       const edited = trim({ rect: job.prep.frame.inside, mask: job.mask });
+      // Правка части слоя ложится поверх версии, которую модель видела: остальной слой остаётся от неё.
+      // Весь слой в выделении — версия его заменяет: прежняя в неё не копируется, но помнится для «Ещё вариантов»
+      const below = existing && job.base && doc.hasPatch(job.base) ? doc.patch(job.base) : undefined;
+      const whole = job.whole ?? (!!existing && !!edited && overlap(existing, edited) === area(existing));
+      const over = below && !whole ? layerOver(below, { rect: patch.rect, layer: patch.layer, mask: job.mask }) : undefined;
+      const version: NewPatch = over ? { ...patch, rect: over.rect, layer: over.layer, mask: over.mask, base: below!.id, part: over.part } : { ...patch, base: below?.id };
+      // Выделение за краем слоя — слой растёт
       const grown = existing && existing.kind !== 'fill' && edited && overlap(edited, existing) < area(edited) ? trim(unionBitmap(existing, edited)) : null;
       const region = version.rect;
       const before = doc.region(region);
@@ -1483,7 +1495,8 @@ export class Session {
 
   /**
    * Добавить к маске версии то, что модель нарисовала за её краем: сравнивается с холстом без этой версии,
-   * а у правки части слоя — с прежней версией на её месте
+   * а у правки части слоя — с прежней версией на её месте. К краю куска, за которым холст продолжается, маска
+   * вплотную не подходит: там вклейка оборвалась бы без растушёвки
    */
   expandVersion(patchId: string): Promise<number> {
     return this.serialDoc((doc) => {
@@ -1493,9 +1506,10 @@ export class Session {
       for (let i = 0; i < width * height; i++) p.layer.copy(rgb, i * 3, i * 4, i * 4 + 3);
       const rect = intersect(p.rect, { x: 0, y: 0, width: doc.width, height: doc.height });
       if (rect.width !== width || rect.height !== height) throw new Error('Версия выходит за край холста');
-      const base = p.base && doc.hasPatch(p.base) ? doc.patch(p.base) : undefined;
+      const base = p.base && p.part && doc.hasPatch(p.base) ? doc.patch(p.base) : undefined;
       const under = base ? doc.regionReplaced(p.rect, p.id, base.rect, base.layer) : doc.regionWithout(p.rect, p.id);
-      const { mask, addedPx } = expandMaskByDiff(p.mask, under, rgb, width, height);
+      const closed = { left: rect.x > 0, top: rect.y > 0, right: rect.x + width < doc.width, bottom: rect.y + height < doc.height };
+      const { mask, addedPx } = expandMaskByDiff(p.mask, under, rgb, width, height, { closed });
       if (addedPx > 0) doc.setPatchMask(p.id, mask);
       this.changed();
       return addedPx;
