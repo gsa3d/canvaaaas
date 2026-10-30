@@ -9,12 +9,15 @@ import {
   API_HEADER,
   type CreateJobRequest,
   type DetachRequest,
+  type EdgeRequest,
   type MaskShape,
   type MoreVariantsRequest,
   type PatchVariantsRequest,
   type PickRequest,
   type RectDto,
   type RedoChange,
+  type SnapRequest,
+  type WandRequest,
 } from '../shared/api.ts';
 import type { Session } from './session.ts';
 
@@ -263,8 +266,18 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     json(res, await session.pickObject(await readJson<PickRequest>(req)));
   });
   route('POST', '/api/segment/refine', async (req, res) => {
-    const { id } = await readJson<{ id: string }>(req);
-    json(res, await session.refineObject(String(id)));
+    const { id, snap } = await readJson<{ id: string; snap?: boolean }>(req);
+    json(res, await session.refineObject(String(id), snap === true));
+  });
+  route('POST', '/api/segment/wand', async (req, res) => {
+    json(res, session.wandSelect(await readJson<WandRequest>(req)));
+  });
+  // Выделение одной маской: край шире или уже, мазок кисти по линиям
+  route('POST', '/api/selection/edge', async (req, res) => {
+    json(res, await session.selectionEdge(await readJson<EdgeRequest>(req)));
+  });
+  route('POST', '/api/selection/snap', async (req, res) => {
+    json(res, await session.snapSelection(await readJson<SnapRequest>(req)));
   });
   // Маска объекта под щелчком или сохранённого (obj:id); у сохранённого меняется с правками — адрес несёт rev
   route('GET', '/api/masks/:id.png', async (_req, res, [id]) => {

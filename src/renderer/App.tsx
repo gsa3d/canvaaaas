@@ -3,7 +3,6 @@ import {
   IconArrowForwardUp,
   IconArrowsExchange,
   IconArrowsMove,
-  IconBlur,
   IconBrush,
   IconChevronLeft,
   IconChevronRight,
@@ -15,6 +14,8 @@ import {
   IconHandStop,
   IconHelpCircle,
   IconLasso,
+  IconLayersSubtract,
+  IconLayersUnion,
   IconMarquee2,
   IconMask,
   IconMinus,
@@ -23,8 +24,10 @@ import {
   IconPlus,
   IconRefresh,
   IconScribble,
+  IconSquare,
   IconStackPop,
   IconTrash,
+  IconWand,
   IconX,
   type Icon,
 } from '@tabler/icons-preact';
@@ -41,6 +44,7 @@ import {
   type DocDto,
   type JobDto,
   type MaskEditResult,
+  type MaskResult,
   type MaskShape,
   type ModelChoice,
   type ModelOutputsDto,
@@ -55,17 +59,44 @@ import {
   type StateDto,
 } from '../shared/api.ts';
 import { getState, post, subscribe, upload, uploadReference } from './api.ts';
-import { CanvasView, type MaskEditView, type MaskRef, type Movable, type PickEvent, type Tool } from './viewer.ts';
+import { CanvasView, type MaskEditView, type MaskRef, type Movable, type PickEvent, type SelectOp, type Tool } from './viewer.ts';
 
 /** Объект, выделенный инструментом «Объект»: его уровни и подсказки, по которым он найден */
 interface Pick {
-  levels: { id: string; rect: { x: number; y: number; width: number; height: number }; refined?: boolean }[];
+  levels: (MaskResult & { refined?: boolean })[];
   level: number;
   points: SegmentPoint[];
   box?: { x: number; y: number; width: number; height: number };
   erase: boolean;
+  /** Край привязан к линиям рисунка — уточнённая маска тоже */
+  snap: boolean;
   /** Куда щёлкнули: щелчок туда же — следующий уровень */
   at?: [number, number];
+}
+
+/** Настройка, которая помнится между запусками; без доступа к памяти браузера — просто по умолчанию */
+function usePref<T>(key: string, initial: T): [T, (value: T | ((prev: T) => T)) => void] {
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const saved = localStorage.getItem(`canvaaaas:${key}`);
+      return saved === null ? initial : (JSON.parse(saved) as T);
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(`canvaaaas:${key}`, JSON.stringify(value));
+    } catch {
+      // Не запомнилось — в следующий раз будет по умолчанию
+    }
+  }, [value]);
+  return [value, setValue];
+}
+
+/** Подписи уровней объекта от мелкого к крупному */
+function levelNames(n: number): string[] {
+  return n >= 3 ? ['Деталь', 'Часть', 'Целое'].concat(Array.from({ length: n - 3 }, (_, i) => `${i + 4}`)) : ['Часть', 'Целое'].slice(2 - n);
 }
 
 /** Сохранённый объект как фигура выделения */
@@ -179,6 +210,7 @@ const STROKE = 1.75;
 
 const TOOL_ICONS: Record<Tool, Icon> = {
   object: IconClick,
+  wand: IconWand,
   move: IconArrowsMove,
   hand: IconHandStop,
   rect: IconMarquee2,
@@ -188,16 +220,21 @@ const TOOL_ICONS: Record<Tool, Icon> = {
   sketch: IconScribble,
 };
 
-const TOOLS: { id: Tool; label: string; key: string }[] = [
-  { id: 'object', label: 'Объект', key: 'W' },
-  { id: 'move', label: 'Сдвинуть отделённый объект', key: 'V' },
-  { id: 'rect', label: 'Прямоугольник', key: 'R' },
-  { id: 'lasso', label: 'Лассо', key: 'L' },
-  { id: 'brush', label: 'Кисть', key: 'B' },
-  { id: 'eraser', label: 'Ластик', key: 'E' },
-  { id: 'sketch', label: 'Набросок для модели, Alt стирает', key: 'S' },
-  { id: 'hand', label: 'Рука (или зажать пробел)', key: 'H' },
+/** name — на панели настроек, label — во всплывающей подсказке */
+const TOOLS: { id: Tool; name: string; label: string; key: string }[] = [
+  { id: 'object', name: 'Объект', label: 'Объект', key: 'W' },
+  { id: 'wand', name: 'Палочка', label: 'Палочка', key: 'Q' },
+  { id: 'move', name: 'Сдвинуть', label: 'Сдвинуть отделённый объект', key: 'V' },
+  { id: 'rect', name: 'Прямоугольник', label: 'Прямоугольник', key: 'R' },
+  { id: 'lasso', name: 'Лассо', label: 'Лассо', key: 'L' },
+  { id: 'brush', name: 'Кисть', label: 'Кисть', key: 'B' },
+  { id: 'eraser', name: 'Ластик', label: 'Ластик', key: 'E' },
+  { id: 'sketch', name: 'Набросок', label: 'Набросок для модели, Alt стирает', key: 'S' },
+  { id: 'hand', name: 'Рука', label: 'Рука (или зажать пробел)', key: 'H' },
 ];
+
+/** Инструменты выделения: у них режим «Новое / Добавить / Вычесть» и край */
+const SELECTING: Tool[] = ['object', 'wand', 'rect', 'lasso', 'brush', 'eraser'];
 
 /** Цвета наброска под рукой; любой другой — из палитры */
 const SKETCH_COLORS = ['#ff3b30', '#1e88ff', '#22b14c', '#111111', '#ffffff'];
@@ -230,14 +267,22 @@ const STATUS: Record<JobDto['status'], string> = {
 export function App() {
   const [state, setState] = useState<StateDto | null>(null);
   const [tool, setTool] = useState<Tool>('rect');
-  const [brush, setBrush] = useState(40);
+  const [brush, setBrush] = usePref('brush', 40);
   /** Мягкость края кисти при правке маски, 0..1 */
-  const [softness, setSoftness] = useState(0.5);
+  const [softness, setSoftness] = usePref('softness', 0.5);
+  /** Режим выделения: заменить, добавить, вычесть; Shift и Alt — на время щелчка */
+  const [selectMode, setSelectMode] = usePref<SelectOp>('select-mode', 'new');
+  /** Край объекта и мазка кисти — по линиям рисунка */
+  const [objectSnap, setObjectSnap] = usePref('object-snap', true);
+  const [brushSnap, setBrushSnap] = usePref('brush-snap', false);
+  const [wandOpts, setWandOpts] = usePref('wand', { tolerance: 32, gap: 2, contiguous: true, outline: true });
+  /** Край выделения шире или уже: от какого выделения считали (base) и что вышло (result) */
+  const [edge, setEdge] = useState<{ base: MaskShape[]; px: number; result?: MaskShape } | null>(null);
   const [selection, setSelection] = useState<MaskShape[]>([]);
   /** Набросок для модели к новой правке */
   const [sketch, setSketch] = useState<SketchStroke[]>([]);
-  const [sketchSize, setSketchSize] = useState(10);
-  const [sketchColor, setSketchColor] = useState(SKETCH_COLORS[0]!);
+  const [sketchSize, setSketchSize] = usePref('sketch-size', 10);
+  const [sketchColor, setSketchColor] = usePref('sketch-color', SKETCH_COLORS[0]!);
   const [prompt, setPrompt] = useState('');
   /** Стереть модели то, что под выделением */
   const [hide, setHide] = useState(false);
@@ -270,7 +315,7 @@ export function App() {
   const numbers = useRef(new Map<string, number>());
   const nextNumber = useRef(1);
   const refreshSeq = useRef(0);
-  const onShape = useRef<(shape: MaskShape) => void>(() => undefined);
+  const onShape = useRef<(shape: MaskShape, op: SelectOp) => void>(() => undefined);
   const onSketch = useRef<(stroke: SketchStroke) => void>(() => undefined);
   const onPick = useRef<(event: PickEvent) => void>(() => undefined);
   const onMove = useRef<(id: string, dx: number, dy: number) => Promise<number>>(() => Promise.reject(new Error('Нет документа')));
@@ -314,7 +359,7 @@ export function App() {
 
   useEffect(() => {
     viewRef.current = new CanvasView(stageRef.current!, {
-      onShape: (shape) => onShape.current(shape),
+      onShape: (shape, op) => onShape.current(shape, op),
       onSketch: (stroke) => onSketch.current(stroke),
       onMaskShape: (view, shape) => onMaskShape.current(view, shape),
       onPick: (event) => onPick.current(event),
@@ -356,6 +401,7 @@ export function App() {
   useEffect(() => viewRef.current?.setSketch(sketch), [sketch]);
   useEffect(() => viewRef.current?.setSketchBrush(sketchSize, sketchColor), [sketchSize, sketchColor]);
   useEffect(() => viewRef.current?.setTool(tool), [tool]);
+  useEffect(() => viewRef.current?.setSelectMode(selectMode), [selectMode]);
   useEffect(() => viewRef.current?.setSegmentReady(segmentReady), [segmentReady]);
   // Маски объектов в выделении следуют за объектами: после правки маска другая, удалённый объект уходит из выделения
   const objectsKey = objects.map((o) => `${o.id}:${o.rev}`).join(',');
@@ -386,9 +432,22 @@ export function App() {
     return () => window.clearInterval(t);
   }, [anyRunning]);
 
-  onShape.current = (shape) => {
+  onShape.current = (shape, op) => {
+    if (op === 'new') formOrder.current = formOrder.current.filter((k) => k !== 'shape');
     formOrder.current.push('shape');
-    setSelection((s) => [...s, shape]);
+    updateSelection((s) => (op === 'new' ? [shape] : [...s, shape]));
+    // Кисть по линиям: мазок заменяется маской, привязанной к рисунку, когда сервер её посчитает
+    if (brushSnap && shape.kind === 'stroke' && (tool === 'brush' || tool === 'eraser')) {
+      const { erase, ...stroke } = shape;
+      // Запас — треть радиуса кисти: клетка, которую мазок почти накрыл, берётся вся, а соседняя большая — нет
+      post<MaskResult>('/api/selection/snap', { shapes: [stroke], reach: shape.size / 6 })
+        .then(async (r) => {
+          const snapped: MaskRef = { kind: 'mask', id: r.id, ...r.rect, erase };
+          await viewRef.current?.loadMask(snapped);
+          updateSelection((sel) => sel.map((s) => (s === shape ? snapped : s)));
+        })
+        .catch(fail);
+    }
   };
   onSketch.current = (stroke) => {
     formOrder.current.push('sketch');
@@ -438,7 +497,7 @@ export function App() {
     const lv = pick.levels[level]!;
     if (lv.refined) return;
     lv.refined = true;
-    post<{ id: string; rect: Pick['levels'][number]['rect'] }>('/api/segment/refine', { id: lv.id })
+    post<MaskResult>('/api/segment/refine', { id: lv.id, snap: pick.snap })
       .then((r) => {
         if (r.id === lv.id) return;
         pick.levels[level] = { ...r, refined: true };
@@ -449,28 +508,34 @@ export function App() {
   const queuePick = (fn: () => Promise<void>) => {
     pickChain.current = pickChain.current.then(fn).catch(fail);
   };
+  /** Маска с сервера (палочка, край) — в выделение: вместо него, к нему или вычесть */
+  const showMask = async (r: MaskResult, op: SelectOp) => {
+    const shape: MaskRef = { kind: 'mask', id: r.id, ...r.rect, erase: op === 'sub' || undefined };
+    await viewRef.current?.loadMask(shape);
+    if (op === 'new') formOrder.current = formOrder.current.filter((k) => k !== 'shape');
+    formOrder.current.push('shape');
+    updateSelection((sel) => (op === 'new' ? [shape] : [...sel, shape]));
+  };
   onPick.current = (e) => {
+    if (e.tool === 'wand') {
+      const p = e.point ?? [e.box!.x, e.box!.y];
+      queuePick(async () => showMask(await post<MaskResult>('/api/segment/wand', { view: e.view, x: p[0], y: p[1], ...wandOpts }), e.op));
+      return;
+    }
     if (!segmentReady) return;
     queuePick(async () => {
       const last = lastPick();
       const p = e.point;
-      // Щелчок туда же — следующий, более крупный уровень того же объекта
-      if (p && last && !e.shift && !e.alt && last.pick.at && Math.hypot(p[0] - last.pick.at[0], p[1] - last.pick.at[1]) < 8 * e.imagePx) {
+      // Щелчок туда же с тем же действием — следующий, более крупный уровень того же объекта
+      const same = p && last?.pick.at && last.pick.erase === (e.op === 'sub') && Math.hypot(p[0] - last.pick.at[0], p[1] - last.pick.at[1]) < 8 * e.imagePx;
+      if (same && last) {
         if (last.pick.levels.length > 1) await showPick({ ...last.pick, level: (last.pick.level + 1) % last.pick.levels.length }, last.shape);
         return;
       }
-      // Shift и Alt уточняют последний найденный объект: здесь тоже он, здесь не он
-      if (p && last && (e.shift || e.alt) && !e.add) {
-        const points = [...last.pick.points, { x: p[0], y: p[1], positive: !e.alt }];
-        const res = await post<PickResult>('/api/segment/pick', { view: e.view, points, box: last.pick.box });
-        await showPick({ ...res, points, box: last.pick.box, erase: last.pick.erase, at: p }, last.shape);
-        return;
-      }
-      // Новый объект: вместо выделения, с ⌘ — к нему, с Alt (без найденного раньше) — вычесть из него
+      // Новый объект: вместо выделения, к нему (Shift) или вычесть из него (Alt)
       const points = p ? [{ x: p[0], y: p[1], positive: true }] : [];
-      const res = await post<PickResult>('/api/segment/pick', { view: e.view, points, box: e.box });
-      const keep = e.add || e.alt || e.shift;
-      await showPick({ ...res, points, box: e.box, erase: e.alt, at: p }, keep ? 'add' : 'all');
+      const res = await post<PickResult>('/api/segment/pick', { view: e.view, points, box: e.box, snap: objectSnap });
+      await showPick({ ...res, points, box: e.box, erase: e.op === 'sub', snap: objectSnap, at: p }, e.op === 'new' ? 'all' : 'add');
     });
   };
   /** [ и ] с «Объектом» — уровень последнего найденного объекта мельче или крупнее */
@@ -481,6 +546,40 @@ export function App() {
     if (level !== last.pick.level) queuePick(() => showPick({ ...last.pick, level }, last.shape));
   };
   const currentPick = selection.length ? picks.current.get(selection.at(-1)!) : undefined;
+
+  // ——— Край выделения ———
+
+  // Край считается от выделения, каким оно было до первого сдвига края: так −2 после +4 — это +2, а не +4 и −2.
+  // Сдвиг идёт, пока выделение — то, что из него вышло (или то, от чего считают, пока ответа нет)
+  const edgeTimer = useRef<number | undefined>(undefined);
+  const edgeActive = !!edge && (edge.result ? selection.length === 1 && selection[0] === edge.result : selection === edge.base);
+  const edgePx = edgeActive ? edge!.px : 0;
+  const changeEdge = (px: number) => {
+    const base = edgeActive ? edge!.base : selection;
+    const value = Math.max(-100, Math.min(100, Math.round(px) || 0));
+    window.clearTimeout(edgeTimer.current);
+    if (!value) {
+      setEdge(null);
+      if (base !== selection) updateSelection(() => base);
+      return;
+    }
+    const kept = edgeActive ? edge!.result : undefined;
+    setEdge({ base, px: value, result: kept });
+    edgeTimer.current = window.setTimeout(() => {
+      post<MaskResult>('/api/selection/edge', { shapes: base, px: value })
+        .then(async (r) => {
+          const shape: MaskRef = { kind: 'mask', id: r.id, ...r.rect };
+          await viewRef.current?.loadMask(shape);
+          // Пока считали, выделение сменили — его не трогаем
+          const now = selectionRef.current;
+          if (now !== base && !(kept && now.length === 1 && now[0] === kept)) return;
+          formOrder.current = [...formOrder.current.filter((k) => k !== 'shape'), 'shape'];
+          updateSelection(() => [shape]);
+          setEdge({ base, px: value, result: shape });
+        })
+        .catch(fail);
+    }, 250);
+  };
 
   // ——— Объекты ———
 
@@ -809,7 +908,8 @@ export function App() {
       return;
     }
     if (mod) return;
-    const t = TOOLS.find((x) => x.key.toLowerCase() === e.key.toLowerCase());
+    // По коду клавиши — в русской раскладке тоже
+    const t = TOOLS.find((x) => e.code === `Key${x.key}` || e.key.toLowerCase() === x.key.toLowerCase());
     if (t) setTool(t.id);
     // [ и ] — размер кисти, с Shift — жёсткость, как в Photoshop: ⇧[ мягче, ⇧] жёстче. По коду клавиши — в русской раскладке тоже
     if (e.code === 'BracketLeft' || e.code === 'BracketRight') {
@@ -1001,12 +1101,145 @@ export function App() {
         </div>
       </header>
 
+      <div class="optbar" role="toolbar" aria-label="Настройки инструмента">
+        {doc &&
+          (maskJob || editedLayer ? (
+            <>
+              <span class="opt-title">
+                <IconMask size={16} stroke={STROKE} aria-hidden="true" />
+                {maskJob
+                  ? `Маска задачи #${numbers.current.get(maskJob)}`
+                  : `Маска слоя «${short((editedLayer!.lifted && objects.find((o) => o.id === editedLayer!.object)?.name) || editedLayer!.prompt, 24)}»`}
+                <Help>
+                  {maskJob
+                    ? 'Кисть и фигуры добавляют к маске, ластик и Alt стирают. Мягкость кисти — ⇧[ и ⇧].'
+                    : 'Ластик и Alt скрывают часть слоя, кисть и фигуры возвращают её — и за краем прежнего выделения. ⌘Z отменяет мазок.'}
+                </Help>
+              </span>
+              {(tool === 'brush' || tool === 'eraser') && (
+                <>
+                  <span class="opt-sep" />
+                  <Slider label="Размер" title="Размер кисти на экране ([ и ])" min={4} max={400} value={brush} onChange={setBrush} />
+                  <Slider
+                    label="Мягкость"
+                    title="0% — жёсткий край, 100% — затухает от середины (⇧[ и ⇧])"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={Math.round(softness * 100)}
+                    unit="%"
+                    onChange={(v) => setSoftness(v / 100)}
+                  />
+                </>
+              )}
+              <button class="opt-done" onClick={() => (maskJob ? setMaskJob(null) : setMaskLayer(null))}>
+                Готово
+              </button>
+            </>
+          ) : (
+            <>
+              <span class="opt-title">
+                {(() => {
+                  const ToolIcon = TOOL_ICONS[tool];
+                  return <ToolIcon size={16} stroke={STROKE} aria-hidden="true" />;
+                })()}
+                {TOOLS.find((t) => t.id === tool)?.name}
+              </span>
+              {SELECTING.includes(tool) && tool !== 'eraser' && (
+                <>
+                  <span class="opt-sep" />
+                  <Seg
+                    label="Режим выделения"
+                    value={tool === 'brush' && selectMode === 'new' ? 'add' : selectMode}
+                    options={[
+                      ...(tool === 'brush' ? [] : [{ value: 'new' as const, icon: IconSquare, title: 'Новое выделение' }]),
+                      { value: 'add' as const, icon: IconLayersUnion, title: 'Добавить к выделению (Shift)' },
+                      { value: 'sub' as const, icon: IconLayersSubtract, title: 'Вычесть из выделения (Alt)' },
+                    ]}
+                    onChange={setSelectMode}
+                  />
+                </>
+              )}
+              {tool === 'object' && (
+                <>
+                  {currentPick && currentPick.levels.length > 1 && (
+                    <Seg
+                      label="Уровень объекта"
+                      value={currentPick.level}
+                      options={levelNames(currentPick.levels.length).map((name, i) => ({ value: i, text: name, title: 'Мельче или крупнее: [ и ] или щелчок туда же' }))}
+                      onChange={(i) => stepLevel(i - currentPick.level)}
+                    />
+                  )}
+                  <OptCheck label="По линиям" title="Край выделения — по линиям рисунка, с контуром" checked={objectSnap} onChange={setObjectSnap} />
+                </>
+              )}
+              {tool === 'wand' && (
+                <>
+                  <Slider
+                    label="Допуск"
+                    title="Насколько светлее или темнее точки щелчка может быть то, что выделится"
+                    min={0}
+                    max={255}
+                    value={wandOpts.tolerance}
+                    onChange={(tolerance) => setWandOpts((o) => ({ ...o, tolerance }))}
+                  />
+                  <Slider
+                    label="Щели"
+                    title="Разрывы в линиях шириной до двух таких — закрыты: область не протекает в соседнюю"
+                    min={0}
+                    max={12}
+                    value={wandOpts.gap}
+                    unit=" px"
+                    onChange={(gap) => setWandOpts((o) => ({ ...o, gap }))}
+                  />
+                  <OptCheck label="Смежные" title="Только область вокруг щелчка" checked={wandOpts.contiguous} onChange={(contiguous) => setWandOpts((o) => ({ ...o, contiguous }))} />
+                  <OptCheck label="С контуром" title="Взять и линии вокруг области" checked={wandOpts.outline} onChange={(outline) => setWandOpts((o) => ({ ...o, outline }))} />
+                </>
+              )}
+              {(tool === 'brush' || tool === 'eraser') && (
+                <>
+                  <Slider label="Размер" title="Размер кисти на экране ([ и ])" min={4} max={400} value={brush} onChange={setBrush} />
+                  <OptCheck label="По линиям" title="Клетки рисунка, которые задел мазок, — целиком, с контуром" checked={brushSnap} onChange={setBrushSnap} />
+                </>
+              )}
+              {tool === 'sketch' && (
+                <>
+                  <span class="opt-sep" />
+                  <Slider label="Толщина" title="Толщина наброска на экране ([ и ])" min={2} max={120} value={sketchSize} onChange={setSketchSize} />
+                  <div class="sketch-colors" role="radiogroup" aria-label="Цвет наброска">
+                    {SKETCH_COLORS.map((c) => (
+                      <button
+                        key={c}
+                        role="radio"
+                        aria-checked={sketchColor === c}
+                        aria-label={c}
+                        class={sketchColor === c ? 'swatch active' : 'swatch'}
+                        style={{ background: c }}
+                        onClick={() => setSketchColor(c)}
+                      />
+                    ))}
+                    <label class={SKETCH_COLORS.includes(sketchColor) ? 'swatch custom' : 'swatch custom active'} title="Другой цвет" style={{ background: sketchColor }}>
+                      <input type="color" value={sketchColor} aria-label="Другой цвет наброска" onInput={(e) => setSketchColor(e.currentTarget.value)} />
+                    </label>
+                  </div>
+                </>
+              )}
+              {SELECTING.includes(tool) && hasSelection && (
+                <>
+                  <span class="opt-sep" />
+                  <EdgeControl px={edgePx} onChange={changeEdge} />
+                </>
+              )}
+            </>
+          ))}
+      </div>
+
       <nav class="rail" aria-label="Инструменты">
         {TOOLS.map((t) => {
           const ToolIcon = TOOL_ICONS[t.id];
-          // Набросок — подсказка модели к новой правке, а не выделение: отдельно от инструментов выделения
-          // Набросок и «Объект» — для новой правки, не для правки маски
-          const formOnly = (t.id === 'sketch' || t.id === 'object' || t.id === 'move') && !!(maskJob || maskLayer);
+          // Набросок — подсказка модели к новой правке, а не выделение: отдельно от инструментов выделения.
+          // Набросок, «Объект», «Палочка» и «Сдвинуть» — не для правки маски
+          const formOnly = (t.id === 'sketch' || t.id === 'object' || t.id === 'wand' || t.id === 'move') && !!(maskJob || maskLayer);
           const button = (
             <button
               key={t.id}
@@ -1022,91 +1255,10 @@ export function App() {
           );
           return t.id === 'sketch' ? [<span class="rail-sep" key="sep" />, button] : button;
         })}
-        {tool === 'object' && currentPick && currentPick.levels.length > 1 && (
-          <div class="pick-levels" role="radiogroup" aria-label="Уровень объекта" title="Мельче или крупнее: [ и ] или щелчок туда же">
-            {currentPick.levels.map((_, i) => (
-              <button
-                key={i}
-                role="radio"
-                aria-checked={currentPick.level === i}
-                aria-label={`Уровень ${i + 1}`}
-                class={currentPick.level === i ? 'level active' : 'level'}
-                style={{ width: `${8 + i * 4}px`, height: `${8 + i * 4}px` }}
-                onClick={() => stepLevel(i - currentPick.level)}
-              />
-            ))}
-          </div>
-        )}
-        {tool === 'sketch' && (
-          <>
-            <label class="brush-size" title="Толщина наброска на экране ([ и ])">
-              <input
-                type="range"
-                min={2}
-                max={120}
-                value={sketchSize}
-                aria-label="Толщина наброска"
-                onInput={(e) => setSketchSize(Number(e.currentTarget.value))}
-              />
-              <span>{sketchSize}</span>
-            </label>
-            <div class="sketch-colors" role="radiogroup" aria-label="Цвет наброска">
-              {SKETCH_COLORS.map((c) => (
-                <button
-                  key={c}
-                  role="radio"
-                  aria-checked={sketchColor === c}
-                  aria-label={c}
-                  class={sketchColor === c ? 'swatch active' : 'swatch'}
-                  style={{ background: c }}
-                  onClick={() => setSketchColor(c)}
-                />
-              ))}
-              <label class={SKETCH_COLORS.includes(sketchColor) ? 'swatch custom' : 'swatch custom active'} title="Другой цвет" style={{ background: sketchColor }}>
-                <input type="color" value={sketchColor} aria-label="Другой цвет наброска" onInput={(e) => setSketchColor(e.currentTarget.value)} />
-              </label>
-            </div>
-          </>
-        )}
-        {(tool === 'brush' || tool === 'eraser') && (
-          <label class="brush-size" title="Размер кисти на экране ([ и ])">
-            <input type="range" min={4} max={400} value={brush} aria-label="Размер кисти" onInput={(e) => setBrush(Number(e.currentTarget.value))} />
-            <span>{brush}</span>
-          </label>
-        )}
-        {(tool === 'brush' || tool === 'eraser') && (maskJob || maskLayer) && (
-          <label class="brush-size" title="Мягкость края кисти: 0% — жёсткий край, 100% — затухает от середины (⇧[ и ⇧])">
-            <IconBlur size={16} stroke={STROKE} aria-hidden="true" />
-            <input
-              type="range"
-              min={0}
-              max={100}
-              step={5}
-              value={Math.round(softness * 100)}
-              aria-label="Мягкость края кисти"
-              onInput={(e) => setSoftness(Number(e.currentTarget.value) / 100)}
-            />
-            <span>{Math.round(softness * 100)}%</span>
-          </label>
-        )}
       </nav>
 
       <main class={maskJob || maskLayer ? 'stage mask-mode' : 'stage'}>
         <div ref={stageRef} class="osd" />
-        {maskJob && (
-          <div class="stage-banner">
-            Маска задачи #{numbers.current.get(maskJob)}
-            <Help>Кисть и фигуры добавляют к маске, ластик и Alt стирают. Мягкость кисти — ⇧[ и ⇧].</Help>
-            <button onClick={() => setMaskJob(null)}>Готово</button>
-          </div>
-        )}
-        {editedLayer && (
-          <div class="stage-banner">
-            Маска слоя «{short(editedLayer.prompt)}»
-            <Help>Ластик и Alt скрывают часть слоя, кисть и фигуры возвращают её — и за краем прежнего выделения. ⌘Z отменяет мазок.</Help>
-            <button onClick={() => setMaskLayer(null)}>Готово</button>
-          </div>
-        )}
         {doc && tool === 'object' && segment && !maskJob && !maskLayer && segment.status !== 'ready' && <SegmentBanner segment={segment} onError={fail} />}
         {!doc && state && <StartScreen recent={state.recent} onOpen={openDialog} onOpenRecent={openRecent} onError={fail} />}
         {(busy ?? state?.activity) && <div class="busy">{busy ?? state?.activity}</div>}
@@ -1151,7 +1303,8 @@ export function App() {
               <h2>
                 Новая правка
                 <Help>
-                  Выделите предмет инструментом «Объект» (W) или область прямоугольником (R), лассо (L) или кистью (B), с Alt — вычесть из выделения. Набросок (S) — подсказка
+                  Выделите предмет «Объектом» (W) или «Палочкой» (Q), область — прямоугольником (R), лассо (L) или кистью (B). Shift добавляет к
+                  выделению, Alt вычитает; режим и край выделения — на панели над холстом. Набросок (S) — подсказка
                   модели: где и каким должно быть то, что в задаче; с Alt он стирается. ⌘Z убирает последнее, ⌘D снимает выделение, ⌘↵ —
                   сгенерировать.
                 </Help>
@@ -1711,6 +1864,87 @@ function LayerItem(props: {
   );
 }
 
+/** Переключатель на панели настроек: кнопки подряд, одна выбрана */
+function Seg<T extends string | number>(props: {
+  label: string;
+  value: T;
+  options: { value: T; icon?: Icon; text?: string; title: string }[];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <span class="seg" role="radiogroup" aria-label={props.label}>
+      {props.options.map((o) => (
+        <button
+          key={String(o.value)}
+          role="radio"
+          aria-checked={props.value === o.value}
+          aria-label={o.text ? undefined : o.title}
+          title={o.title}
+          class={props.value === o.value ? 'on' : ''}
+          onClick={() => props.onChange(o.value)}
+        >
+          {o.icon && <o.icon size={16} stroke={STROKE} aria-hidden="true" />}
+          {o.text}
+        </button>
+      ))}
+    </span>
+  );
+}
+
+/** Ползунок с подписью и числом на панели настроек */
+function Slider(props: { label: string; title: string; min: number; max: number; step?: number; value: number; unit?: string; onChange: (value: number) => void }) {
+  return (
+    <label class="opt-slider" title={props.title}>
+      <span>{props.label}</span>
+      <input
+        type="range"
+        min={props.min}
+        max={props.max}
+        step={props.step ?? 1}
+        value={props.value}
+        aria-label={props.label}
+        onInput={(e) => props.onChange(Number(e.currentTarget.value))}
+      />
+      <span class="opt-value">
+        {props.value}
+        {props.unit}
+      </span>
+    </label>
+  );
+}
+
+function OptCheck(props: { label: string; title: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label class="opt-check" title={props.title}>
+      <input type="checkbox" checked={props.checked} onChange={(e) => props.onChange(e.currentTarget.checked)} />
+      {props.label}
+    </label>
+  );
+}
+
+/** Край всего выделения: шире или уже на столько пикселей холста */
+function EdgeControl(props: { px: number; onChange: (px: number) => void }) {
+  return (
+    <span class="opt-edge" title="Край выделения шире или уже, пиксели холста">
+      <span>Край</span>
+      <button class="icon" aria-label="Уже" onClick={() => props.onChange(props.px - 1)}>
+        <IconMinus size={14} stroke={STROKE} />
+      </button>
+      <input
+        type="number"
+        min={-100}
+        max={100}
+        value={props.px}
+        aria-label="Край выделения, пиксели"
+        onChange={(e) => props.onChange(Number(e.currentTarget.value))}
+      />
+      <button class="icon" aria-label="Шире" onClick={() => props.onChange(props.px + 1)}>
+        <IconPlus size={14} stroke={STROKE} />
+      </button>
+    </span>
+  );
+}
+
 /** Модель выделения объектов: скачать, ход скачивания и загрузки, ошибка */
 function SegmentBanner(props: { segment: StateDto['segment']; onError: (err: unknown) => void }) {
   const { segment } = props;
@@ -1821,7 +2055,7 @@ function ObjectsPanel(props: {
         {props.following && <span class="dim">пересчитываю…</span>}
         <Help>
           Объект — имя и маска. Выделите его инструментом «Объект» (W): щелчок — предмет под курсором, щелчок туда же или [ и ] — мельче
-          или крупнее, Shift — добавить к нему место, Alt — убрать, ⌘ — ещё один предмет, рамка — предмет внутри неё. ⌘J сохраняет
+          или крупнее, Shift — добавить ещё предмет, Alt — вычесть, рамка — предмет внутри неё. ⌘J сохраняет
           выделение объектом; объект из нескольких — выделить их с ⌘ (на холсте или в списке) и ⌘J. После правки маски объектов
           пересчитываются сами. «Отделить» — модель дорисует фон под объектом, а сам он станет слоем: его можно сдвигать (V), скрывать,
           стирать часть ластиком по маске слоя и убирать с холста.

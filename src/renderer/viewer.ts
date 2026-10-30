@@ -7,7 +7,10 @@ import { API_HEADER, type DocDto, type JobDto, type MaskEditResult, type MaskSha
 import { post } from './api.ts';
 import { MaskPreview, type MaskEditView } from './mask-edit.ts';
 
-export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser' | 'sketch' | 'object' | 'move';
+export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser' | 'sketch' | 'object' | 'wand' | 'move';
+
+/** Что фигура делает с выделением: заменяет его, добавляется к нему или вычитается */
+export type SelectOp = 'new' | 'add' | 'sub';
 
 /** Отделённый объект, который можно сдвинуть: его слой и где тот лежит */
 export interface Movable {
@@ -35,14 +38,12 @@ interface Shift {
 /** Маска объекта в выделении */
 export type MaskRef = Extract<MaskShape, { kind: 'mask' }>;
 
-/** Щелчок или рамка инструментом «Объект» */
+/** Щелчок или рамка инструментом «Объект», щелчок «Палочкой» */
 export interface PickEvent {
+  tool: 'object' | 'wand';
   point?: [number, number];
   box?: RectDto;
-  shift: boolean;
-  alt: boolean;
-  /** ⌘ или Ctrl: ещё один объект к выделению */
-  add: boolean;
+  op: SelectOp;
   /** Видимая часть холста */
   view: RectDto;
   /** Сколько пикселей холста в экранном пикселе: щёлкнули ли в то же место */
@@ -60,8 +61,8 @@ export type { MaskEditView };
 const SETTLE_TIMEOUT = 5000;
 
 export interface ViewerHooks {
-  /** Фигура выделения */
-  onShape(shape: MaskShape): void;
+  /** Фигура выделения и что она делает с ним */
+  onShape(shape: MaskShape, op: SelectOp): void;
   /** Штрих наброска для модели */
   onSketch(stroke: SketchStroke): void;
   /** Мазок по маске слоя или задачи: отправить на сервер */
@@ -83,10 +84,10 @@ interface Draft {
   live?: boolean;
   /** Штрих наброска этим цветом, а не фигура выделения */
   sketch?: string;
-  /** Рамка инструмента «Объект»: объект внутри неё */
-  pick?: boolean;
-  shift?: boolean;
-  add?: boolean;
+  /** Щелчок или рамка «Объекта» (рамка — объект внутри неё), щелчок «Палочки» */
+  pick?: 'object' | 'wand';
+  /** Что фигура сделает с выделением */
+  op?: SelectOp;
 }
 
 interface Layer {
@@ -150,6 +151,8 @@ export class CanvasView {
   private deferredRemovals: OpenSeadragon.TiledImage[] = [];
 
   private tool: Tool = 'rect';
+  /** Режим выделения на панели инструмента; Shift и Alt меняют его на время щелчка */
+  private selectMode: SelectOp = 'new';
   private spaceHeld = false;
   private brushPx = 40;
   /** Мягкость края кисти 0..1; действует только при правке маски — выделение всегда с жёстким краем */
@@ -486,6 +489,17 @@ export class CanvasView {
     this.redraw();
   }
 
+  setSelectMode(mode: SelectOp): void {
+    this.selectMode = mode;
+  }
+
+  /** Что щелчок или фигура сделают с выделением: Alt — вычесть, Shift (и ⌘) — добавить, иначе режим с панели. Кисть не заменяет */
+  private opFor(e: MouseEvent, brush = false): SelectOp {
+    if (e.altKey) return 'sub';
+    if (e.shiftKey || e.metaKey || e.ctrlKey) return 'add';
+    return brush && this.selectMode === 'new' ? 'add' : this.selectMode;
+  }
+
   /** Отделённые объекты, которые можно сдвинуть, снизу вверх */
   setMovable(items: Movable[]): void {
     this.movable = items;
@@ -734,20 +748,12 @@ export class CanvasView {
       this.redraw();
       return;
     }
-    if (tool === 'object') {
-      // Щелчок — объект под ним, рамка — объект внутри неё
-      if (!this.objectTool()) return;
+    if (tool === 'object' || tool === 'wand') {
+      // «Объект»: щелчок — объект под ним, рамка — объект внутри неё. «Палочка» — только щелчок
+      if (tool === 'object' ? !this.objectTool() : this.maskMode()) return;
       this.clearHover();
-      this.draft = {
-        kind: 'rect',
-        points: [p],
-        erase: original.altKey,
-        shift: original.shiftKey,
-        add: original.metaKey || original.ctrlKey,
-        size: 0,
-        softness: 0,
-        pick: true,
-      };
+      const op = this.opFor(original);
+      this.draft = { kind: 'rect', points: [p], erase: op === 'sub', op, size: 0, softness: 0, pick: tool };
       this.redraw();
       return;
     }
@@ -758,10 +764,14 @@ export class CanvasView {
       this.redraw();
       return;
     }
+    const kind = tool === 'rect' ? 'rect' : tool === 'lasso' ? 'lasso' : 'stroke';
+    // У маски слоя или задачи кисть дорисовывает, ластик и Alt стирают; у выделения — режим с панели, ластик вычитает
+    const op: SelectOp = tool === 'eraser' ? 'sub' : this.opFor(original, kind === 'stroke');
     const draft: Draft = {
-      kind: tool === 'rect' ? 'rect' : tool === 'lasso' ? 'lasso' : 'stroke',
+      kind,
       points: [p],
-      erase: tool === 'eraser' || original.altKey,
+      erase: this.maskMode() ? tool === 'eraser' || original.altKey : op === 'sub',
+      op,
       size: round(this.brushPx / this.scale()),
       softness: this.maskMode() ? this.softness : 0,
     };
@@ -830,9 +840,9 @@ export class CanvasView {
       if (!view) return;
       const [a, b] = [pts[0]!, pts[pts.length - 1]!];
       const imagePx = 1 / this.scale();
-      const dragged = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])) > 6 * imagePx;
+      const dragged = draft.pick === 'object' && Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])) > 6 * imagePx;
       const box = { x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), width: Math.abs(b[0] - a[0]), height: Math.abs(b[1] - a[1]) };
-      this.hooks.onPick({ ...(dragged ? { box } : { point: a }), shift: !!draft.shift, alt: draft.erase, add: !!draft.add, view, imagePx });
+      this.hooks.onPick({ tool: draft.pick, ...(dragged ? { box } : { point: a }), op: draft.op ?? 'new', view, imagePx });
       return;
     }
     if (draft.sketch) {
@@ -859,7 +869,7 @@ export class CanvasView {
     this.redraw();
     if (!shape) return;
     if (!edit) {
-      this.hooks.onShape(shape);
+      this.hooks.onShape(shape, draft.op ?? 'add');
       return;
     }
     const applied = draft.live || edit.fill(shape);
@@ -1053,7 +1063,7 @@ export class CanvasView {
 
     // Области задач с номерами, как в очереди, и границы правимого слоя: за ними маску не расширить
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (this.draft?.pick && this.draft.points.length > 1) {
+    if (this.draft?.pick === 'object' && this.draft.points.length > 1) {
       const [a, b] = [this.draft.points[0]!, this.draft.points[this.draft.points.length - 1]!];
       ctx.strokeStyle = this.draft.erase ? ERROR : ACCENT;
       ctx.lineWidth = 1.5;

@@ -5,10 +5,11 @@ import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { CanvasDocument, DocObject } from '../core/document.ts';
 import { intersect, type Rect } from '../core/frame.ts';
+import { lineMap, snapToLines } from '../core/lines.ts';
 import { area, changedPixels, touchedEdge } from '../core/objects.ts';
 import { levels, rasterize, Segmenter, type Backend, type Bitmap, type Candidate, type Embedding, type SegmentPrompt } from '../core/segment.ts';
 import { installModel, modelFiles, modelInstalled } from '../core/segment-model.ts';
-import type { PickRequest, PickResult, RectDto, SegmentDto, SegmentPoint } from '../shared/api.ts';
+import type { MaskResult, PickRequest, PickResult, RectDto, SegmentDto, SegmentPoint } from '../shared/api.ts';
 
 const EMBEDDINGS_KEPT = 4;
 const MASKS_KEPT = 300;
@@ -220,22 +221,40 @@ export class Segmentation {
     // У рамки и нескольких точек объект один: берём лучшую маску, у одного щелчка — все уровни
     const lv = points.length === 1 && !box ? levels(cands) : { levels: [best(cands)], best: 0 };
     const bounds = { x: 0, y: 0, width: doc.width, height: doc.height };
-    const out: PickResult = { levels: [], level: 0 };
-    lv.levels.forEach((c, i) => {
+    const found = lv.levels.flatMap((c, i) => {
       const bitmap = rasterize(c, 1, bounds);
-      if (!bitmap) return;
-      if (i === lv.best) out.level = out.levels.length;
-      out.levels.push({ id: this.store({ bitmap, points, box, crop, refined: false }), rect: bitmap.rect });
+      return bitmap ? [{ bitmap, best: i === lv.best }] : [];
     });
-    if (!out.levels.length) throw new Error('Здесь объект не нашёлся');
-    return out;
+    if (!found.length) throw new Error('Здесь объект не нашёлся');
+    const bitmaps = req.snap ? this.snap(doc, found.map((f) => f.bitmap)) : found.map((f) => f.bitmap);
+    return {
+      levels: bitmaps.map((bitmap) => ({ id: this.store({ bitmap, points, box, crop, refined: false }), rect: bitmap.rect })),
+      level: Math.max(0, found.findIndex((f) => f.best)),
+    };
+  }
+
+  /**
+   * Маски, привязанные к линиям рисунка: край — по линиям, а не по клеткам сетки модели, контур входит в маску.
+   * Участок с линиями один на все маски — с запасом вокруг них. reach — радиус кисти, если это мазок
+   */
+  snap(doc: CanvasDocument, bitmaps: Bitmap[], reach = 0): Bitmap[] {
+    const all = bitmaps.map((b) => b.rect).reduce(union);
+    // У мазка — с запасом в несколько кистей: клетка штриховки, которую он задел, должна попасть в участок целиком
+    const rect = grow(all, Math.max(24, 0.15 * Math.max(all.width, all.height), 6 * reach), doc);
+    const map = lineMap(doc.region(rect), rect);
+    return bitmaps.map((b) => snapToLines(b, map, reach) ?? b);
+  }
+
+  /** Сохранить готовую маску выделения (палочка, край, мазок): её id — для фигуры kind: 'mask' */
+  keep(bitmap: Bitmap): MaskResult {
+    return { id: this.store({ bitmap, points: [], crop: bitmap.rect, refined: true }), rect: bitmap.rect };
   }
 
   /**
    * Второй проход: если объект мелкий для участка, на котором его нашли, признаки считаются заново вокруг него
    * (+40% с каждой стороны) и маска уточняется по тем же точкам и его рамке. Крупный — та же маска.
    */
-  async refine(doc: CanvasDocument, id: string): Promise<{ id: string; rect: RectDto }> {
+  async refine(doc: CanvasDocument, id: string, snap = false): Promise<MaskResult> {
     const stored = this.stored(id);
     const b = stored.bitmap;
     const side = Math.max(b.rect.width, b.rect.height);
@@ -243,8 +262,9 @@ export class Segmentation {
     const crop = grow(b.rect, Math.max(32, 0.4 * side), doc);
     const emb = await this.embedding(doc, crop, { need: b.rect });
     const c = best(await (await this.segmenter()).decode(emb, { points: stored.points, box: b.rect }));
-    const bitmap = rasterize(c, 1, { x: 0, y: 0, width: doc.width, height: doc.height });
-    if (!bitmap) return { id, rect: b.rect };
+    const raw = rasterize(c, 1, { x: 0, y: 0, width: doc.width, height: doc.height });
+    if (!raw) return { id, rect: b.rect };
+    const bitmap = snap ? this.snap(doc, [raw])[0]! : raw;
     return { id: this.store({ ...stored, bitmap, crop, refined: true }), rect: bitmap.rect };
   }
 

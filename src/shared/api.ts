@@ -193,12 +193,46 @@ export interface PickRequest {
   view: RectDto;
   points: SegmentPoint[];
   box?: RectDto;
+  /** Привязать край к линиям рисунка */
+  snap?: boolean;
+}
+
+/** Маска выделения на сервере: её id для фигуры kind: 'mask' и где она лежит */
+export interface MaskResult {
+  id: string;
+  rect: RectDto;
 }
 
 /** Уровни объекта от мелкого к крупному («деталь / часть / целое»); level — какой показать первым */
 export interface PickResult {
-  levels: { id: string; rect: RectDto }[];
+  levels: MaskResult[];
   level: number;
+}
+
+/** «Палочка»: область вокруг точки той же яркости в видимой части холста */
+export interface WandRequest {
+  view: RectDto;
+  x: number;
+  y: number;
+  /** 0..255 */
+  tolerance: number;
+  /** Щели в линиях до 2·gap пикселей считаются закрытыми */
+  gap: number;
+  contiguous: boolean;
+  /** Взять и линии вокруг области */
+  outline: boolean;
+}
+
+/** Край выделения шире (px > 0) или уже */
+export interface EdgeRequest {
+  shapes: MaskShape[];
+  px: number;
+}
+
+/** Мазок кисти, привязанный к линиям; reach — радиус кисти в пикселях холста */
+export interface SnapRequest {
+  shapes: MaskShape[];
+  reach: number;
 }
 
 /** Какие ответы умеет модель — чтобы подсказать про разрешение ещё до генерации */

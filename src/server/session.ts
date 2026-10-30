@@ -32,6 +32,7 @@ import { expandMaskByDiff } from '../core/expand.ts';
 import { readLedger, withDirectorLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha, featherAlphaRegion, maskBBox } from '../core/mask.ts';
 import { applyShapes, applyShapesRegion, type MaskLookup } from '../core/mask-shapes.ts';
+import { changeEdge, wand } from '../core/lines.ts';
 import { descendants, dilate, placeObject, removeObject, trim } from '../core/objects.ts';
 import type { Bitmap } from '../core/segment.ts';
 import type { KeyStore } from '../core/secrets.ts';
@@ -47,6 +48,8 @@ import {
   shapesBBox,
   type CreateJobRequest,
   type DetachRequest,
+  type EdgeRequest,
+  type MaskResult,
   type JobDto,
   type MaskEditResult,
   type MaskShape,
@@ -56,6 +59,8 @@ import {
   type PickResult,
   type RectDto,
   type RedoChange,
+  type SnapRequest,
+  type WandRequest,
   type SizeChoice,
   type SketchStroke,
   type StateDto,
@@ -1508,13 +1513,7 @@ export class Session {
   /** Сохранить выделение объектом; объекты внутри него становятся его частями, а он — частью того, в чём лежит */
   saveObject(input: MaskShape[], name?: string): Promise<string> {
     return this.serialDoc(async (doc) => {
-      const { shapes, bitmaps } = this.resolveShapes(input);
-      const box = shapesBBox(shapes);
-      const area = box && intersect(box, { x: 0, y: 0, width: doc.width, height: doc.height });
-      if (!area?.width || !area.height) throw new Error('Нет выделения');
-      const mask = await applyShapes(new Uint8Array(area.width * area.height), area, shapes, (id) => bitmaps.get(id)!);
-      const bitmap = trim({ rect: area, mask });
-      if (!bitmap) throw new Error('Выделение пустое');
+      const bitmap = await this.selectionBitmap(doc, input);
       if (this.doc !== doc) throw new Error('Документ уже закрыт');
       const used = new Set(doc.objects.map((o) => o.name));
       let n = doc.objects.length + 1;
@@ -1640,8 +1639,46 @@ export class Session {
     return this.segmentation.pick(this.requireDoc(), req);
   }
 
-  refineObject(id: string): Promise<{ id: string; rect: RectDto }> {
-    return this.segmentation.refine(this.requireDoc(), id);
+  refineObject(id: string, snap = false): Promise<MaskResult> {
+    return this.segmentation.refine(this.requireDoc(), id, snap);
+  }
+
+  /** Выделение одной маской, обрезанной по выделенному */
+  private async selectionBitmap(doc: CanvasDocument, input: MaskShape[]): Promise<Bitmap> {
+    const { shapes, bitmaps } = this.resolveShapes(input);
+    const box = shapesBBox(shapes);
+    const area = box && intersect(box, { x: 0, y: 0, width: doc.width, height: doc.height });
+    if (!area?.width || !area.height) throw new Error('Нет выделения');
+    const mask = await applyShapes(new Uint8Array(area.width * area.height), area, shapes, (id) => bitmaps.get(id)!);
+    const bitmap = trim({ rect: area, mask });
+    if (!bitmap) throw new Error('Выделение пустое');
+    return bitmap;
+  }
+
+  /** «Палочка»: область вокруг точки той же яркости в видимой части холста — маской выделения */
+  wandSelect(req: WandRequest): MaskResult {
+    const doc = this.requireDoc();
+    const view = intersect(req.view, { x: 0, y: 0, width: doc.width, height: doc.height });
+    if (view.width < 1 || view.height < 1) throw new Error('Вид за краем холста');
+    const b = wand(doc.region(view), view, [req.x, req.y], req);
+    if (!b) throw new Error('Здесь ничего не выделилось');
+    return this.segmentation.keep(b);
+  }
+
+  /** Край всего выделения шире или уже на px — одной маской */
+  async selectionEdge(req: EdgeRequest): Promise<MaskResult> {
+    const doc = this.requireDoc();
+    const px = Math.max(-200, Math.min(200, Math.round(req.px)));
+    const b = changeEdge(await this.selectionBitmap(doc, req.shapes), px, { x: 0, y: 0, width: doc.width, height: doc.height });
+    if (!b) throw new Error('Выделение сузилось в ничто');
+    return this.segmentation.keep(b);
+  }
+
+  /** Мазок кисти, привязанный к линиям рисунка: клетки штриховки, которые он задел, — целиком, с контуром */
+  async snapSelection(req: SnapRequest): Promise<MaskResult> {
+    const doc = this.requireDoc();
+    const b = await this.selectionBitmap(doc, req.shapes);
+    return this.segmentation.keep(this.segmentation.snap(doc, [b], Math.max(0, Math.min(400, req.reach)))[0]!);
   }
 
   // ——— Маска задачи после генерации ———
