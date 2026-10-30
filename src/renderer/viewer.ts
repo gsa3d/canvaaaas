@@ -7,7 +7,7 @@ import { API_HEADER, type DocDto, type JobDto, type MaskEditResult, type MaskSha
 import { post } from './api.ts';
 import { MaskPreview, type MaskEditView } from './mask-edit.ts';
 
-export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser' | 'sketch' | 'object' | 'wand' | 'move';
+export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser' | 'sketch' | 'object' | 'move';
 
 /** Что фигура делает с выделением: заменяет его, добавляется к нему или вычитается */
 export type SelectOp = 'new' | 'add' | 'sub';
@@ -39,9 +39,8 @@ interface Shift {
 /** Маска объекта в выделении */
 export type MaskRef = Extract<MaskShape, { kind: 'mask' }>;
 
-/** Щелчок или рамка инструментом «Объект», щелчок «Палочкой» */
+/** Щелчок или рамка «Палочкой» */
 export interface PickEvent {
-  tool: 'object' | 'wand';
   point?: [number, number];
   box?: RectDto;
   op: SelectOp;
@@ -68,7 +67,7 @@ export interface ViewerHooks {
   onSketch(stroke: SketchStroke): void;
   /** Мазок по маске слоя или задачи: отправить на сервер */
   onMaskShape(view: MaskEditView, shape: MaskShape): Promise<MaskEditResult>;
-  /** Щелчок или рамка инструментом «Объект» */
+  /** Щелчок или рамка «Палочкой» */
   onPick(event: PickEvent): void;
   /** Отделённый объект сдвинули: номер холста после сдвига */
   onMove(objectId: string, dx: number, dy: number): Promise<number>;
@@ -85,8 +84,8 @@ interface Draft {
   live?: boolean;
   /** Штрих наброска этим цветом, а не фигура выделения */
   sketch?: string;
-  /** Щелчок или рамка «Объекта» (рамка — объект внутри неё), щелчок «Палочки» */
-  pick?: 'object' | 'wand';
+  /** Щелчок или рамка «Палочки» (рамка — объект внутри неё) */
+  pick?: boolean;
   /** Что фигура сделает с выделением */
   op?: SelectOp;
 }
@@ -172,7 +171,7 @@ export class CanvasView {
   private segmentReady = false;
   /** Объект под курсором: маска с сервера и где она лежит на холсте */
   private hover: { bitmap: ImageBitmap; rect: RectDto } | null = null;
-  /** Где курсор на холсте, пока выбран «Объект» */
+  /** Где курсор на холсте, пока выбрана «Палочка» */
   private hoverAt: [number, number] | null = null;
   private hoverBusy = false;
   /** Растёт, когда подсветка больше не нужна: опоздавший ответ её не вернёт */
@@ -723,12 +722,12 @@ export class CanvasView {
       this.redraw();
       return;
     }
-    if (tool === 'object' || tool === 'wand') {
-      // «Объект»: щелчок — объект под ним, рамка — объект внутри неё. «Палочка» — только щелчок
-      if (tool === 'object' ? !this.objectTool() : this.maskMode()) return;
+    if (tool === 'object') {
+      // «Палочка»: щелчок — объект под ним, рамка — объект внутри неё
+      if (!this.objectTool()) return;
       this.clearHover();
       const op = this.opFor(original);
-      this.draft = { kind: 'rect', points: [p], erase: op === 'sub', op, size: 0, softness: 0, pick: tool };
+      this.draft = { kind: 'rect', points: [p], erase: op === 'sub', op, size: 0, softness: 0, pick: true };
       this.redraw();
       return;
     }
@@ -815,9 +814,9 @@ export class CanvasView {
       if (!view) return;
       const [a, b] = [pts[0]!, pts[pts.length - 1]!];
       const imagePx = 1 / this.scale();
-      const dragged = draft.pick === 'object' && Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])) > 6 * imagePx;
+      const dragged = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])) > 6 * imagePx;
       const box = { x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), width: Math.abs(b[0] - a[0]), height: Math.abs(b[1] - a[1]) };
-      this.hooks.onPick({ tool: draft.pick, ...(dragged ? { box } : { point: a }), op: draft.op ?? 'new', view, imagePx });
+      this.hooks.onPick({ ...(dragged ? { box } : { point: a }), op: draft.op ?? 'new', view, imagePx });
       return;
     }
     if (draft.sketch) {
@@ -1038,7 +1037,7 @@ export class CanvasView {
 
     // Области задач с номерами, как в очереди, и границы правимого слоя: за ними маску не расширить
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (this.draft?.pick === 'object' && this.draft.points.length > 1) {
+    if (this.draft?.pick && this.draft.points.length > 1) {
       const [a, b] = [this.draft.points[0]!, this.draft.points[this.draft.points.length - 1]!];
       ctx.strokeStyle = this.draft.erase ? ERROR : ACCENT;
       ctx.lineWidth = 1.5;

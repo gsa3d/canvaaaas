@@ -17,7 +17,6 @@ import {
   type RectDto,
   type RedoChange,
   type SnapRequest,
-  type WandRequest,
 } from '../shared/api.ts';
 import type { Session } from './session.ts';
 
@@ -274,9 +273,6 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   route('POST', '/api/segment/refine', async (req, res) => {
     const { id, snap } = await readJson<{ id: string; snap?: boolean }>(req);
     json(res, await session.refineObject(String(id), snap === true));
-  });
-  route('POST', '/api/segment/wand', async (req, res) => {
-    json(res, session.wandSelect(await readJson<WandRequest>(req)));
   });
   // Выделение одной маской: край шире или уже, мазок кисти по линиям
   route('POST', '/api/selection/edge', async (req, res) => {

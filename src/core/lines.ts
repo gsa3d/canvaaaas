@@ -1,5 +1,5 @@
 // Штриховой рисунок: тёмные линии и светлые области между ними. По ним выделение ложится точно, а не клетками сетки модели:
-// край объекта, найденного ИИ, и мазок кисти привязываются к линиям (snapToLines), «палочка» берёт область между линиями (wand).
+// край объекта, найденного ИИ, и мазок кисти привязываются к линиям (snapToLines).
 // Щели в линиях до 2·gap пикселей считаются закрытыми: иначе область протекает в соседнюю (поток — в чашу фонтана).
 import { intersect, type Rect } from './frame.ts';
 import { insideDistance } from './mask.ts';
@@ -120,75 +120,6 @@ export function snapToLines(b: Bitmap, map: LineMap, reach = 0): Bitmap | null {
   // Линии и щели рядом со взятым — его контур
   const toOut = insideDistance(invert(out), width, height);
   for (let i = 0; i < n; i++) if (region[i]! < 0 && !out[i] && toOut[i]! <= LINE_WIDTH + gap) out[i] = 255;
-  return trim({ rect, mask: out });
-}
-
-export interface WandOptions {
-  /** Насколько яркость может отличаться от той, где щёлкнули, 0..255 */
-  tolerance: number;
-  /** Щели в линиях до 2·gap пикселей считаются закрытыми */
-  gap: number;
-  /** Только область, связная с точкой щелчка; иначе — все такие пиксели участка */
-  contiguous: boolean;
-  /** Взять и линии вокруг области */
-  outline: boolean;
-}
-
-/** Ближайший к i светлый пиксель не дальше radius — щелчок, попавший на штрих, переносится в область рядом */
-function nearestLight(gray: Uint8Array, width: number, height: number, i: number, radius: number): number {
-  if (gray[i]! >= LINE) return i;
-  const x0 = i % width;
-  const y0 = (i - x0) / width;
-  let found = i;
-  let best = Infinity;
-  for (let y = Math.max(0, y0 - radius); y <= Math.min(height - 1, y0 + radius); y++) {
-    for (let x = Math.max(0, x0 - radius); x <= Math.min(width - 1, x0 + radius); x++) {
-      const d = (x - x0) ** 2 + (y - y0) ** 2;
-      if (d < best && d <= radius * radius && gray[y * width + x]! >= LINE) {
-        best = d;
-        found = y * width + x;
-      }
-    }
-  }
-  return found;
-}
-
-/**
- * «Палочка»: область участка rect (rgb — его пиксели) вокруг точки seed той же яркости, с допуском.
- * Щелчок на тонкий штрих (штриховка) переносится в светлое рядом: выделять сам штрих почти никогда не нужно
- */
-export function wand(rgb: Buffer, rect: Rect, seed: [number, number], opts: WandOptions): Bitmap | null {
-  const { width, height } = rect;
-  const n = width * height;
-  const sx = Math.floor(seed[0] - rect.x);
-  const sy = Math.floor(seed[1] - rect.y);
-  if (sx < 0 || sy < 0 || sx >= width || sy >= height) return null;
-  const gray = luma(rgb, n);
-  const s = nearestLight(gray, width, height, sy * width + sx, LINE_WIDTH);
-  const at = gray[s]!;
-  const tol = Math.max(0, Math.min(255, opts.tolerance));
-  const match = new Uint8Array(n);
-  for (let i = 0; i < n; i++) if (Math.abs(gray[i]! - at) <= tol) match[i] = 255;
-  let out: Uint8Array;
-  if (!opts.contiguous) {
-    out = match;
-  } else {
-    // Заливка идёт только дальше gap от того, что не подходит, — так она не протекает в щель; потом полоса у края возвращается
-    const d = opts.gap > 0 ? insideDistance(match, width, height) : null;
-    const gap = d && d[s]! > opts.gap ? opts.gap : 0;
-    const region = new Int32Array(n).fill(-1);
-    flood(region, width, height, s, 0, (i) => match[i]! > 0 && (!gap || d![i]! > gap), new Int32Array(n));
-    out = new Uint8Array(n);
-    for (let i = 0; i < n; i++) if (region[i] === 0) out[i] = 255;
-    if (gap) {
-      const toOut = insideDistance(invert(out), width, height);
-      for (let i = 0; i < n; i++) if (match[i] && toOut[i]! <= gap) out[i] = 255;
-    }
-  }
-  if (opts.outline) {
-    const toOut = insideDistance(invert(out), width, height);
-    for (let i = 0; i < n; i++) if (!match[i] && toOut[i]! <= LINE_WIDTH) out[i] = 255;
-  }
   return trim({ rect, mask: out });
 }
 

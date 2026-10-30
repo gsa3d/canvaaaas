@@ -498,8 +498,7 @@ button.swatch.active,
 }
 
 .osd[data-tool='rect'] *,
-.osd[data-tool='lasso'] *,
-.osd[data-tool='wand'] * {
+.osd[data-tool='lasso'] * {
   cursor: crosshair !important;
 }
 

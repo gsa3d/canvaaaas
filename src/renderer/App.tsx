@@ -6,7 +6,6 @@ import {
   IconBrush,
   IconChevronLeft,
   IconChevronRight,
-  IconClick,
   IconCubePlus,
   IconDots,
   IconEraser,
@@ -61,7 +60,7 @@ import {
 import { getState, post, subscribe, upload, uploadReference } from './api.ts';
 import { CanvasView, type MaskEditView, type MaskRef, type Movable, type PickEvent, type SelectOp, type Tool } from './viewer.ts';
 
-/** Объект, выделенный инструментом «Объект»: его уровни и подсказки, по которым он найден */
+/** Объект, выделенный «Палочкой»: его уровни и подсказки, по которым он найден */
 interface Pick {
   levels: (MaskResult & { refined?: boolean })[];
   level: number;
@@ -193,8 +192,7 @@ function adviseSelection(doc: DocDto, shapes: MaskShape[], dto: ModelOutputsDto,
 const STROKE = 1.75;
 
 const TOOL_ICONS: Record<Tool, Icon> = {
-  object: IconClick,
-  wand: IconWand,
+  object: IconWand,
   move: IconArrowsMove,
   hand: IconHandStop,
   rect: IconMarquee2,
@@ -206,8 +204,7 @@ const TOOL_ICONS: Record<Tool, Icon> = {
 
 /** name — на панели настроек, label — во всплывающей подсказке */
 const TOOLS: { id: Tool; name: string; label: string; key: string }[] = [
-  { id: 'object', name: 'Объект', label: 'Объект', key: 'W' },
-  { id: 'wand', name: 'Палочка', label: 'Палочка', key: 'Q' },
+  { id: 'object', name: 'Палочка', label: 'Палочка: объект под щелчком', key: 'W' },
   { id: 'move', name: 'Сдвинуть', label: 'Сдвинуть слой с дорисованным фоном', key: 'V' },
   { id: 'rect', name: 'Прямоугольник', label: 'Прямоугольник', key: 'R' },
   { id: 'lasso', name: 'Лассо', label: 'Лассо', key: 'L' },
@@ -218,7 +215,7 @@ const TOOLS: { id: Tool; name: string; label: string; key: string }[] = [
 ];
 
 /** Инструменты выделения: у них режим «Новое / Добавить / Вычесть» и край */
-const SELECTING: Tool[] = ['object', 'wand', 'rect', 'lasso', 'brush', 'eraser'];
+const SELECTING: Tool[] = ['object', 'rect', 'lasso', 'brush', 'eraser'];
 
 /** Цвета наброска под рукой; любой другой — из палитры */
 const SKETCH_COLORS = ['#ff3b30', '#1e88ff', '#22b14c', '#111111', '#ffffff'];
@@ -259,7 +256,6 @@ export function App() {
   /** Край объекта и мазка кисти — по линиям рисунка */
   const [objectSnap, setObjectSnap] = usePref('object-snap', true);
   const [brushSnap, setBrushSnap] = usePref('brush-snap', false);
-  const [wandOpts, setWandOpts] = usePref('wand', { tolerance: 32, gap: 2, contiguous: true, outline: true });
   /** Край выделения шире или уже: от какого выделения считали (base) и что вышло (result) */
   const [edge, setEdge] = useState<{ base: MaskShape[]; px: number; result?: MaskShape } | null>(null);
   const [selection, setSelection] = useState<MaskShape[]>([]);
@@ -304,9 +300,9 @@ export function App() {
   const onSketch = useRef<(stroke: SketchStroke) => void>(() => undefined);
   const onPick = useRef<(event: PickEvent) => void>(() => undefined);
   const onMove = useRef<(id: string, dx: number, dy: number) => Promise<number>>(() => Promise.reject(new Error('Нет документа')));
-  /** Как найдена каждая фигура инструмента «Объект» в выделении */
+  /** Как найдена каждая фигура «Палочки» в выделении */
   const picks = useRef(new WeakMap<MaskShape, Pick>());
-  /** Выделение на этот миг: щелчки «Объектом» идут по очереди и не ждут перерисовки */
+  /** Выделение на этот миг: щелчки «Палочкой» идут по очереди и не ждут перерисовки */
   const selectionRef = useRef<MaskShape[]>([]);
   const pickChain = useRef<Promise<unknown>>(Promise.resolve());
   /** В каком порядке в форму новой правки ложились фигуры выделения и штрихи наброска — ⌘Z убирает последнее */
@@ -443,14 +439,14 @@ export function App() {
     setSelection([]);
   };
 
-  // ——— Инструмент «Объект» ———
+  // ——— «Палочка»: объект под щелчком ———
 
-  /** Выделение сейчас: менять его из щелчков «Объектом» — только так, чтобы следующий щелчок видел его сразу */
+  /** Выделение сейчас: менять его из щелчков «Палочкой» — только так, чтобы следующий щелчок видел его сразу */
   const updateSelection = (fn: (sel: MaskShape[]) => MaskShape[]) => {
     selectionRef.current = fn(selectionRef.current);
     setSelection(selectionRef.current);
   };
-  /** Объект, найденный последним: последняя фигура выделения, если её дал «Объект» */
+  /** Объект, найденный последним: последняя фигура выделения, если её дала «Палочка» */
   const lastPick = (): { shape: MaskShape; pick: Pick } | null => {
     const shape = selectionRef.current.at(-1);
     const pick = shape && picks.current.get(shape);
@@ -493,20 +489,7 @@ export function App() {
   const queuePick = (fn: () => Promise<void>) => {
     pickChain.current = pickChain.current.then(fn).catch(fail);
   };
-  /** Маска с сервера (палочка, край) — в выделение: вместо него, к нему или вычесть */
-  const showMask = async (r: MaskResult, op: SelectOp) => {
-    const shape: MaskRef = { kind: 'mask', id: r.id, ...r.rect, erase: op === 'sub' || undefined };
-    await viewRef.current?.loadMask(shape);
-    if (op === 'new') formOrder.current = formOrder.current.filter((k) => k !== 'shape');
-    formOrder.current.push('shape');
-    updateSelection((sel) => (op === 'new' ? [shape] : [...sel, shape]));
-  };
   onPick.current = (e) => {
-    if (e.tool === 'wand') {
-      const p = e.point ?? [e.box!.x, e.box!.y];
-      queuePick(async () => showMask(await post<MaskResult>('/api/segment/wand', { view: e.view, x: p[0], y: p[1], ...wandOpts }), e.op));
-      return;
-    }
     if (!segmentReady) return;
     queuePick(async () => {
       const last = lastPick();
@@ -527,7 +510,7 @@ export function App() {
       await showPick({ ...res, points, box: e.box, erase: e.op === 'sub', snap: objectSnap, at: p }, e.op === 'new' ? 'all' : 'add');
     });
   };
-  /** [ и ] с «Объектом» — уровень последнего найденного объекта мельче или крупнее */
+  /** [ и ] с «Палочкой» — уровень последнего найденного объекта мельче или крупнее */
   const stepLevel = (dir: number) => {
     const last = lastPick();
     if (!last) return;
@@ -1170,29 +1153,6 @@ export function App() {
                   <OptCheck label="По линиям" title="Край выделения — по линиям рисунка, с контуром" checked={objectSnap} onChange={setObjectSnap} />
                 </>
               )}
-              {tool === 'wand' && (
-                <>
-                  <Slider
-                    label="Допуск"
-                    title="Насколько светлее или темнее точки щелчка может быть то, что выделится"
-                    min={0}
-                    max={255}
-                    value={wandOpts.tolerance}
-                    onChange={(tolerance) => setWandOpts((o) => ({ ...o, tolerance }))}
-                  />
-                  <Slider
-                    label="Щели"
-                    title="Разрывы в линиях шириной до двух таких — закрыты: область не протекает в соседнюю"
-                    min={0}
-                    max={12}
-                    value={wandOpts.gap}
-                    unit=" px"
-                    onChange={(gap) => setWandOpts((o) => ({ ...o, gap }))}
-                  />
-                  <OptCheck label="Смежные" title="Только область вокруг щелчка" checked={wandOpts.contiguous} onChange={(contiguous) => setWandOpts((o) => ({ ...o, contiguous }))} />
-                  <OptCheck label="С контуром" title="Взять и линии вокруг области" checked={wandOpts.outline} onChange={(outline) => setWandOpts((o) => ({ ...o, outline }))} />
-                </>
-              )}
               {(tool === 'brush' || tool === 'eraser') && (
                 <>
                   <Slider label="Размер" title="Размер кисти на экране ([ и ])" min={4} max={400} value={brush} onChange={setBrush} />
@@ -1247,8 +1207,8 @@ export function App() {
         {TOOLS.map((t) => {
           const ToolIcon = TOOL_ICONS[t.id];
           // Набросок — подсказка модели к новой правке, а не выделение: отдельно от инструментов выделения.
-          // Набросок, «Объект», «Палочка» и «Сдвинуть» — не для правки маски
-          const formOnly = (t.id === 'sketch' || t.id === 'object' || t.id === 'wand' || t.id === 'move') && !!maskLayer;
+          // Набросок, «Палочка» и «Сдвинуть» — не для правки маски
+          const formOnly = (t.id === 'sketch' || t.id === 'object' || t.id === 'move') && !!maskLayer;
           const button = (
             <button
               key={t.id}
@@ -1313,7 +1273,7 @@ export function App() {
               <h2>
                 Новая правка
                 <Help>
-                  Выделите предмет «Объектом» (W) или «Палочкой» (Q), область — прямоугольником (R), лассо (L) или кистью (B). Shift добавляет к
+                  Выделите предмет «Палочкой» (W), область — прямоугольником (R), лассо (L) или кистью (B). Shift добавляет к
                   выделению, Alt вычитает; режим и край выделения — на панели над холстом. Набросок (S) — подсказка
                   модели: где и каким должно быть то, что в задаче; с Alt он стирается. ⌘Z убирает последнее, ⌘D снимает выделение, ⌘↵ —
                   сгенерировать.

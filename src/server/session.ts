@@ -32,7 +32,7 @@ import { expandMaskByDiff } from '../core/expand.ts';
 import { readLedger, withDirectorLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha, featherAlphaRegion, maskBBox } from '../core/mask.ts';
 import { applyShapes, applyShapesRegion, type MaskLookup } from '../core/mask-shapes.ts';
-import { changeEdge, wand } from '../core/lines.ts';
+import { changeEdge } from '../core/lines.ts';
 import { descendants, dilate, layerName, placeObject, removeObject, trim } from '../core/objects.ts';
 import type { Bitmap } from '../core/segment.ts';
 import type { KeyStore } from '../core/secrets.ts';
@@ -60,7 +60,6 @@ import {
   type RectDto,
   type RedoChange,
   type SnapRequest,
-  type WandRequest,
   type SizeChoice,
   type SketchStroke,
   type StateDto,
@@ -1678,16 +1677,6 @@ export class Session {
     const bitmap = trim({ rect: area, mask });
     if (!bitmap) throw new Error('Выделение пустое');
     return bitmap;
-  }
-
-  /** «Палочка»: область вокруг точки той же яркости в видимой части холста — маской выделения */
-  wandSelect(req: WandRequest): MaskResult {
-    const doc = this.requireDoc();
-    const view = intersect(req.view, { x: 0, y: 0, width: doc.width, height: doc.height });
-    if (view.width < 1 || view.height < 1) throw new Error('Вид за краем холста');
-    const b = wand(doc.region(view), view, [req.x, req.y], req);
-    if (!b) throw new Error('Здесь ничего не выделилось');
-    return this.segmentation.keep(b);
   }
 
   /** Край всего выделения шире или уже на px — одной маской */

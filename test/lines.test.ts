@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { changeEdge, lineMap, snapToLines, wand } from '../src/core/lines.ts';
+import { changeEdge, lineMap, snapToLines } from '../src/core/lines.ts';
 import { area } from '../src/core/objects.ts';
 
 const W = 200;
@@ -24,23 +24,6 @@ const at = (b: { rect: typeof rect; mask: Uint8Array } | null, x: number, y: num
   !!b && x >= b.rect.x && y >= b.rect.y && x < b.rect.x + b.rect.width && y < b.rect.y + b.rect.height && b.mask[(y - b.rect.y) * b.rect.width + x - b.rect.x]! > 0;
 
 describe('Линии рисунка', () => {
-  it('палочка: область между линиями, щель закрыта, контур по желанию', () => {
-    const rgb = drawing();
-    const opts = { tolerance: 32, gap: 2, contiguous: true, outline: false };
-    const top = wand(rgb, rect, [100, 70], opts);
-    expect(at(top, 100, 70)).toBe(true);
-    // Штрих поперёк делит квадрат: нижняя половина — другая область
-    expect(at(top, 100, 120)).toBe(false);
-    // Щель в 2 px закрыта — снаружи не протекло
-    expect(at(top, 170, 70)).toBe(false);
-    expect(at(top, 52, 70)).toBe(false);
-    expect(at(wand(rgb, rect, [100, 70], { ...opts, gap: 0 }), 170, 70)).toBe(true);
-    const outlined = wand(rgb, rect, [100, 70], { ...opts, outline: true });
-    expect(at(outlined, 52, 70)).toBe(true);
-    expect(at(outlined, 40, 70)).toBe(false);
-    expect(wand(rgb, rect, [300, 70], opts)).toBeNull();
-  });
-
   it('привязка: маска «на глаз» ложится по линиям — клетка целиком, с контуром, без соседа снаружи', () => {
     const rgb = drawing();
     const map = lineMap(rgb, rect);

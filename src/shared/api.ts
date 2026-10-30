@@ -229,20 +229,6 @@ export interface PickResult {
   unchanged?: boolean;
 }
 
-/** «Палочка»: область вокруг точки той же яркости в видимой части холста */
-export interface WandRequest {
-  view: RectDto;
-  x: number;
-  y: number;
-  /** 0..255 */
-  tolerance: number;
-  /** Щели в линиях до 2·gap пикселей считаются закрытыми */
-  gap: number;
-  contiguous: boolean;
-  /** Взять и линии вокруг области */
-  outline: boolean;
-}
-
 /** Край выделения шире (px > 0) или уже */
 export interface EdgeRequest {
   shapes: MaskShape[];

@@ -266,7 +266,7 @@ export class Segmentation {
     return bitmaps.map((b) => snapToLines(b, map, reach) ?? b);
   }
 
-  /** Сохранить готовую маску выделения (палочка, край, мазок): её id — для фигуры kind: 'mask' */
+  /** Сохранить готовую маску выделения (край, мазок): её id — для фигуры kind: 'mask' */
   keep(bitmap: Bitmap): MaskResult {
     return { id: this.store({ bitmap, points: [], crop: bitmap.rect, refined: true }), rect: bitmap.rect };
   }
