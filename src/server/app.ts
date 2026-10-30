@@ -258,7 +258,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     const n = (k: string) => Number(url.searchParams.get(k) ?? NaN);
     const view = { x: n('vx'), y: n('vy'), width: n('vw'), height: n('vh') };
     if (![n('x'), n('y'), view.x, view.y, view.width, view.height].every(Number.isFinite)) throw new HttpError(400, 'Нет точки или вида');
-    const hit = await session.hoverObject(view, n('x'), n('y'));
+    const hit = await session.hoverObject(view, n('x'), n('y'), url.searchParams.get('within') ?? undefined);
     if (!hit) {
       res.writeHead(204, { 'Cache-Control': 'no-store' });
       res.end();

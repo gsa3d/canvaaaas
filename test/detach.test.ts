@@ -171,7 +171,7 @@ describe('Дорисовать фон под слоем', () => {
   it('правка отделённого слоя — его версия: вместо исходника на холсте и едет вместе с ним', async () => {
     const { s, doc, id } = await detached();
     const shape: MaskShape = { kind: 'mask', id: `obj:${id}`, x: 0, y: 0, width: 1, height: 1 };
-    s.createJob({ shapes: [shape], prompt: 'перекрасить', variants: 1, model: 'flash', size: 'auto' });
+    s.createJob({ shapes: [shape], object: id, prompt: 'перекрасить', variants: 1, model: 'flash', size: 'auto' });
     await until(() => s.state().jobs.at(-1)?.status === 'done');
     const version = doc.object(id).current!;
     expect(doc.patch(version).object).toBe(id);

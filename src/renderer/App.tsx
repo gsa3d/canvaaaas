@@ -26,6 +26,7 @@ import {
   IconPlus,
   IconScribble,
   IconSquare,
+  IconStack2,
   IconWand,
   IconX,
   type Icon,
@@ -38,6 +39,7 @@ import {
   CANVAS_PRESETS,
   COMMAND_EVENT,
   MAX_REFERENCES,
+  OUTSIDE_LAYER,
   shapesBBox,
   type AppCommand,
   type DocDto,
@@ -276,6 +278,8 @@ export function App() {
   const [focusJob, setFocusJob] = useState<string | null>(null);
   /** Слой, маску которого сейчас правят */
   const [maskLayer, setMaskLayer] = useState<string | null>(null);
+  /** Слой, в котором работают: палочка ищет только в нём, генерация ложится его версией; нет — новым слоем */
+  const [active, setActive] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0);
   const [toast, setToast] = useState<{ text: string; error: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -320,6 +324,7 @@ export function App() {
   selectionRef.current = selection;
   const editedLayer = layers.find((p) => p.id === maskLayer && p.active) ?? null;
   const maskEdit = editedLayer ? layerMaskEdit(editedLayer, layers) : null;
+  const activeObj = active ? objects.find((o) => o.id === active) : undefined;
 
   const notify = (text: string, error = true) => {
     setToast({ text, error });
@@ -365,7 +370,13 @@ export function App() {
     setSketch([]);
     formOrder.current = [];
     setMaskLayer(null);
+    setActive(null);
   }, [doc?.id]);
+  // Удалённый слой — работа вне слоя
+  useEffect(() => {
+    if (active && state && !activeObj) setActive(null);
+  }, [active, !!activeObj]);
+  useEffect(() => viewRef.current?.setLayer(activeObj && !maskLayer ? objectShape(activeObj) : null), [activeObj?.id, activeObj?.rev, !!maskLayer]);
   useEffect(() => {
     viewRef.current?.setJobs(jobs, numbers.current, focusJob);
   }, [state?.jobs, focusJob]);
@@ -504,7 +515,14 @@ export function App() {
       // который его меняет, — щелчок рядом с выделенным не возвращает то, что уже выделено
       const points = p ? [{ x: p[0], y: p[1], positive: true }] : [];
       const selection = e.op === 'new' ? undefined : selectionRef.current;
-      const res = await post<PickResult>('/api/segment/pick', { view: e.view, points, box: e.box, snap: objectSnap, op: e.op, selection });
+      const within = activeObj && !maskLayer ? activeObj : undefined;
+      const res = await post<PickResult>('/api/segment/pick', { view: e.view, points, box: e.box, snap: objectSnap, op: e.op, selection, within: within?.id }).catch(
+        (err: unknown) => {
+          if (within && err instanceof Error && err.message === OUTSIDE_LAYER) notify(`Вне слоя «${short(within.name, 24)}»`, false);
+          else throw err;
+        },
+      );
+      if (!res) return;
       // Уровень, который ничего не меняет, всё равно ложится в выделение: [ и ] переключат его на другой
       if (res.unchanged) notify(`${e.op === 'add' ? 'Это уже в выделении' : 'Этого нет в выделении'}: [ и ] — мельче или крупнее`, false);
       await showPick({ ...res, points, box: e.box, erase: e.op === 'sub', snap: objectSnap, at: p }, e.op === 'new' ? 'all' : 'add');
@@ -560,20 +578,26 @@ export function App() {
     if (!doc || !selection.some((s) => !s.erase)) return;
     try {
       const { id } = await post<{ id: string }>('/api/objects', { shapes: selection });
+      // Состояние — с новым слоем: запрошенное раньше и пришедшее позже его не перебьёт
+      const seq = ++refreshSeq.current;
       const s = await getState();
-      setState(s);
+      if (seq === refreshSeq.current) setState(s);
       const o = s.objects.find((x) => x.id === id);
       if (o) {
         formOrder.current = formOrder.current.filter((k) => k !== 'shape');
         formOrder.current.push('shape');
         setSelection([objectShape(o)]);
+        setActive(o.id);
         notify(`Слой «${o.name}»`, false);
       }
     } catch (err) {
       fail(err);
     }
   };
-  /** Щелчок по объекту в списке — его маска становится выделением; с ⌘ или Shift — добавляется к выделению или убирается из него */
+  /**
+   * Щелчок по слою в списке — работа в нём: его маска становится выделением; с ⌘ или Shift — маска добавляется
+   * к выделению или убирается из него, а слой, в котором работают, тот же
+   */
   const selectObject = (o: ObjectDto, add: boolean) => {
     const shape = objectShape(o);
     if (add) {
@@ -584,12 +608,12 @@ export function App() {
       formOrder.current = formOrder.current.filter((k) => k !== 'shape');
       formOrder.current.push('shape');
       setSelection([shape]);
+      setActive(o.id);
       viewRef.current?.reveal(o.rect);
     }
   };
   const selectedObjects = new Set(selection.flatMap((s) => (s.kind === 'mask' && s.id.startsWith('obj:') && !s.erase ? [s.id.slice(4)] : [])));
-  /** Выделен ровно один слой: генерация ляжет его версией */
-  const target = selection.length === 1 && selectedObjects.size === 1 ? objects.find((o) => selectedObjects.has(o.id)) : undefined;
+
   /** Дорисовать фон под слоем: модель нарисует то, что за ним, — тогда слой можно сдвигать и скрывать */
   const detach = async (o: ObjectDto) => {
     if (needsKey(model) && !state?.hasKey) {
@@ -642,6 +666,9 @@ export function App() {
   // У ChatGPT одно разрешение — его выбирает сама модель
   const sizeFor = (m: ModelChoice): SizeChoice => (m === 'chatgpt' ? 'auto' : size);
   const sizeAdvice = doc && state && hasSelection ? adviseSelection(doc, selection, state.models[model], sizeFor(model)) : null;
+  // Рамка куска, который увидит модель, — на холсте, пока есть выделение
+  const modelFrame = sizeAdvice && typeof sizeAdvice === 'object' && !maskLayer ? sizeAdvice.frame.inside : null;
+  useEffect(() => viewRef.current?.setModelFrame(modelFrame), [JSON.stringify(modelFrame)]);
 
   const generate = async () => {
     if (!canGenerate) return;
@@ -652,6 +679,7 @@ export function App() {
     try {
       const { id } = await post<{ id: string }>('/api/jobs', {
         shapes: selection,
+        object: activeObj?.id,
         prompt,
         variants: countFor(stepwise),
         model,
@@ -844,7 +872,9 @@ export function App() {
       if (zoomMenu) setZoomMenu(false);
       else if (dialog) setDialog(null);
       else if (maskLayer) setMaskLayer(null);
-      else clearSelection();
+      // Сначала снимается выделение, потом — работа в слое
+      else if (selection.length || !activeObj) clearSelection();
+      else setActive(null);
       (document.activeElement as HTMLElement | null)?.blur();
       return;
     }
@@ -891,9 +921,9 @@ export function App() {
       else if (tool === 'sketch') setSketchSize((b) => (up ? Math.min(120, Math.round(b * 1.25) + 1) : Math.max(2, Math.round(b / 1.25))));
       else setBrush((b) => (up ? Math.min(400, Math.round(b * 1.25)) : Math.max(4, Math.round(b / 1.25))));
     }
-    if (target && target.versions.length > 0 && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    if (activeObj && activeObj.versions.length > 0 && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
       e.preventDefault();
-      stepVersion(target, e.key === 'ArrowLeft' ? -1 : 1);
+      stepVersion(activeObj, e.key === 'ArrowLeft' ? -1 : 1);
     }
   };
   useEffect(() => {
@@ -1230,6 +1260,15 @@ export function App() {
         <div ref={stageRef} class="osd" />
         {doc && tool === 'object' && segment && !maskLayer && segment.status !== 'ready' && <SegmentBanner segment={segment} onError={fail} />}
         {comparing && <div class="stage-banner">Исходник</div>}
+        {activeObj && !maskLayer && (
+          <div class="stage-banner layer-banner">
+            <IconStack2 size={16} stroke={STROKE} aria-hidden="true" />
+            {`Слой «${short(activeObj.name, 32)}»`}
+            <button class="layer-banner-close" title="Выйти из слоя" aria-label="Выйти из слоя" onClick={() => setActive(null)}>
+              <IconX size={14} stroke={2.25} />
+            </button>
+          </div>
+        )}
         {!doc && state && <StartScreen recent={state.recent} onOpen={openDialog} onOpenRecent={openRecent} onError={fail} />}
         {(busy ?? state?.activity) && <div class="busy">{busy ?? state?.activity}</div>}
         {toast && <div class={toast.error ? 'toast error' : 'toast'}>{toast.text}</div>}
@@ -1275,8 +1314,9 @@ export function App() {
                 <Help>
                   Выделите предмет «Палочкой» (W), область — прямоугольником (R), лассо (L) или кистью (B). Shift добавляет к
                   выделению, Alt вычитает; режим и край выделения — на панели над холстом. Набросок (S) — подсказка
-                  модели: где и каким должно быть то, что в задаче; с Alt он стирается. ⌘Z убирает последнее, ⌘D снимает выделение, ⌘↵ —
-                  сгенерировать.
+                  модели: где и каким должно быть то, что в задаче; с Alt он стирается. Модель видит кусок в пунктирной рамке, меняет —
+                  только выделенное. В слое (щелчок по нему в «Слоях») правка ложится его версией, без слоя — новым слоем. ⌘Z убирает
+                  последнее, ⌘D снимает выделение, ⌘↵ — сгенерировать.
                 </Help>
               </h2>
               {sketch.length > 0 && (
@@ -1345,7 +1385,13 @@ export function App() {
               {sizeAdvice && typeof sizeAdvice === 'object' && (
                 <SizeHint advice={sizeAdvice} auto={sizeFor(model) === 'auto'} sizes={state!.models[model].imageSizes} onSize={setSize} />
               )}
-              {hasSelection && <p class="hint">{target ? `В слой «${short(target.name)}»` : 'Новым слоем'}</p>}
+              {activeObj ? (
+                <div class="chips">
+                  <Chip icon={IconStack2} label={`В слой «${short(activeObj.name, 28)}»`} clear="Новым слоем" onClear={() => setActive(null)} />
+                </div>
+              ) : (
+                hasSelection && <p class="hint">Новым слоем</p>
+              )}
               <button class="primary" disabled={!canGenerate} onClick={generate} title="⌘↵">
                 {generateText(stepwise, countFor(stepwise))}
               </button>
@@ -1382,7 +1428,7 @@ export function App() {
             <LayersPanel
               objects={objects}
               patches={layers}
-              selected={selectedObjects}
+              selected={active}
               following={!!segment?.following}
               maskLayer={maskLayer}
               detaching={new Set(jobs.flatMap((j) => (j.detach && (j.status === 'queued' || j.status === 'preparing' || j.status === 'running') ? [j.detach] : [])))}
@@ -1708,7 +1754,8 @@ function VersionSwitch(props: { object: ObjectDto; onCurrent: (patch: string | n
 function LayersPanel(props: {
   objects: ObjectDto[];
   patches: PatchDto[];
-  selected: Set<string>;
+  /** Слой, в котором работают */
+  selected: string | null;
   following: boolean;
   /** Версия, маску которой правят */
   maskLayer: string | null;
@@ -1764,7 +1811,7 @@ function LayersPanel(props: {
     return (
       <Fragment key={o.id}>
         <li
-          class={[props.selected.has(o.id) ? 'selected' : '', o.lost ? 'lost' : '', o.hidden ? 'off' : '', current && props.maskLayer === current.id ? 'editing' : '']
+          class={[props.selected === o.id ? 'selected' : '', o.lost ? 'lost' : '', o.hidden ? 'off' : '', current && props.maskLayer === current.id ? 'editing' : '']
             .filter(Boolean)
             .join(' ')}
           style={{ paddingLeft: `${2 + depth * 16}px` }}
@@ -1791,7 +1838,7 @@ function LayersPanel(props: {
           ) : (
             <button
               class="link"
-              title={o.lost ? 'После правки слой не нашёлся: маска прежняя' : 'Выделить; ⌘ — добавить к выделению; двойной щелчок — переименовать'}
+              title={o.lost ? 'После правки слой не нашёлся: маска прежняя' : 'Работать в слое; ⌘ — добавить к выделению; двойной щелчок — переименовать'}
               onClick={(e) => props.onSelect(o, e.metaKey || e.ctrlKey || e.shiftKey)}
               onDblClick={() => setEditing(o.id)}
             >
@@ -1866,7 +1913,8 @@ function LayersPanel(props: {
         Слои
         {props.following && <span class="dim">пересчитываю…</span>}
         <Help>
-          Слой — кусок картинки. Выделите его щелчком в списке — генерация ляжет его версией; выделенное не слоем станет новым слоем.
+          Слой — кусок картинки. Щелчок по слою — работа в нём: палочка ищет только в нём, генерация ляжет его версией, остальное
+          в слое останется. Вне слоя (Esc) генерация даёт новый слой.
           Стрелки у слоя — версии: исходник и генерации, на холсте — выбранная; удерживайте «\», чтобы увидеть исходник всей картинки.
           Чтобы скрыть или сдвинуть (V) слой, под ним дорисовывают фон: он ложится заплаткой в «Фон». ⌘J — слой из выделения.
         </Help>

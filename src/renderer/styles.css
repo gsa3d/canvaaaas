@@ -546,6 +546,29 @@ button.swatch.active,
   font-weight: 500;
 }
 
+/* Слой, в котором работают: слева, чтобы не спорить с другими плашками */
+.stage-banner.layer-banner {
+  left: 12px;
+  transform: none;
+  gap: 8px;
+  padding: 4px 4px 4px 12px;
+  font-size: 13px;
+}
+
+.stage-banner button.layer-banner-close {
+  min-height: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+
+.stage-banner button.layer-banner-close:hover:not(:disabled) {
+  background: #fff;
+  color: var(--accent);
+}
+
 .stage-banner.error {
   background: var(--danger);
 }

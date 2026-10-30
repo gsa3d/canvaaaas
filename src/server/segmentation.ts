@@ -6,10 +6,10 @@ import sharp from 'sharp';
 import type { CanvasDocument, DocObject } from '../core/document.ts';
 import { intersect, type Rect } from '../core/frame.ts';
 import { lineMap, snapToLines } from '../core/lines.ts';
-import { area, changedPixels, overlap, touchedEdge } from '../core/objects.ts';
+import { area, changedPixels, clipBitmap, clipScaled, overlap, touchedEdge } from '../core/objects.ts';
 import { levels, rasterize, Segmenter, type Backend, type Bitmap, type Candidate, type Embedding, type SegmentPrompt } from '../core/segment.ts';
 import { installModel, modelFiles, modelInstalled } from '../core/segment-model.ts';
-import type { MaskResult, PickRequest, PickResult, RectDto, SegmentDto, SegmentPoint } from '../shared/api.ts';
+import { OUTSIDE_LAYER, type MaskResult, type PickRequest, type PickResult, type RectDto, type SegmentDto, type SegmentPoint } from '../shared/api.ts';
 
 const EMBEDDINGS_KEPT = 4;
 const MASKS_KEPT = 300;
@@ -36,6 +36,8 @@ interface StoredMask {
   box?: Rect;
   crop: Rect;
   refined: boolean;
+  /** Слой, в границах которого искали объект */
+  within?: Bitmap;
 }
 
 function message(err: unknown): string {
@@ -189,8 +191,11 @@ export class Segmentation {
     await this.embedding(doc, this.viewRect(doc, view), { view: true });
   }
 
-  /** Подсветка объекта под курсором: маска в масштабе не больше HOVER_MAX и где она лежит на холсте; null — ничего */
-  async hover(doc: CanvasDocument, view: RectDto, x: number, y: number): Promise<{ png: Buffer; rect: RectDto } | null> {
+  /**
+   * Подсветка объекта под курсором: маска в масштабе не больше HOVER_MAX и где она лежит на холсте; null — ничего.
+   * within — слой, в котором работают: подсвечивается только то, что в нём
+   */
+  async hover(doc: CanvasDocument, view: RectDto, x: number, y: number, within?: Bitmap): Promise<{ png: Buffer; rect: RectDto } | null> {
     const crop = this.viewRect(doc, view);
     if (x < crop.x || y < crop.y || x >= crop.x + crop.width || y >= crop.y + crop.height) return null;
     const emb = await this.embedding(doc, crop, { view: true, need: { x: Math.floor(x), y: Math.floor(y), width: 1, height: 1 } });
@@ -198,7 +203,8 @@ export class Segmentation {
     const c = lv.levels[lv.best];
     if (!c) return null;
     const k = Math.min(1, HOVER_MAX / Math.max(crop.width, crop.height));
-    const b = rasterize(c, k);
+    const raw = rasterize(c, k);
+    const b = raw && within ? clipScaled(raw, within, k) : raw;
     if (!b) return null;
     return {
       png: await maskPng(b),
@@ -209,9 +215,10 @@ export class Segmentation {
   /**
    * Объект по точкам и (или) рамке: его уровни от мелкого к крупному, каждый — маской с id.
    * selection — выделение одной маской, если объект к нему добавят или из него вычтут (req.op): тогда первым идёт уровень,
-   * который его заметно меняет, — иначе щелчок рядом с выделенным давал бы крупный уровень, который уже весь в нём
+   * который его заметно меняет, — иначе щелчок рядом с выделенным давал бы крупный уровень, который уже весь в нём.
+   * within — слой, в котором работают: уровни обрезаются по нему, одинаковые после этого сливаются
    */
-  async pick(doc: CanvasDocument, req: PickRequest, selection?: Bitmap): Promise<PickResult> {
+  async pick(doc: CanvasDocument, req: PickRequest, selection?: Bitmap, within?: Bitmap): Promise<PickResult> {
     const points = req.points ?? [];
     const box = req.box && intersect(req.box, { x: 0, y: 0, width: doc.width, height: doc.height });
     if (!points.length && !box?.width) throw new Error('Нет подсказки для выделения');
@@ -227,12 +234,24 @@ export class Segmentation {
     // У рамки и нескольких точек объект один: берём лучшую маску, у одного щелчка — все уровни
     const lv = points.length === 1 && !box ? levels(cands) : { levels: [best(cands)], best: 0 };
     const bounds = { x: 0, y: 0, width: doc.width, height: doc.height };
-    const found = lv.levels.flatMap((c, i) => {
+    let found = lv.levels.flatMap((c, i) => {
       const bitmap = rasterize(c, 1, bounds);
       return bitmap ? [{ bitmap, best: i === lv.best }] : [];
     });
     if (!found.length) throw new Error('Здесь объект не нашёлся');
-    const bitmaps = req.snap ? this.snap(doc, found.map((f) => f.bitmap)) : found.map((f) => f.bitmap);
+    if (req.snap) {
+      const snapped = this.snap(doc, found.map((f) => f.bitmap));
+      found = found.map((f, i) => ({ ...f, bitmap: snapped[i]! }));
+    }
+    if (within) {
+      found = found.flatMap((f) => {
+        const bitmap = clipBitmap(f.bitmap, within);
+        return bitmap ? [{ ...f, bitmap }] : [];
+      });
+      if (!found.length) throw new Error(OUTSIDE_LAYER);
+      found = dedupe(found);
+    }
+    const bitmaps = found.map((f) => f.bitmap);
     let level = Math.max(0, found.findIndex((f) => f.best));
     let unchanged = false;
     if (selection && (req.op === 'add' || req.op === 'sub')) {
@@ -248,7 +267,7 @@ export class Segmentation {
       }
     }
     return {
-      levels: bitmaps.map((bitmap) => ({ id: this.store({ bitmap, points, box, crop, refined: false }), rect: bitmap.rect })),
+      levels: bitmaps.map((bitmap) => ({ id: this.store({ bitmap, points, box, crop, refined: false, within }), rect: bitmap.rect })),
       level,
       unchanged: unchanged || undefined,
     };
@@ -285,7 +304,9 @@ export class Segmentation {
     const c = best(await (await this.segmenter()).decode(emb, { points: stored.points, box: b.rect }));
     const raw = rasterize(c, 1, { x: 0, y: 0, width: doc.width, height: doc.height });
     if (!raw) return { id, rect: b.rect };
-    const bitmap = snap ? this.snap(doc, [raw])[0]! : raw;
+    const snapped = snap ? this.snap(doc, [raw])[0]! : raw;
+    const bitmap = stored.within ? clipBitmap(snapped, stored.within) : snapped;
+    if (!bitmap) return { id, rect: b.rect };
     return { id: this.store({ ...stored, bitmap, crop, refined: true }), rect: bitmap.rect };
   }
 
@@ -343,6 +364,21 @@ export class Segmentation {
     }
     return out;
   }
+}
+
+/** Уровни, обрезанные по слою, часто совпадают (часть и целое — весь слой): из почти одинаковых остаётся мельчайший */
+function dedupe<T extends { bitmap: Bitmap; best: boolean }>(found: T[]): T[] {
+  const out: T[] = [];
+  for (const f of found) {
+    const prev = out.at(-1);
+    const a = area(f.bitmap);
+    if (prev && Math.abs(a - area(prev.bitmap)) <= 0.01 * a && overlap(prev.bitmap, f.bitmap) >= 0.99 * a) {
+      if (f.best) prev.best = true;
+      continue;
+    }
+    out.push(f);
+  }
+  return out;
 }
 
 /** Рамка изменённых пикселей участка region внутри within; null — их там нет */

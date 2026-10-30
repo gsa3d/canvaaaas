@@ -628,6 +628,54 @@ export function applyLayer(dst: RawRegion, layerRect: Rect, layer: Buffer): void
   }
 }
 
+/** Слой правки с маской до растушёвки: RGBA и маска размером с rect */
+export interface MaskedLayer {
+  rect: Rect;
+  layer: Buffer;
+  mask: Uint8Array;
+}
+
+/**
+ * Правка части слоя — поверх его прежней версии base: top ложится на неё так же, как легла бы на холст, поэтому холст
+ * с новой версией вместо прежней тот же, что с прежней и правкой сверху. Маска — обе вместе, rect — обе рамки;
+ * part — маска самой правки в этой рамке: «Ещё варианты» перерисуют только её
+ */
+export function layerOver(base: MaskedLayer, top: MaskedLayer): MaskedLayer & { part: Uint8Array } {
+  const x0 = Math.min(base.rect.x, top.rect.x);
+  const y0 = Math.min(base.rect.y, top.rect.y);
+  const rect = {
+    x: x0,
+    y: y0,
+    width: Math.max(base.rect.x + base.rect.width, top.rect.x + top.rect.width) - x0,
+    height: Math.max(base.rect.y + base.rect.height, top.rect.y + top.rect.height) - y0,
+  };
+  const n = rect.width * rect.height;
+  const layer = Buffer.alloc(n * 4);
+  const mask = new Uint8Array(n);
+  const part = new Uint8Array(n);
+  const index = (r: Rect, x: number, y: number) => (x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height ? (y - r.y) * r.width + x - r.x : -1);
+  for (let y = y0; y < y0 + rect.height; y++) {
+    for (let x = x0; x < x0 + rect.width; x++) {
+      const i = (y - y0) * rect.width + x - x0;
+      const b = index(base.rect, x, y);
+      const t = index(top.rect, x, y);
+      const ab = b < 0 ? 0 : base.layer[b * 4 + 3]! / 255;
+      const at = t < 0 ? 0 : top.layer[t * 4 + 3]! / 255;
+      const a = at + ab * (1 - at);
+      for (let c = 0; c < 3; c++) {
+        const tc = t < 0 ? 0 : top.layer[t * 4 + c]!;
+        const bc = b < 0 ? 0 : base.layer[b * 4 + c]!;
+        // Где обеих не видно, цвет — ответ модели: его вернёт кисть, если маску расширят
+        layer[i * 4 + c] = a > 0 ? Math.round((tc * at + bc * ab * (1 - at)) / a) : t >= 0 ? tc : bc;
+      }
+      layer[i * 4 + 3] = Math.round(a * 255);
+      mask[i] = Math.max(b < 0 ? 0 : base.mask[b]!, t < 0 ? 0 : top.mask[t]!);
+      part[i] = t < 0 ? 0 : top.mask[t]!;
+    }
+  }
+  return { rect, layer, mask, part };
+}
+
 /** Вклеить ответ модели в полное изображение (для CLI): вернуть к размеру куска, смешать по маске */
 export async function compositeVariant(prep: PreparedEdit, generated: Buffer): Promise<CompositedVariant> {
   const { inside } = prep.frame;

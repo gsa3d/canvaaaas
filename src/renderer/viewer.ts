@@ -52,6 +52,8 @@ export interface PickEvent {
 
 const ACCENT = '#2F5BEA';
 const ERROR = '#C8431A';
+/** Рамка куска, который уйдёт модели */
+const MODEL_FRAME = '#5F6672';
 /** Сколько картинок масок объектов держать готовыми; маски выделения — сверх этого, их не выбрасываем */
 const MASK_IMAGES_KEPT = 40;
 
@@ -178,6 +180,10 @@ export class CanvasView {
   private hoverSeq = 0;
   /** Объект, на который навели в списке объектов */
   private highlight: MaskRef | null = null;
+  /** Слой, в котором работают: всё вокруг притушено, подсветка под курсором — только в нём */
+  private layer: MaskRef | null = null;
+  /** Кусок холста, который увидит модель */
+  private modelFrame: RectDto | null = null;
   /** Маски объектов, перекрашенные в цвет выделения; null — ещё грузится */
   private readonly maskImages = new Map<string, HTMLCanvasElement | null>();
   private prepareTimer = 0;
@@ -520,6 +526,19 @@ export class CanvasView {
     this.redraw();
   }
 
+  /** Работа в слое: маска слоя или null — вся картинка */
+  setLayer(shape: MaskRef | null): void {
+    this.layer = shape;
+    this.clearHover();
+    this.redraw();
+  }
+
+  /** Кусок холста, который уйдёт модели с выделением; null — выделения нет */
+  setModelFrame(rect: RectDto | null): void {
+    this.modelFrame = rect;
+    this.redraw();
+  }
+
   /** Видимая часть холста целыми пикселями; null — холста не видно */
   visibleRect(current = true): RectDto | null {
     if (!this.base || !this.doc) return null;
@@ -564,7 +583,8 @@ export class CanvasView {
     if (this.hoverBusy || !at || !view || !this.objectTool() || this.draft) return;
     this.hoverBusy = true;
     const seq = this.hoverSeq;
-    const q = `x=${at[0]}&y=${at[1]}&vx=${view.x}&vy=${view.y}&vw=${view.width}&vh=${view.height}`;
+    const within = this.layer ? `&within=${encodeURIComponent(this.layer.id.slice('obj:'.length))}` : '';
+    const q = `x=${at[0]}&y=${at[1]}&vx=${view.x}&vy=${view.y}&vw=${view.width}&vh=${view.height}${within}`;
     fetch(`/api/segment/hover.png?${q}`)
       .then(async (res) => {
         const r = res.headers.get(`${API_HEADER}-rect`)?.split(',').map(Number);
@@ -607,10 +627,10 @@ export class CanvasView {
     const url = this.maskUrl(shape);
     if (this.maskImages.get(url)) return Promise.resolve();
     this.maskImages.set(url, null);
-    // Выбрасываются самые давние, кроме масок, которые сейчас в выделении и подсветке: иначе при большом выделении
+    // Выбрасываются самые давние, кроме масок, которые сейчас в выделении, подсветке и слое: иначе при большом выделении
     // они выбрасывали бы друг друга и часть выделения не рисовалась
     if (this.maskImages.size > MASK_IMAGES_KEPT) {
-      const used = new Set([...this.selection, ...(this.highlight ? [this.highlight] : [])].flatMap((s) => (s.kind === 'mask' ? [this.maskUrl(s)] : [])));
+      const used = new Set([...this.selection, ...(this.highlight ? [this.highlight] : []), ...(this.layer ? [this.layer] : [])].flatMap((s) => (s.kind === 'mask' ? [this.maskUrl(s)] : [])));
       for (const key of [...this.maskImages.keys()]) {
         if (this.maskImages.size <= MASK_IMAGES_KEPT) break;
         if (key !== url && !used.has(key)) this.maskImages.delete(key);
@@ -943,11 +963,28 @@ export class CanvasView {
       ctx.drawImage(shift.cutout, r.x + shift.dx, r.y + shift.dy, r.width, r.height);
     }
     const moved = this.shift;
+    const maskMode = this.maskMode();
+
+    // Работа в слое: картинка вокруг него притушена
+    const scope = this.layer && !maskMode && this.doc ? this.maskImage(this.layer) : null;
+    if (scope && this.layer && this.doc) {
+      f.setTransform(1, 0, 0, 1, 0, 0);
+      f.globalCompositeOperation = 'source-over';
+      f.clearRect(0, 0, this.fill.width, this.fill.height);
+      toImage(f);
+      f.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      f.fillRect(0, 0, this.doc.width, this.doc.height);
+      f.globalCompositeOperation = 'destination-out';
+      const [dx, dy] = moved && this.layer.id === `obj:${moved.item.id}` ? [moved.dx, moved.dy] : [0, 0];
+      f.drawImage(scope, this.layer.x + dx, this.layer.y + dy, this.layer.width, this.layer.height);
+      f.globalCompositeOperation = 'source-over';
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(this.fill, 0, 0);
+    }
 
     // Выделение: объединение фигур с вычитанием ластика — на отдельном канвасе, затем заливка и контур.
     // Пока правится маска, выделение не показываем, чтобы не путать одно с другим. Мазок по маске виден сразу
     // в превью; черновик — только у прямоугольника и лассо (и пока превью грузится), стирающий — красным
-    const maskMode = this.maskMode();
     const shapes: (MaskShape | Draft)[] = maskMode ? [] : [...this.selection];
     if (this.draft && !this.draft.live && !this.draft.sketch && !this.draft.pick) shapes.push(this.draft);
     if (shapes.length) {
@@ -1067,6 +1104,7 @@ export class CanvasView {
       frame(r, `#${this.numbers.get(job.id) ?? '?'}`, color, job.id === this.focused ? 2 : 1, job.status === 'done' ? [] : [6, 4]);
     }
     if (this.edit?.view.kind === 'layer') frame(this.edit.view.rect, 'Маска слоя', ACCENT, 2, [6, 4]);
+    if (this.modelFrame && !maskMode) frame(this.modelFrame, 'Видит модель', MODEL_FRAME, 1, [3, 3]);
     // С «Сдвинуть» видно, что можно сдвинуть
     if (this.activeTool() === 'move' && !maskMode) {
       ctx.strokeStyle = ACCENT;

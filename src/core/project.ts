@@ -1,7 +1,7 @@
 // Свой формат canvaaaas, .caaa: исходник, слои и все их версии с масками. После повторного открытия
 // версии можно переключать, слои скрывать и править маски, как до сохранения; история отмены начинается заново.
 // Внутри — подпись, длина и JSON-описание, затем PNG подряд: исходник, у каждой версии — RGBA
-// (ответ модели и растушёванная маска в альфе) и маска до растушёвки, маски слоёв; в конце — референсы версий,
+// (ответ модели и растушёванная маска в альфе) и маска до растушёвки, маски слоёв, маски правок части слоя; в конце — референсы версий,
 // чтобы перерисовать ещё раз и после повторного открытия. Набросок и текст директора — в описании.
 // В описании версии лежат в layers, а слои — в objects: так назывались правки и объекты в проектах 1.
 import { randomUUID } from 'node:crypto';
@@ -56,6 +56,9 @@ interface Manifest {
     object?: string;
     /** Снятый исходник отделённого слоя object */
     lifted?: boolean;
+    /** Правка части слоя: версия, поверх которой она легла, и маска самой правки */
+    base?: string;
+    part?: Part;
   }[];
   /** Слои: имя, маска размером с rect, слой, частью которого этот является, видимость, текущая версия, заплатка фона */
   objects?: {
@@ -108,6 +111,7 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
     base,
     ...patches.flatMap((p) => [png(p.layer, p.rect.width, p.rect.height, 4), png(p.mask, p.rect.width, p.rect.height, 1)]),
     ...objects.map((o) => png(o.mask, o.rect.width, o.rect.height, 1)),
+    ...patches.flatMap((p) => (p.part ? [png(p.part, p.rect.width, p.rect.height, 1)] : [])),
   ]);
   const refs: InputImage[] = [];
   const refIndex = (ref: InputImage): number => {
@@ -147,6 +151,7 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
       sketch: p.sketch?.length ? p.sketch : undefined,
       object: p.object,
       lifted: p.lifted || undefined,
+      base: p.part ? p.base : undefined,
     })),
   };
   const first = 1 + patches.length * 2;
@@ -164,6 +169,10 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
     edit: o.edit || undefined,
     mask: part(images[first + i]!),
   }));
+  let parts = first + objects.length;
+  patches.forEach((p, i) => {
+    if (p.part) manifest.layers[i]!.part = part(images[parts++]!);
+  });
   manifest.refs = refs.map((r) => ({ mimeType: r.mimeType, data: part(r.data) }));
   const json = Buffer.from(JSON.stringify(manifest), 'utf8');
   const length = Buffer.alloc(4);
@@ -206,6 +215,7 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
     ...manifest.layers.flatMap((l) => [decode(l.pixels, l.rect.width, l.rect.height, 4), decode(l.mask, l.rect.width, l.rect.height, 1)]),
   ]);
   const objectMasks = await Promise.all(objectList.map((o) => decode(o.mask, o.rect.width, o.rect.height, 1)));
+  const partMasks = await Promise.all(manifest.layers.map((l) => (l.part && typeof l.base === 'string' ? decode(l.part, l.rect.width, l.rect.height, 1) : undefined)));
   const ids = new Set(objectList.map((o) => o.id));
   const layerIds = new Set(manifest.layers.map((l) => l.id));
   const objects = objectList.map(
@@ -255,6 +265,8 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       sketch: readSketch(l.sketch),
       object: typeof l.object === 'string' && ids.has(l.object) ? l.object : undefined,
       lifted: (l.lifted === true && typeof l.object === 'string' && ids.has(l.object)) || undefined,
+      base: partMasks[i] && layerIds.has(l.base!) ? l.base : undefined,
+      part: partMasks[i] && layerIds.has(l.base!) ? new Uint8Array(partMasks[i]!) : undefined,
     };
   });
   if (manifest.version < 2) migrate(patches, objects);

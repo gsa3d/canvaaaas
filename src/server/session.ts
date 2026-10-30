@@ -18,6 +18,7 @@ import {
   fitGenerated,
   insideOf,
   layerAsGen,
+  layerOver,
   measure,
   overviewImage,
   prepareEdit,
@@ -33,7 +34,7 @@ import { readLedger, withDirectorLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha, featherAlphaRegion, maskBBox } from '../core/mask.ts';
 import { applyShapes, applyShapesRegion, type MaskLookup } from '../core/mask-shapes.ts';
 import { changeEdge } from '../core/lines.ts';
-import { descendants, dilate, layerName, placeObject, removeObject, trim } from '../core/objects.ts';
+import { area, descendants, dilate, layerName, overlap, placeObject, removeObject, trim, unionBitmap } from '../core/objects.ts';
 import type { Bitmap } from '../core/segment.ts';
 import type { KeyStore } from '../core/secrets.ts';
 import { checkSketch } from '../core/sketch.ts';
@@ -143,8 +144,13 @@ interface Job {
   shapes: MaskShape[];
   /** Маски объектов из выделения: берутся сразу, пока они есть */
   bitmaps: Map<string, Bitmap>;
-  /** Слой, в который ложатся версии: выделили слой — он; иначе слой появится из выделения с первым готовым вариантом */
+  /** Слой, в который ложатся версии: работают в слое — он; иначе слой появится из выделения с первым готовым вариантом */
   object?: string;
+  /**
+   * Версия слоя, поверх которой ложатся варианты, — та, что была видна, когда кусок ушёл модели: правят часть слоя,
+   * остальное остаётся от неё
+   */
+  base?: string;
   /** Дорисовать фон под этим слоем: варианты — версии его заплатки фона */
   detach?: string;
   /** Границы выделения — известны сразу, ещё до подготовки куска */
@@ -880,8 +886,12 @@ export class Session {
     const { shapes, bitmaps } = this.resolveShapes(req.shapes);
     const area = shapesBBox(shapes);
     if (!area) throw new Error('Нет выделения');
-    const added = shapes.filter((s) => !s.erase);
-    const only = added.length === 1 && added[0]!.kind === 'mask' ? added[0]!.id : '';
+    const { object } = req;
+    if (object) {
+      const o = this.requireDoc().objects.find((x) => x.id === object);
+      if (!o) throw new Error('Слоя уже нет: выберите другой');
+      if (o.hidden) throw new Error(`Слой «${o.name}» скрыт: покажите его`);
+    }
     const refIds = req.refs ?? [];
     if (refIds.length > MAX_REFERENCES) throw new Error(`Не больше ${MAX_REFERENCES} референсов на правку`);
     const references = refIds.map((id) => {
@@ -889,7 +899,6 @@ export class Session {
       if (!ref) throw new Error('Референс не найден — добавьте картинку заново');
       return ref.image;
     });
-    const object = only.startsWith('obj:') ? only.slice(4) : undefined;
     return this.enqueue({
       prompt: req.prompt.trim(),
       hide: !!req.hide,
@@ -924,9 +933,13 @@ export class Session {
    * «Принять» кладёт выбранный на его место. С той же задачей директор не нужен заново: слой помнит его текст.
    */
   patchVariants(patchId: string, req: PatchVariantsRequest): string {
-    const patch = this.requireDoc().patch(patchId);
+    const doc = this.requireDoc();
+    const patch = doc.patch(patchId);
     if (patch.lifted) throw new Error('Исходник перерисовывают правкой: выделите слой и напишите задачу');
-    const box = maskBBox(patch.mask, patch.rect.width, patch.rect.height);
+    // Правка части слоя: перерисовывается только сама правка поверх той же прежней версии
+    const base = patch.base && patch.part && doc.hasPatch(patch.base) ? patch.base : undefined;
+    const mask = base ? patch.part! : patch.mask;
+    const box = maskBBox(mask, patch.rect.width, patch.rect.height);
     if (!box) throw new Error('Маска версии пустая: верните кистью то, что нужно перерисовать');
     return this.enqueue({
       prompt: req.prompt?.trim() || patch.prompt,
@@ -942,7 +955,8 @@ export class Session {
       sketch: patch.sketch ?? [],
       director: req.director ?? patch.directed !== undefined,
       directed: patch.directed ? { key: taskKey({ prompt: patch.prompt, hide: patch.hide ?? false }), text: patch.directed } : undefined,
-      from: { patchId, mask: patch.mask, rect: patch.rect, feather: patch.feather },
+      base,
+      from: { patchId, mask, rect: patch.rect, feather: patch.feather },
     });
   }
 
@@ -962,6 +976,7 @@ export class Session {
       | 'sketch'
       | 'director'
       | 'directed'
+      | 'base'
       | 'from'
     > & {
       variants: number;
@@ -1026,10 +1041,15 @@ export class Session {
       // Версию могли удалить, пока задача ждала очереди: тогда варианты — просто новые версии
       const { from } = job;
       const current = from && doc.hasPatch(from.patchId) ? doc.patch(from.patchId) : null;
+      const mask = from ? layerMask(from) : await this.rasterize(job, doc);
+      // Правка слоя: модель видит холст с его видимой версией, варианты лягут поверх неё
+      if (!from && job.object) job.base = visibleVersion(doc, job.object);
+      const base = job.base && doc.hasPatch(job.base) ? doc.patch(job.base) : undefined;
       const prep = await prepareEdit({
         image: doc.raw(),
-        mask: from ? layerMask(from) : await this.rasterize(job, doc),
-        crop: current ? (inside) => doc.regionWithout(inside, current.id) : undefined,
+        mask,
+        // «Ещё варианты» версии: холст без неё, а у правки части слоя — с прежней версией на её месте
+        crop: current ? (inside) => (base ? doc.regionReplaced(inside, current.id, base.rect, base.layer) : doc.regionWithout(inside, current.id)) : undefined,
         feather: from?.feather,
         prompt: job.prompt,
         guide: guideOf(job.hide),
@@ -1369,12 +1389,20 @@ export class Session {
       }
       const existing = job.object ? doc.objects.find((o) => o.id === job.object) : undefined;
       const owner = existing ?? this.layerFromJob(doc, job);
-      const region = patch.rect;
+      // Правка части слоя ложится поверх версии, которую модель видела: остальной слой остаётся от неё
+      const below = existing && job.base && doc.hasPatch(job.base) ? doc.patch(job.base) : undefined;
+      const over = below ? layerOver(below, { rect: patch.rect, layer: patch.layer, mask: job.mask }) : undefined;
+      const version: NewPatch = over ? { ...patch, rect: over.rect, layer: over.layer, mask: over.mask, base: below!.id, part: over.part } : patch;
+      // Выделение за краем слоя — слой растёт
+      const edited = trim({ rect: job.prep.frame.inside, mask: job.mask });
+      const grown = existing && existing.kind !== 'fill' && edited && overlap(edited, existing) < area(edited) ? trim(unionBitmap(existing, edited)) : null;
+      const region = version.rect;
       const before = doc.region(region);
       let placed: string | undefined;
       doc.batch(() => {
         if (!existing) doc.setObjects(placeObject(doc.objects, owner));
-        placed = doc.addPatch({ ...patch, object: owner.id }).id;
+        if (grown) doc.setObjects(doc.objects.map((o) => (o.id === owner.id ? { ...o, ...grown, version: doc.nextObjectVersion(), lost: undefined } : o)));
+        placed = doc.addPatch({ ...version, object: owner.id }).id;
         if (show) doc.setObjects(doc.objects.map((o) => (o.id === owner.id ? { ...o, current: placed } : o)));
       });
       job.object = owner.id;
@@ -1466,7 +1494,10 @@ export class Session {
     });
   }
 
-  /** Добавить к маске версии то, что модель нарисовала за её краем: сравнивается с холстом без этой версии */
+  /**
+   * Добавить к маске версии то, что модель нарисовала за её краем: сравнивается с холстом без этой версии,
+   * а у правки части слоя — с прежней версией на её месте
+   */
   expandVersion(patchId: string): Promise<number> {
     return this.serialDoc((doc) => {
       const p = doc.patch(patchId);
@@ -1475,7 +1506,9 @@ export class Session {
       for (let i = 0; i < width * height; i++) p.layer.copy(rgb, i * 3, i * 4, i * 4 + 3);
       const rect = intersect(p.rect, { x: 0, y: 0, width: doc.width, height: doc.height });
       if (rect.width !== width || rect.height !== height) throw new Error('Версия выходит за край холста');
-      const { mask, addedPx } = expandMaskByDiff(p.mask, doc.regionWithout(p.rect, p.id), rgb, width, height);
+      const base = p.base && doc.hasPatch(p.base) ? doc.patch(p.base) : undefined;
+      const under = base ? doc.regionReplaced(p.rect, p.id, base.rect, base.layer) : doc.regionWithout(p.rect, p.id);
+      const { mask, addedPx } = expandMaskByDiff(p.mask, under, rgb, width, height);
       if (addedPx > 0) doc.setPatchMask(p.id, mask);
       this.changed();
       return addedPx;
@@ -1652,15 +1685,17 @@ export class Session {
     return this.segmentation.prepare(this.requireDoc(), view);
   }
 
-  hoverObject(view: RectDto, x: number, y: number): Promise<{ png: Buffer; rect: RectDto } | null> {
-    return this.segmentation.hover(this.requireDoc(), view, x, y);
+  /** within — слой, в котором работают: объект ищется только в его границах */
+  hoverObject(view: RectDto, x: number, y: number, within?: string): Promise<{ png: Buffer; rect: RectDto } | null> {
+    const doc = this.requireDoc();
+    return this.segmentation.hover(doc, view, x, y, within ? doc.object(within) : undefined);
   }
 
   async pickObject(req: PickRequest): Promise<PickResult> {
     const doc = this.requireDoc();
     // Выделение, к которому объект добавят или из которого вычтут; устаревшее — просто без него
     const selection = req.op && req.op !== 'new' && req.selection?.length ? await this.selectionBitmap(doc, req.selection).catch(() => undefined) : undefined;
-    return this.segmentation.pick(doc, req, selection);
+    return this.segmentation.pick(doc, req, selection, req.within ? doc.object(req.within) : undefined);
   }
 
   refineObject(id: string, snap = false): Promise<MaskResult> {
@@ -1699,6 +1734,12 @@ export class Session {
 /** Слой отделённого объекта; нет — объект не отделён */
 function liftedLayer(doc: CanvasDocument, objectId: string): Patch | undefined {
   return doc.patches.findLast((p) => p.lifted && p.object === objectId);
+}
+
+/** Версия слоя, которую видно: текущая, а без неё у отделённого — снятый исходник */
+function visibleVersion(doc: CanvasDocument, objectId: string): string | undefined {
+  const o = doc.objects.find((x) => x.id === objectId);
+  return o && (o.current ?? liftedLayer(doc, objectId)?.id);
 }
 
 /** Без объекта и всех его частей: так уходит отделённый объект вместе со своим слоем */

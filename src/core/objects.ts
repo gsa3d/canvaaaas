@@ -110,6 +110,51 @@ export function descendants(objects: DocObject[], id: string): DocObject[] {
   return out;
 }
 
+/** Часть маски внутри маски within; null — её там нет */
+export function clipBitmap(b: Bitmap, within: Bitmap): Bitmap | null {
+  const rect = intersect(b.rect, within.rect);
+  if (!rect.width || !rect.height) return null;
+  const mask = new Uint8Array(rect.width * rect.height);
+  for (let y = 0; y < rect.height; y++) {
+    const ib = (rect.y + y - b.rect.y) * b.rect.width + rect.x - b.rect.x;
+    const iw = (rect.y + y - within.rect.y) * within.rect.width + rect.x - within.rect.x;
+    for (let x = 0; x < rect.width; x++) mask[y * rect.width + x] = Math.min(b.mask[ib + x]!, within.mask[iw + x]!);
+  }
+  return trim({ rect, mask });
+}
+
+/** Маска в масштабе k от холста (подсветка под курсором), обрезанная по маске within в масштабе холста */
+export function clipScaled(b: Bitmap, within: Bitmap, k: number): Bitmap | null {
+  const { rect } = b;
+  const mask = new Uint8Array(b.mask);
+  const w = within.rect;
+  for (let y = 0; y < rect.height; y++) {
+    const cy = Math.floor((rect.y + y + 0.5) / k) - w.y;
+    for (let x = 0; x < rect.width; x++) {
+      const i = y * rect.width + x;
+      if (!mask[i]) continue;
+      const cx = Math.floor((rect.x + x + 0.5) / k) - w.x;
+      if (cx < 0 || cy < 0 || cx >= w.width || cy >= w.height || within.mask[cy * w.width + cx]! < MASK_THRESHOLD) mask[i] = 0;
+    }
+  }
+  return trim({ rect, mask });
+}
+
+/** Обе маски одной */
+export function unionBitmap(a: Bitmap, b: Bitmap): Bitmap {
+  const x = Math.min(a.rect.x, b.rect.x);
+  const y = Math.min(a.rect.y, b.rect.y);
+  const rect = { x, y, width: Math.max(a.rect.x + a.rect.width, b.rect.x + b.rect.width) - x, height: Math.max(a.rect.y + a.rect.height, b.rect.y + b.rect.height) - y };
+  const mask = new Uint8Array(rect.width * rect.height);
+  for (const src of [a, b]) {
+    for (let row = 0; row < src.rect.height; row++) {
+      const to = (src.rect.y + row - y) * rect.width + src.rect.x - x;
+      for (let col = 0; col < src.rect.width; col++) mask[to + col] = Math.max(mask[to + col]!, src.mask[row * src.rect.width + col]!);
+    }
+  }
+  return { rect, mask };
+}
+
 /** Маска, раздутая на r пикселей во все стороны (не за пределы bounds) */
 export function dilate(b: Bitmap, r: number, bounds: Rect): Bitmap {
   const rect = intersect(bounds, { x: b.rect.x - r, y: b.rect.y - r, width: b.rect.width + 2 * r, height: b.rect.height + 2 * r });

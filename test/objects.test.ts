@@ -241,11 +241,11 @@ describe('Объекты в сессии', () => {
     expect(s.dirty).toBe(false);
   });
 
-  it('правка слоя — с его маской, вариант ложится его версией и сразу виден', async () => {
+  it('правка в слое — с его маской, вариант ложится его версией и сразу виден', async () => {
     const s = await session();
     const goose = await s.saveObject([{ kind: 'ellipse', cx: 200, cy: 150, rx: 60, ry: 40 }]);
     const shape: MaskShape = { kind: 'mask', id: `obj:${goose}`, x: 0, y: 0, width: 1, height: 1 };
-    s.createJob({ shapes: [shape], prompt: 'убери бант', variants: 1, model: 'flash', size: 'auto' });
+    s.createJob({ shapes: [shape], object: goose, prompt: 'убери бант', variants: 1, model: 'flash', size: 'auto' });
     const started = Date.now();
     while (s.state().jobs[0]?.status !== 'done') {
       if (Date.now() - started > 15_000) throw new Error('Не дождались');

@@ -213,6 +213,8 @@ export interface PickRequest {
    */
   op?: 'new' | 'add' | 'sub';
   selection?: MaskShape[];
+  /** Работают в этом слое: объект ищется только в его границах */
+  within?: string;
 }
 
 /** Маска выделения на сервере: её id для фигуры kind: 'mask' и где она лежит */
@@ -273,6 +275,8 @@ export interface StateDto {
 
 export interface CreateJobRequest {
   shapes: MaskShape[];
+  /** Слой, в котором работают: вариант ляжет его версией; без него — новым слоем из выделения */
+  object?: string;
   prompt: string;
   /** Сколько вариантов; с директором — сколько шагов с критиком самое большее */
   variants: number;
@@ -327,6 +331,9 @@ export const MAX_REFERENCES = 3;
 
 /** Заголовок, без которого сервер не примет изменяющий запрос (защита от чужих страниц) */
 export const API_HEADER = 'x-canvaaaas';
+
+/** Ошибка палочки, щёлкнувшей мимо слоя, в котором работают: интерфейс узнаёт её по тексту */
+export const OUTSIDE_LAYER = 'Вне слоя';
 
 /** Прямоугольник, в который помещаются все добавляющие фигуры (ластик не расширяет выделение) */
 export function shapesBBox(shapes: MaskShape[]): RectDto | null {
