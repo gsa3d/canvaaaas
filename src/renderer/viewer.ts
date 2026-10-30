@@ -54,6 +54,10 @@ const ACCENT = '#2F5BEA';
 const ERROR = '#C8431A';
 /** Рамка куска, который уйдёт модели */
 const MODEL_FRAME = '#5F6672';
+/** Притушение картинки вокруг слоя, в котором работают */
+const DIM = 'rgba(0, 0, 0, 0.45)';
+/** Поле вокруг маски слоя в картинке притушения, пиксели маски: стык с заливкой вокруг ложится на ровное тёмное */
+const DIM_PAD = 2;
 /** Сколько картинок масок объектов держать готовыми; маски выделения — сверх этого, их не выбрасываем */
 const MASK_IMAGES_KEPT = 40;
 
@@ -184,6 +188,10 @@ export class CanvasView {
   private layer: MaskRef | null = null;
   /** Кусок холста, который увидит модель */
   private modelFrame: RectDto | null = null;
+  /** Притушение вокруг слоя по его маске — готовой картинкой, чтобы не собирать его каждый кадр */
+  private dims = new WeakMap<HTMLCanvasElement, HTMLCanvasElement>();
+  /** В этом проходе OpenSeadragon поверх уже нарисовано: animation и update-viewport приходят в одном кадре */
+  private drawnInPass = false;
   /** Маски объектов, перекрашенные в цвет выделения; null — ещё грузится */
   private readonly maskImages = new Map<string, HTMLCanvasElement | null>();
   private prepareTimer = 0;
@@ -226,8 +234,8 @@ export class CanvasView {
     });
     this.viewer.addHandler('canvas-release', () => this.release());
     // При движении картинки поверх рисуем в том же кадре, что и тайлы: превью маски непрозрачно и иначе отставало бы от них
-    this.viewer.addHandler('animation', () => this.drawNow());
-    this.viewer.addHandler('update-viewport', () => this.drawNow());
+    this.viewer.addHandler('animation', () => this.drawPass());
+    this.viewer.addHandler('update-viewport', () => this.drawPass());
     this.viewer.addHandler('animation', () => this.reportZoom());
     this.viewer.addHandler('animation-finish', () => {
       this.reportZoom();
@@ -896,6 +904,33 @@ export class CanvasView {
     });
   }
 
+  /** Перерисовать в проходе OpenSeadragon — один раз, сколько бы его событий ни пришло */
+  private drawPass(): void {
+    if (this.drawnInPass) return;
+    this.drawnInPass = true;
+    queueMicrotask(() => {
+      this.drawnInPass = false;
+    });
+    this.drawNow();
+  }
+
+  /** Картинка притушения для маски слоя: тёмное там, где маски нет, с полем DIM_PAD по краям */
+  private dimImage(mask: HTMLCanvasElement): HTMLCanvasElement {
+    let dim = this.dims.get(mask);
+    if (!dim) {
+      dim = document.createElement('canvas');
+      dim.width = mask.width + 2 * DIM_PAD;
+      dim.height = mask.height + 2 * DIM_PAD;
+      const g = dim.getContext('2d')!;
+      g.fillStyle = DIM;
+      g.fillRect(0, 0, dim.width, dim.height);
+      g.globalCompositeOperation = 'destination-out';
+      g.drawImage(mask, DIM_PAD, DIM_PAD);
+      this.dims.set(mask, dim);
+    }
+    return dim;
+  }
+
   private drawNow(): void {
     if (this.frame) cancelAnimationFrame(this.frame);
     this.frame = 0;
@@ -965,21 +1000,31 @@ export class CanvasView {
     const moved = this.shift;
     const maskMode = this.maskMode();
 
-    // Работа в слое: картинка вокруг него притушена
+    // Работа в слое: картинка вокруг него притушена. Сразу на холст, без промежуточного во весь экран: вокруг рамки слоя —
+    // заливка, в рамке — готовая картинка притушения; рамка — целыми пикселями экрана, поэтому они сходятся без шва
     const scope = this.layer && !maskMode && this.doc ? this.maskImage(this.layer) : null;
     if (scope && this.layer && this.doc) {
-      f.setTransform(1, 0, 0, 1, 0, 0);
-      f.globalCompositeOperation = 'source-over';
-      f.clearRect(0, 0, this.fill.width, this.fill.height);
-      toImage(f);
-      f.fillStyle = 'rgba(0, 0, 0, 0.45)';
-      f.fillRect(0, 0, this.doc.width, this.doc.height);
-      f.globalCompositeOperation = 'destination-out';
-      const [dx, dy] = moved && this.layer.id === `obj:${moved.item.id}` ? [moved.dx, moved.dy] : [0, 0];
-      f.drawImage(scope, this.layer.x + dx, this.layer.y + dy, this.layer.width, this.layer.height);
-      f.globalCompositeOperation = 'source-over';
+      const l = this.layer;
+      const [dx, dy] = moved && l.id === `obj:${moved.item.id}` ? [moved.dx, moved.dy] : [0, 0];
+      const padX = (DIM_PAD * l.width) / scope.width;
+      const padY = (DIM_PAD * l.height) / scope.height;
+      const x0 = Math.round(dpr * (o.x + (l.x + dx - padX) * s));
+      const y0 = Math.round(dpr * (o.y + (l.y + dy - padY) * s));
+      const x1 = Math.round(dpr * (o.x + (l.x + dx + l.width + padX) * s));
+      const y1 = Math.round(dpr * (o.y + (l.y + dy + l.height + padY) * s));
+      const image = [dpr * o.x, dpr * o.y, dpr * this.doc.width * s, dpr * this.doc.height * s] as const;
+      ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.drawImage(this.fill, 0, 0);
+      ctx.beginPath();
+      ctx.rect(...image);
+      ctx.clip();
+      ctx.beginPath();
+      ctx.rect(...image);
+      ctx.rect(x0, y0, x1 - x0, y1 - y0);
+      ctx.fillStyle = DIM;
+      ctx.fill('evenodd');
+      ctx.drawImage(this.dimImage(scope), x0, y0, x1 - x0, y1 - y0);
+      ctx.restore();
     }
 
     // Выделение: объединение фигур с вычитанием ластика — на отдельном канвасе, затем заливка и контур.

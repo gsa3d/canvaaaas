@@ -923,6 +923,10 @@ button.help-toggle.active {
   font-weight: 500;
 }
 
+.chip.plain {
+  padding: 3px 10px 3px 8px;
+}
+
 button.chip-clear {
   min-height: 0;
   width: 20px;

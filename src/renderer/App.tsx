@@ -27,6 +27,7 @@ import {
   IconScribble,
   IconSquare,
   IconStack2,
+  IconStackPlus,
   IconWand,
   IconX,
   type Icon,
@@ -35,6 +36,7 @@ import { Fragment, type ComponentChildren } from 'preact';
 import { createPortal } from 'preact/compat';
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { adviseSize, intersect, type ModelOutputs, type SizeAdvice } from '../core/frame.ts';
+import { layerName } from '../core/objects.ts';
 import {
   CANVAS_PRESETS,
   COMMAND_EVENT,
@@ -1390,7 +1392,14 @@ export function App() {
                   <Chip icon={IconStack2} label={`В слой «${short(activeObj.name, 28)}»`} clear="Новым слоем" onClear={() => setActive(null)} />
                 </div>
               ) : (
-                hasSelection && <p class="hint">Новым слоем</p>
+                hasSelection && (
+                  <div class="chips">
+                    <span class="chip plain">
+                      <IconStackPlus size={14} stroke={STROKE} aria-hidden="true" />
+                      {prompt.trim() ? `Новый слой «${short(layerName(prompt), 28)}»` : 'Новый слой'}
+                    </span>
+                  </div>
+                )
               )}
               <button class="primary" disabled={!canGenerate} onClick={generate} title="⌘↵">
                 {generateText(stepwise, countFor(stepwise))}
