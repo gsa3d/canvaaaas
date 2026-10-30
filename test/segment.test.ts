@@ -49,6 +49,15 @@ describe.skipIf(!modelInstalled())('SAM', () => {
     const found = s.segmentation.bitmap(level.id);
     expect(iou(found, discMask(80))).toBeGreaterThan(0.9);
 
+    // Добавить к выделению то, что уже в нём, или вычесть то, чего в нём нет, — выделение не изменится
+    const disc = [{ kind: 'mask' as const, id: level.id, ...level.rect }];
+    const again = await s.pickObject({ view, points: [{ x: 290, y: 310, positive: true }], op: 'add', selection: disc });
+    expect(again.unchanged).toBe(true);
+    const square = await s.pickObject({ view, points: [{ x: 620, y: 200, positive: true }], op: 'sub', selection: disc });
+    expect(square.unchanged).toBe(true);
+    const added = await s.pickObject({ view, points: [{ x: 620, y: 200, positive: true }], op: 'add', selection: disc });
+    expect(added.unchanged).toBeUndefined();
+
     const id = await s.saveObject([{ kind: 'mask', id: level.id, ...level.rect }]);
     // Правка: круг стал радиусом 110
     const rect = { x: 160, y: 160, width: 280, height: 280 };

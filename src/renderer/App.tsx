@@ -532,9 +532,13 @@ export function App() {
         if (last.pick.levels.length > 1) await showPick({ ...last.pick, level: (last.pick.level + 1) % last.pick.levels.length }, last.shape);
         return;
       }
-      // Новый объект: вместо выделения, к нему (Shift) или вычесть из него (Alt)
+      // Новый объект: вместо выделения, к нему (Shift) или вычесть из него (Alt). Сервер знает выделение и первым даёт уровень,
+      // который его меняет, — щелчок рядом с выделенным не возвращает то, что уже выделено
       const points = p ? [{ x: p[0], y: p[1], positive: true }] : [];
-      const res = await post<PickResult>('/api/segment/pick', { view: e.view, points, box: e.box, snap: objectSnap });
+      const selection = e.op === 'new' ? undefined : selectionRef.current;
+      const res = await post<PickResult>('/api/segment/pick', { view: e.view, points, box: e.box, snap: objectSnap, op: e.op, selection });
+      // Уровень, который ничего не меняет, всё равно ложится в выделение: [ и ] переключат его на другой
+      if (res.unchanged) notify(`${e.op === 'add' ? 'Это уже в выделении' : 'Этого нет в выделении'}: [ и ] — мельче или крупнее`, false);
       await showPick({ ...res, points, box: e.box, erase: e.op === 'sub', snap: objectSnap, at: p }, e.op === 'new' ? 'all' : 'add');
     });
   };

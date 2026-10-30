@@ -1635,8 +1635,11 @@ export class Session {
     return this.segmentation.hover(this.requireDoc(), view, x, y);
   }
 
-  pickObject(req: PickRequest): Promise<PickResult> {
-    return this.segmentation.pick(this.requireDoc(), req);
+  async pickObject(req: PickRequest): Promise<PickResult> {
+    const doc = this.requireDoc();
+    // Выделение, к которому объект добавят или из которого вычтут; устаревшее — просто без него
+    const selection = req.op && req.op !== 'new' && req.selection?.length ? await this.selectionBitmap(doc, req.selection).catch(() => undefined) : undefined;
+    return this.segmentation.pick(doc, req, selection);
   }
 
   refineObject(id: string, snap = false): Promise<MaskResult> {

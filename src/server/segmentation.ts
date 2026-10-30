@@ -6,7 +6,7 @@ import sharp from 'sharp';
 import type { CanvasDocument, DocObject } from '../core/document.ts';
 import { intersect, type Rect } from '../core/frame.ts';
 import { lineMap, snapToLines } from '../core/lines.ts';
-import { area, changedPixels, touchedEdge } from '../core/objects.ts';
+import { area, changedPixels, overlap, touchedEdge } from '../core/objects.ts';
 import { levels, rasterize, Segmenter, type Backend, type Bitmap, type Candidate, type Embedding, type SegmentPrompt } from '../core/segment.ts';
 import { installModel, modelFiles, modelInstalled } from '../core/segment-model.ts';
 import type { MaskResult, PickRequest, PickResult, RectDto, SegmentDto, SegmentPoint } from '../shared/api.ts';
@@ -19,6 +19,8 @@ const SAME_CROP = 0.85;
 const REFINE_BELOW = 0.45;
 /** Подсветка под курсором — не больше этого по большей стороне */
 const HOVER_MAX = 1600;
+/** Уровень заметно меняет выделение, если добавляет (или вычитает) хотя бы такую свою долю */
+const CHANGES = 0.25;
 
 interface CachedEmbedding {
   docId: string;
@@ -204,8 +206,12 @@ export class Segmentation {
     };
   }
 
-  /** Объект по точкам и (или) рамке: его уровни от мелкого к крупному, каждый — маской с id */
-  async pick(doc: CanvasDocument, req: PickRequest): Promise<PickResult> {
+  /**
+   * Объект по точкам и (или) рамке: его уровни от мелкого к крупному, каждый — маской с id.
+   * selection — выделение одной маской, если объект к нему добавят или из него вычтут (req.op): тогда первым идёт уровень,
+   * который его заметно меняет, — иначе щелчок рядом с выделенным давал бы крупный уровень, который уже весь в нём
+   */
+  async pick(doc: CanvasDocument, req: PickRequest, selection?: Bitmap): Promise<PickResult> {
     const points = req.points ?? [];
     const box = req.box && intersect(req.box, { x: 0, y: 0, width: doc.width, height: doc.height });
     if (!points.length && !box?.width) throw new Error('Нет подсказки для выделения');
@@ -227,9 +233,24 @@ export class Segmentation {
     });
     if (!found.length) throw new Error('Здесь объект не нашёлся');
     const bitmaps = req.snap ? this.snap(doc, found.map((f) => f.bitmap)) : found.map((f) => f.bitmap);
+    let level = Math.max(0, found.findIndex((f) => f.best));
+    let unchanged = false;
+    if (selection && (req.op === 'add' || req.op === 'sub')) {
+      // Доля уровня, которая уже в выделении. Если уровень его не меняет, берётся ближайший мельче, который меняет:
+      // крупнее — нельзя, щелчок внутри выделенного иначе добавлял бы весь фон вокруг
+      const shared = bitmaps.map((b) => overlap(b, selection) / Math.max(1, area(b)));
+      const change = shared.map((s) => (req.op === 'add' ? 1 - s : s));
+      const enough = req.op === 'add' ? CHANGES : 0.02;
+      if (change[level]! < enough) {
+        const smaller = change.slice(0, level).flatMap((c, i) => (c >= enough ? [i] : []));
+        if (smaller.length) level = smaller.at(-1)!;
+        else unchanged = change[level]! < 0.02;
+      }
+    }
     return {
       levels: bitmaps.map((bitmap) => ({ id: this.store({ bitmap, points, box, crop, refined: false }), rect: bitmap.rect })),
-      level: Math.max(0, found.findIndex((f) => f.best)),
+      level,
+      unchanged: unchanged || undefined,
     };
   }
 

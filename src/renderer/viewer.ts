@@ -52,7 +52,7 @@ export interface PickEvent {
 
 const ACCENT = '#2F5BEA';
 const ERROR = '#C8431A';
-/** Сколько картинок масок объектов держать готовыми */
+/** Сколько картинок масок объектов держать готовыми; маски выделения — сверх этого, их не выбрасываем */
 const MASK_IMAGES_KEPT = 40;
 
 export type { MaskEditView };
@@ -641,7 +641,15 @@ export class CanvasView {
     const url = this.maskUrl(shape);
     if (this.maskImages.get(url)) return Promise.resolve();
     this.maskImages.set(url, null);
-    while (this.maskImages.size > MASK_IMAGES_KEPT) this.maskImages.delete(this.maskImages.keys().next().value!);
+    // Выбрасываются самые давние, кроме масок, которые сейчас в выделении и подсветке: иначе при большом выделении
+    // они выбрасывали бы друг друга и часть выделения не рисовалась
+    if (this.maskImages.size > MASK_IMAGES_KEPT) {
+      const used = new Set([...this.selection, ...(this.highlight ? [this.highlight] : [])].flatMap((s) => (s.kind === 'mask' ? [this.maskUrl(s)] : [])));
+      for (const key of [...this.maskImages.keys()]) {
+        if (this.maskImages.size <= MASK_IMAGES_KEPT) break;
+        if (key !== url && !used.has(key)) this.maskImages.delete(key);
+      }
+    }
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
