@@ -45,6 +45,8 @@ export interface Patch {
   hide?: boolean;
   /** Задача, как её расписал директор: с ней же идут «Ещё варианты» с той же задачей */
   directed?: string;
+  /** Что критик сказал о версии: done — готово, text — почему или что исправить */
+  critique?: { done: boolean; text: string };
   sketch?: SketchStroke[];
   /** Слой, чья это версия. Версия без слоя (так кладут правки тесты) видна по active и лежит под всеми слоями */
   object?: string;

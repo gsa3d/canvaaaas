@@ -51,6 +51,7 @@ interface Manifest {
     /** Модель не видела, что было под маской */
     hide?: boolean;
     directed?: string;
+    critique?: { done: boolean; text: string };
     sketch?: SketchStroke[];
     /** Слой, чья это версия (в проектах 1 — объект, который правили) */
     object?: string;
@@ -153,6 +154,7 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
       refs: p.refs?.map(refIndex),
       hide: p.hide || undefined,
       directed: p.directed,
+      critique: p.critique,
       sketch: p.sketch?.length ? p.sketch : undefined,
       object: p.object,
       lifted: p.lifted || undefined,
@@ -267,6 +269,7 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       refs: layerRefs,
       hide: l.hide === true || undefined,
       directed: typeof l.directed === 'string' && l.directed.trim() ? l.directed : undefined,
+      critique: l.critique && typeof l.critique.text === 'string' ? { done: l.critique.done === true, text: l.critique.text } : undefined,
       sketch: readSketch(l.sketch),
       object: typeof l.object === 'string' && ids.has(l.object) ? l.object : undefined,
       lifted: (l.lifted === true && typeof l.object === 'string' && ids.has(l.object)) || undefined,

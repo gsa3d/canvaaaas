@@ -239,6 +239,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     json(res, { addedPx: await session.expandVersion(id!) });
   });
   // Отделённый объект картинкой — для превью сдвига; маска слоя меняется, поэтому не кэшируется
+  // Миниатюры версий неизменны, пока не правили маску: её номер — в адресе
+  route('GET', '/api/history/:id/thumb.png', async (_req, res, [id]) => {
+    send(res, 200, await session.thumbPng(id!), 'image/png', { 'Cache-Control': 'private, max-age=31536000, immutable' });
+  });
   route('GET', '/api/history/:id/cutout.png', async (_req, res, [id]) => {
     send(res, 200, await session.cutoutPng(id!), 'image/png', { 'Cache-Control': 'no-store' });
   });

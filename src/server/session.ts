@@ -419,6 +419,7 @@ export class Session {
         feather: p.feather,
         hide: p.hide,
         directed: p.directed,
+        critique: p.critique,
         sketch: !!p.sketch?.length,
         object: p.object,
         lifted: p.lifted,
@@ -1274,6 +1275,8 @@ export class Session {
         signal,
       });
       v.critique = { done: res.done, text: res.text, maskRev };
+      // Замечания остаются и у версии: законченная задача из списка уходит, версия — нет
+      if (v.patch && this.doc?.hasPatch(v.patch)) this.doc.patch(v.patch).critique = { done: res.done, text: res.text };
       return v.critique;
     } catch (err) {
       throw new Error(`Критик: ${message(err)}`);
@@ -1737,6 +1740,18 @@ export class Session {
       this.changed();
       return { rev: doc.rev };
     });
+  }
+
+  /** Миниатюра версии для панели слоёв: то, что от неё видно (по рамке маски), вписанное в size×size, вокруг прозрачно */
+  thumbPng(patchId: string, size = 72): Promise<Buffer> {
+    const patch = this.requireDoc().patch(patchId);
+    const { width, height } = patch.rect;
+    const box = maskBBox(patch.mask, width, height) ?? { x: 0, y: 0, width, height };
+    return sharp(Buffer.from(patch.layer), { raw: { width, height, channels: 4 } })
+      .extract({ left: box.x, top: box.y, width: box.width, height: box.height })
+      .resize(size, size, { fit: 'inside', withoutEnlargement: true })
+      .png({ compressionLevel: 2 })
+      .toBuffer();
   }
 
   /** Слой картинкой с растушёванной маской в альфе, не больше max по большей стороне: так сдвиг виден сразу */

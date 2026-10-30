@@ -4,8 +4,6 @@ import {
   IconArrowsExchange,
   IconArrowsMove,
   IconBrush,
-  IconChevronLeft,
-  IconChevronRight,
   IconCubePlus,
   IconDots,
   IconEraser,
@@ -29,6 +27,11 @@ import {
   IconSquare,
   IconStack2,
   IconStackPlus,
+  IconLoader2,
+  IconAlertTriangle,
+  IconCheck,
+  IconArrowBarToDown,
+  IconTrash,
   IconWand,
   IconX,
   type Icon,
@@ -278,7 +281,6 @@ export function App() {
   const [variants, setVariants] = useState(2);
   /** Сколько шагов с критиком, когда включён директор */
   const [steps, setSteps] = useState(3);
-  const [focusJob, setFocusJob] = useState<string | null>(null);
   /** Слой, маску которого сейчас правят */
   const [maskLayer, setMaskLayer] = useState<string | null>(null);
   /** Слой, в котором работают: палочка ищет только в нём, генерация ложится его версией; нет — новым слоем */
@@ -300,8 +302,6 @@ export function App() {
   const fileRef = useRef<HTMLInputElement>(null);
   const refRef = useRef<HTMLInputElement>(null);
   const viewRef = useRef<CanvasView | null>(null);
-  const numbers = useRef(new Map<string, number>());
-  const nextNumber = useRef(1);
   const refreshSeq = useRef(0);
   const onShape = useRef<(shape: MaskShape, op: SelectOp) => void>(() => undefined);
   const onSketch = useRef<(stroke: SketchStroke) => void>(() => undefined);
@@ -358,11 +358,6 @@ export function App() {
     return subscribe(refresh);
   }, []);
 
-  // Номера задач — по порядку создания, чтобы карточка и область на холсте совпадали
-  for (const job of [...jobs].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
-    if (!numbers.current.has(job.id)) numbers.current.set(job.id, nextNumber.current++);
-  }
-
   useEffect(() => viewRef.current?.setDocument(doc), [doc?.id, doc?.rev]);
   useEffect(() => {
     document.title = doc ? `${doc.name}${doc.dirty ? ' •' : ''} — canvaaaas` : 'canvaaaas';
@@ -384,9 +379,26 @@ export function App() {
   useEffect(() => {
     if (active) document.querySelector(`.layers li[data-layer="${active}"]`)?.scrollIntoView({ block: 'nearest' });
   }, [active]);
+  // На холсте — рамки идущих генераций и генераций с ошибкой, с подписью слоя
   useEffect(() => {
-    viewRef.current?.setJobs(jobs, numbers.current, focusJob);
-  }, [state?.jobs, focusJob]);
+    const open = jobs.filter((j) => busyJob(j) || j.status === 'error');
+    const labels = new Map(
+      open.map((j) => {
+        const o = objects.find((x) => x.id === (j.detach ?? j.object));
+        return [j.id, o ? (j.detach ? `Фон под «${short(o.name, 20)}»` : short(o.name, 24)) : 'Новый слой'];
+      }),
+    );
+    viewRef.current?.setJobs(open, labels);
+  }, [state?.jobs, state?.objects]);
+  // Законченная генерация больше не нужна: её варианты — версии слоёв. Задачи с ошибкой остаются, пока их не уберут
+  const discarded = useRef(new Set<string>());
+  useEffect(() => {
+    for (const j of jobs) {
+      if (j.status !== 'done' || busyJob(j) || discarded.current.has(j.id)) continue;
+      discarded.current.add(j.id);
+      post(`/api/jobs/${j.id}/discard`).catch(() => discarded.current.delete(j.id));
+    }
+  }, [state?.jobs]);
   // Скрытая или удалённая версия маску больше не правит
   useEffect(() => {
     if (maskLayer && !editedLayer) setMaskLayer(null);
@@ -687,8 +699,7 @@ export function App() {
       return;
     }
     try {
-      const { id: job } = await post<{ id: string }>(`/api/objects/${o.id}/detach`, { variants, model, size: sizeFor(model) });
-      setFocusJob(job);
+      await post(`/api/objects/${o.id}/detach`, { variants, model, size: sizeFor(model) });
     } catch (err) {
       fail(err);
     }
@@ -743,7 +754,7 @@ export function App() {
       return;
     }
     try {
-      const { id } = await post<{ id: string }>('/api/jobs', {
+      await post('/api/jobs', {
         shapes: selection,
         object: activeObj?.id,
         prompt,
@@ -762,7 +773,6 @@ export function App() {
       setPrompt('');
       setRefs([]);
       setHide(false);
-      setFocusJob(id);
     } catch (err) {
       fail(err);
     }
@@ -1056,7 +1066,6 @@ export function App() {
   };
 
   const focus = (job: JobDto) => {
-    setFocusJob(job.id);
     const r = job.inside ?? job.bbox;
     if (r) viewRef.current?.showRect(r);
   };
@@ -1083,8 +1092,7 @@ export function App() {
         return;
       }
       const count = countFor(change.director ?? patch.directed !== undefined);
-      const { id } = await post<{ id: string }>(`/api/history/${patch.id}/variants`, { variants: count, model, size: sizeFor(model), ...change });
-      setFocusJob(id);
+      await post(`/api/history/${patch.id}/variants`, { variants: count, model, size: sizeFor(model), ...change });
       viewRef.current?.showRect(patch.rect);
     } catch (err) {
       fail(err);
@@ -1110,8 +1118,6 @@ export function App() {
       })
       .catch(fail);
   };
-
-  const sortedJobs = [...jobs].sort((a, b) => (numbers.current.get(b.id) ?? 0) - (numbers.current.get(a.id) ?? 0));
 
   return (
     <div class="app">
@@ -1489,41 +1495,14 @@ export function App() {
               </button>
             </section>
 
-            {jobs.length > 0 && (
-              <section class="panel">
-                <h2>
-                  Очередь <span class="dim">{jobs.length}</span>
-                </h2>
-                {sortedJobs.map((job) => (
-                  <JobCard
-                    key={job.id}
-                    job={job}
-                    canDirect={canDirect}
-                    target={job.detach ? `Фон под «${objects.find((o) => o.id === job.detach)?.name ?? '…'}»` : (objects.find((o) => o.id === job.object)?.name ?? null)}
-                    number={numbers.current.get(job.id) ?? 0}
-                    focused={job.id === focusJob}
-                    variants={variants}
-                    steps={steps}
-                    onFocus={() => focus(job)}
-                    onRedo={(change) => {
-                      if (needsKey(job.model) && !state?.hasKey) setDialog('settings');
-                      else redoJob(job, change).catch(fail);
-                    }}
-                    onAction={(action) => {
-                      post(`/api/jobs/${job.id}/${action}`, action === 'more' ? { count: countFor(job.director) } : undefined).catch(fail);
-                    }}
-                  />
-                ))}
-              </section>
-            )}
-
             <LayersPanel
+              doc={doc}
               objects={objects}
               patches={layers}
-              selected={active}
-              following={!!segment?.following}
+              jobs={jobs}
+              active={active}
+              picked={selectedObjects}
               maskLayer={maskLayer}
-              detaching={new Set(jobs.flatMap((j) => (j.detach && (j.status === 'queued' || j.status === 'preparing' || j.status === 'running') ? [j.detach] : [])))}
               canDirect={canDirect}
               variants={variants}
               steps={steps}
@@ -1539,6 +1518,12 @@ export function App() {
               onDeleteVersion={deleteVersion}
               onMergeDown={mergeDown}
               onDelete={deleteObject}
+              onMerge={() => void mergeLayers()}
+              onJob={(job, action) => {
+                if ((action === 'retry' || action === 'more') && needsKey(job.model) && !state?.hasKey) setDialog('settings');
+                else post(`/api/jobs/${job.id}/${action}`, action === 'more' ? { count: countFor(job.director) } : undefined).catch(fail);
+              }}
+              onShowJob={focus}
             />
           </>
         )}
@@ -1599,126 +1584,6 @@ export function App() {
         }}
       />
     </div>
-  );
-}
-
-type JobAction = 'discard' | 'retry' | 'more' | 'stop';
-
-/** Задача в очереди: ход генерации; готовые варианты сразу ложатся версиями слоя */
-function JobCard(props: {
-  job: JobDto;
-  /** Директор доступен: есть Codex */
-  canDirect: boolean;
-  /** Куда ложатся версии: слой (имя), заплатка фона; null — новый слой появится из выделения */
-  target: string | null;
-  number: number;
-  focused: boolean;
-  /** Сколько вариантов сгенерировать; с директором — сколько шагов */
-  variants: number;
-  steps: number;
-  onFocus: () => void;
-  onAction: (action: JobAction) => void;
-  onRedo: (change: RedoChange) => void;
-}) {
-  const { job } = props;
-  const [redoing, setRedoing] = useState(false);
-  const done = job.variants.filter((v) => v.status === 'done');
-  const running = job.variants.filter((v) => v.status === 'running').length;
-  const selected = job.variants[job.selected];
-  const busy = job.status === 'queued' || job.status === 'preparing' || job.status === 'running';
-  // Текст директора и критика — того варианта, что на холсте; пока вариантов нет — директора для следующих
-  const directed = (selected?.status === 'done' ? selected.directed : undefined) ?? job.directed;
-  const critique = selected?.status === 'done' ? selected.critique : undefined;
-  const count = job.director ? props.steps : props.variants;
-  // Поправить задачу можно, когда новых вариантов не ждём
-  const canRedo = ((job.status === 'done' && running === 0) || job.status === 'error') && !job.chain;
-  useEffect(() => {
-    if (!canRedo) setRedoing(false);
-  }, [canRedo]);
-
-  return (
-    <article class={`job ${job.status}${props.focused ? ' focused' : ''}`} onClick={props.onFocus}>
-      <header>
-        <span class="job-number">#{props.number}</span>
-        <p class="job-prompt">{job.prompt}</p>
-        {canRedo && (
-          <button
-            class={redoing ? 'icon redo-toggle active' : 'icon redo-toggle'}
-            title={`Поправить задачу и сгенерировать ещё ${countText(job.director, count)}`}
-            aria-label="Поправить задачу"
-            aria-pressed={redoing}
-            onClick={(e) => {
-              e.stopPropagation();
-              setRedoing((v) => !v);
-            }}
-          >
-            <IconPencil size={16} stroke={STROKE} />
-          </button>
-        )}
-      </header>
-      {directed && !redoing && <Note label="Директор" text={directed} />}
-      {critique && !redoing && <Note label={critique.done ? 'Критик: готово' : 'Критик'} text={critique.text} />}
-      {redoing && canRedo && (
-        <RedoForm
-          prompt={job.prompt}
-          hide={job.hide}
-          director={job.director}
-          canDirect={props.canDirect}
-          variants={props.variants}
-          steps={props.steps}
-          onCancel={() => setRedoing(false)}
-          onSubmit={(change) => {
-            setRedoing(false);
-            props.onRedo(change);
-          }}
-        />
-      )}
-      <p class="job-status">
-        {jobStatus(job)}
-        {(job.status === 'running' || job.status === 'done') && !job.chain && job.variants.length > 0 && `, готово ${done.length} из ${job.variants.length}`}
-        {(busy || job.chain || running > 0) && `, ${clock(Date.now() - Date.parse(job.createdAt))}`}
-        {job.modelSize && <span class="dim">, {[job.imageSize, MODELS.find((m) => m.id === job.model)?.tag].filter(Boolean).join(' ')}</span>}
-        {job.refs > 0 && <span class="dim">, референсов: {job.refs}</span>}
-        {job.sketch && <span class="dim">, с наброском</span>}
-        {job.hide && <span class="dim">, под маской стёрто</span>}
-      </p>
-      <p class="hint">{props.target ? `В слой «${short(props.target)}»` : 'Новым слоем'}</p>
-      {job.error && <p class="job-error">{job.error}</p>}
-      {job.warnings.map((w) => (
-        <p class="job-warning">{w}</p>
-      ))}
-      {selected?.status === 'done' && selected.insideChangedPct !== undefined && selected.insideChangedPct < 2 && (
-        <p class="job-warning">
-          Модель почти ничего не изменила
-          <Help>Опишите, что должно получиться, а не что исправить, или выделите область поменьше.</Help>
-        </p>
-      )}
-      <div class="row" onClick={(e) => e.stopPropagation()}>
-        {job.chain ? (
-          <button title="Готовые шаги останутся версиями" onClick={() => props.onAction('stop')}>
-            Остановить
-          </button>
-        ) : (
-          job.status === 'done' && (
-            <button
-              onClick={() => props.onAction('more')}
-              disabled={running > 0}
-              title={job.director ? `Ещё ${countText(true, count)} от текущей версии` : `Ещё ${countText(false, count)}`}
-            >
-              {job.director ? 'Ещё шаги' : 'Ещё варианты'}
-            </button>
-          )
-        )}
-        {job.status === 'error' && (
-          <button class="primary" onClick={() => props.onAction(job.inside ? 'more' : 'retry')}>
-            Повторить
-          </button>
-        )}
-        <button title={busy ? 'Отменить генерацию' : 'Убрать из очереди: версии останутся в слое'} onClick={() => props.onAction('discard')}>
-          {busy ? 'Отменить' : 'Убрать'}
-        </button>
-      </div>
-    </article>
   );
 }
 
@@ -1821,40 +1686,44 @@ function SegmentBanner(props: { segment: StateDto['segment']; onError: (err: unk
   );
 }
 
-/** Переключатель версий слоя: исходник и версии по кругу */
-function VersionSwitch(props: { object: ObjectDto; onCurrent: (patch: string | null) => void }) {
-  const { object } = props;
-  const all: (string | null)[] = [null, ...object.versions];
-  const i = all.indexOf(object.current ?? null);
-  const step = (dir: number) => props.onCurrent(all[(i + dir + all.length) % all.length] ?? null);
+type JobAction = 'discard' | 'retry' | 'more' | 'stop';
+
+/** У задачи что-то идёт: законченные интерфейс убирает сам — их варианты уже версии слоёв */
+function busyJob(job: JobDto): boolean {
+  return job.status === 'queued' || job.status === 'preparing' || job.status === 'running' || !!job.chain || job.variants.some((v) => v.status === 'running');
+}
+
+/** Сколько плиток «идёт» у задачи: по одной на вариант в работе; пока вариантов нет — одна */
+function runningTiles(job: JobDto): number {
+  if (!busyJob(job)) return 0;
+  return job.variants.filter((v) => v.status === 'running').length || 1;
+}
+
+/** Миниатюра слоя или версии; без картинки — значок */
+function Thumb(props: { src?: string; icon?: Icon; spin?: boolean }) {
+  const Glyph = props.icon ?? IconStack2;
   return (
-    <span class="versions" onClick={(e) => e.stopPropagation()}>
-      <button class="icon" aria-label="Предыдущая версия" title="Предыдущая версия" onClick={() => step(-1)}>
-        <IconChevronLeft size={14} stroke={STROKE} />
-      </button>
-      <span title="Версия на холсте">{object.current ? `${i} из ${object.versions.length}` : 'Исходник'}</span>
-      <button class="icon" aria-label="Следующая версия" title="Следующая версия" onClick={() => step(1)}>
-        <IconChevronRight size={14} stroke={STROKE} />
-      </button>
+    <span class="thumb">
+      {props.src ? <img src={props.src} alt="" draggable={false} /> : <Glyph size={16} stroke={STROKE} class={props.spin ? 'spin' : undefined} aria-hidden="true" />}
     </span>
   );
 }
 
 /**
- * Слои и фон под ними. Слой — кусок картинки со своими пикселями: щелчок — работа в нём (генерация ляжет его версией),
- * ⌘ или Shift — добавить к выделению, двойной щелчок — переименовать. У слоя — видимость, версии (исходник и генерации),
- * маска текущей версии и меню
+ * Слои: строка — миниатюра того, что видно, имя и глаз. Слой, в котором работают, раскрыт (LayerCard). Генерация нового
+ * слоя — строкой сверху, пока слой не появится. Shift-щелчок — слой в выделение; два и больше — «Объединить». Заплатки
+ * фона — в карточке своего слоя, внизу — фон
  */
 function LayersPanel(props: {
+  doc: DocDto;
   objects: ObjectDto[];
   patches: PatchDto[];
-  /** Слой, в котором работают */
-  selected: string | null;
-  following: boolean;
+  jobs: JobDto[];
+  active: string | null;
+  /** Слои в выделении: Shift-щелчком в списке */
+  picked: Set<string>;
   /** Версия, маску которой правят */
   maskLayer: string | null;
-  /** Слои, под которыми сейчас рисуется фон */
-  detaching: Set<string>;
   canDirect: boolean;
   variants: number;
   steps: number;
@@ -1870,106 +1739,83 @@ function LayersPanel(props: {
   onDeleteVersion: (patch: PatchDto) => void;
   onMergeDown: (o: ObjectDto) => void;
   onDelete: (o: ObjectDto) => void;
+  onMerge: () => void;
+  onJob: (job: JobDto, action: JobAction) => void;
+  onShowJob: (job: JobDto) => void;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
-  const [menu, setMenu] = useState<string | null>(null);
-  const [redoing, setRedoing] = useState<string | null>(null);
-  /** Скрыть просили у слоя, под которым нет фона: сначала спросить */
+  /** Скрыть просили у слоя-копии, под которым нет фона: сначала спросить */
   const [asking, setAsking] = useState<string | null>(null);
-  const patch = (id: string | undefined) => (id ? props.patches.find((p) => p.id === id) : undefined);
-  const content = props.objects.filter((o) => o.kind !== 'fill');
-  const fills = props.objects.filter((o) => o.kind === 'fill');
-  const ids = new Set(content.map((o) => o.id));
+  const patches = new Map(props.patches.map((p) => [p.id, p]));
+  const ids = new Set(props.objects.map((o) => o.id));
+  // Заплатка фона — в карточке своего слоя; осталась без него — строкой
+  const fills = new Map(props.objects.flatMap((o) => (o.kind === 'fill' && o.under && ids.has(o.under) ? [[o.under, o] as const] : [])));
+  const rows = props.objects.filter((o) => !(o.kind === 'fill' && o.under && ids.has(o.under)));
+  const rowIds = new Set(rows.map((o) => o.id));
   const children = new Map<string | undefined, ObjectDto[]>();
-  for (const o of [...content].reverse()) {
-    const parent = o.parent && ids.has(o.parent) ? o.parent : undefined;
+  for (const o of [...rows].reverse()) {
+    const parent = o.parent && rowIds.has(o.parent) ? o.parent : undefined;
     children.set(parent, [...(children.get(parent) ?? []), o]);
   }
+  const thumb = (p: PatchDto | undefined) => p && `/api/history/${p.id}/thumb.png?doc=${props.doc.id}&m=${p.maskRev}`;
+  // Генерации новых слоёв — пока слоя нет
+  const pending = props.jobs.filter((j) => !j.object && !j.detach);
+  const picked = new Set([...props.picked, ...(props.active ? [props.active] : [])]);
 
   const row = (o: ObjectDto, depth: number) => {
-    const current = patch(o.current);
-    const fill = o.kind === 'fill';
-    // Под неотделённым слоем исходник — то же, что под ним: скрыть его нечем, нужен фон
-    const needsFill = !fill && !o.filled && !o.current && !o.hidden;
-    const items: { label: string; run: () => void; danger?: boolean }[] = [
-      ...(current
-        ? [
-            { label: 'Ещё варианты', run: () => props.onMore(current) },
-            { label: 'Поправить задачу…', run: () => setRedoing(o.id) },
-            { label: 'Расширить по правке', run: () => props.onExpand(current) },
-          ]
-        : []),
-      ...(!fill && !props.detaching.has(o.id) ? [{ label: o.filled ? 'Ещё варианты фона' : 'Дорисовать фон под слоем', run: () => props.onFill(o) }] : []),
-      ...(!o.hidden ? [{ label: 'Влить в фон', run: () => props.onMergeDown(o) }] : []),
-      ...(current ? [{ label: 'Удалить версию', run: () => props.onDeleteVersion(current), danger: true }] : []),
-      { label: fill ? 'Удалить заплатку' : o.filled ? 'Убрать с холста' : 'Удалить слой', run: () => props.onDelete(o), danger: true },
-    ];
+    const active = props.active === o.id;
+    const busy = props.jobs.some((j) => (j.object === o.id || j.detach === o.id) && busyJob(j));
+    const failed = props.jobs.some((j) => j.object === o.id && j.status === 'error');
+    // Копия без фона: скрой её — под ней то же самое
+    const needsFill = o.kind !== 'fill' && !o.filled && !o.current && !o.hidden;
     return (
       <Fragment key={o.id}>
         <li
-          class={[props.selected === o.id ? 'selected' : '', o.lost ? 'lost' : '', o.hidden ? 'off' : '', current && props.maskLayer === current.id ? 'editing' : '']
-            .filter(Boolean)
-            .join(' ')}
+          class={['layer', active ? 'active' : '', !active && props.picked.has(o.id) ? 'picked' : '', o.hidden ? 'off' : '', o.lost ? 'lost' : ''].filter(Boolean).join(' ')}
           data-layer={o.id}
-          style={{ paddingLeft: `${2 + depth * 16}px` }}
           onPointerEnter={() => props.onHover(o)}
           onPointerLeave={() => props.onHover(null)}
         >
-          <button
-            class="layer-icon"
-            title={o.hidden ? 'Показать слой' : 'Скрыть слой'}
-            aria-label="Показывать слой"
-            aria-pressed={!o.hidden}
-            onClick={() => (needsFill ? setAsking(asking === o.id ? null : o.id) : props.onHidden(o, !o.hidden))}
+          <div
+            class="layer-row"
+            style={{ paddingLeft: `${6 + depth * 16}px` }}
+            title={o.lost ? 'После правки слой не нашёлся: маска прежняя' : 'Работать в слое; Shift — добавить к выделению; двойной щелчок — переименовать'}
+            onClick={(e) => props.onSelect(o, e.metaKey || e.ctrlKey || e.shiftKey)}
+            onDblClick={() => setEditing(o.id)}
           >
-            {o.hidden ? <IconEyeOff size={18} stroke={STROKE} /> : <IconEye size={18} stroke={STROKE} />}
-          </button>
-          {editing === o.id ? (
-            <RenameField
-              value={o.name}
-              onDone={(name) => {
-                setEditing(null);
-                if (name && name !== o.name) props.onRename(o, name);
-              }}
-            />
-          ) : (
-            <button
-              class="link"
-              title={o.lost ? 'После правки слой не нашёлся: маска прежняя' : 'Работать в слое; ⌘ — добавить к выделению; двойной щелчок — переименовать'}
-              onClick={(e) => props.onSelect(o, e.metaKey || e.ctrlKey || e.shiftKey)}
-              onDblClick={() => setEditing(o.id)}
-            >
-              {o.filled && <IconArrowsMove size={13} stroke={STROKE} class="layer-kind" aria-label="Под ним фон: можно сдвигать" />}
-              {o.name}
-            </button>
-          )}
-          {o.versions.length > 0 ? <VersionSwitch object={o} onCurrent={(p) => props.onCurrent(o, p)} /> : <span />}
-          <button
-            class={current && props.maskLayer === current.id ? 'layer-icon active' : 'layer-icon'}
-            title={current ? 'Править маску версии' : 'У исходника маски нет'}
-            aria-label="Править маску версии"
-            disabled={!current || o.hidden}
-            onClick={() => current && props.onMask(current)}
-          >
-            <IconMask size={18} stroke={STROKE} />
-          </button>
-          <span class="menu-anchor">
-            <button class="layer-icon" title="Ещё" aria-label="Ещё" aria-expanded={menu === o.id} onClick={() => setMenu(menu === o.id ? null : o.id)}>
-              <IconDots size={18} stroke={STROKE} />
-            </button>
-            {menu === o.id && (
-              <ul class="layer-menu" role="menu" onClick={() => setMenu(null)}>
-                {items.map((item) => (
-                  <li role="menuitem" class={item.danger ? 'danger' : ''} onClick={item.run}>
-                    {item.label}
-                  </li>
-                ))}
-              </ul>
+            <Thumb src={thumb(patches.get(o.current ?? o.layer ?? ''))} />
+            {editing === o.id ? (
+              <RenameField
+                value={o.name}
+                onDone={(name) => {
+                  setEditing(null);
+                  if (name && name !== o.name) props.onRename(o, name);
+                }}
+              />
+            ) : (
+              <span class="layer-name">{o.name}</span>
             )}
-          </span>
+            {busy && <IconLoader2 size={15} stroke={STROKE} class="spin layer-badge" aria-label="Идёт генерация" />}
+            {failed && !busy && <IconAlertTriangle size={15} stroke={STROKE} class="layer-badge error" aria-label="Генерация с ошибкой" />}
+            {o.filled && <IconPhoto size={14} stroke={STROKE} class="layer-badge" aria-label="Под ним дорисован фон" />}
+            {!active && props.picked.has(o.id) && <IconCheck size={15} stroke={STROKE} class="layer-badge picked" aria-label="В выделении" />}
+            <button
+              class="layer-icon"
+              title={o.hidden ? 'Показать слой' : 'Скрыть слой'}
+              aria-label="Показывать слой"
+              aria-pressed={!o.hidden}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (needsFill) setAsking(asking === o.id ? null : o.id);
+                else props.onHidden(o, !o.hidden);
+              }}
+            >
+              {o.hidden ? <IconEyeOff size={17} stroke={STROKE} /> : <IconEye size={17} stroke={STROKE} />}
+            </button>
+          </div>
           {asking === o.id && (
             <div class="layer-ask">
-              Под слоем нет фона
+              Под слоем то же самое: фона нет
               <button
                 onClick={() => {
                   setAsking(null);
@@ -1978,26 +1824,17 @@ function LayersPanel(props: {
               >
                 Дорисовать фон
               </button>
-              <button onClick={() => setAsking(null)}>Отмена</button>
-            </div>
-          )}
-          {redoing === o.id && current && (
-            <div class="layer-redo">
-              <RedoForm
-                prompt={current.prompt}
-                hide={current.hide ?? false}
-                director={current.directed !== undefined}
-                canDirect={props.canDirect}
-                variants={props.variants}
-                steps={props.steps}
-                onCancel={() => setRedoing(null)}
-                onSubmit={(change) => {
-                  setRedoing(null);
-                  props.onMore(current, change);
+              <button
+                onClick={() => {
+                  setAsking(null);
+                  props.onHidden(o, true);
                 }}
-              />
+              >
+                Скрыть
+              </button>
             </div>
           )}
+          {active && <LayerCard {...props} object={o} fill={fills.get(o.id)} patchMap={patches} thumb={thumb} />}
         </li>
         {(children.get(o.id) ?? []).map((c) => row(c, depth + 1))}
       </Fragment>
@@ -2005,27 +1842,275 @@ function LayersPanel(props: {
   };
 
   return (
-    <section class="panel">
+    <section class="panel layers-panel">
       <h2>
         Слои
-        {props.following && <span class="dim">пересчитываю…</span>}
         <Help>
           Слой — кусок картинки со своими пикселями поверх остального. Щелчок по слою здесь или палочкой на холсте — работа в нём:
-          палочка ищет только в нём, генерация ложится его версией. Палочка по фону ищет мимо слоёв, генерация там даёт новый слой.
-          ⌘J — копия выделенного новым слоем; ⌘⇧J — вырезать: под слоем дорисуется фон, его можно сдвигать (V) и скрывать.
-          Стрелки у слоя — версии; удерживайте «\», чтобы увидеть исходник всей картинки.
+          палочка ищет только в нём, генерация ложится его версией. Версии — миниатюры под слоем: щелчок показывает версию, «+» —
+          ещё варианты. ⌘J — копия выделенного новым слоем, ⌘⇧J — вырезать: под слоем дорисуется фон. Shift-щелчок — несколько
+          слоёв, ⌘E их объединяет. «\» — исходник всей картинки, пока держите.
         </Help>
       </h2>
-      {menu && <div class="click-catcher" onClick={() => setMenu(null)} />}
-      <ol class="layers tree">
+      <ol class="layers">
+        {pending.map((j) => {
+          const error = j.status === 'error';
+          return (
+            <li class={error ? 'layer pending error' : 'layer pending'} key={j.id}>
+              <div class="layer-row" title="Показать, где" onClick={() => props.onShowJob(j)}>
+                <Thumb icon={error ? IconAlertTriangle : IconLoader2} spin={!error} />
+                <span class="layer-name">{j.prompt}</span>
+                {!error && <span class="dim">{clock(Date.now() - Date.parse(j.createdAt))}</span>}
+                <button
+                  class="layer-icon"
+                  title={error ? 'Убрать' : 'Отменить генерацию'}
+                  aria-label={error ? 'Убрать' : 'Отменить генерацию'}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    props.onJob(j, 'discard');
+                  }}
+                >
+                  <IconX size={16} stroke={STROKE} />
+                </button>
+              </div>
+              {error ? (
+                <div class="layer-status error">
+                  <p>{j.error}</p>
+                  <button class="small primary" onClick={() => props.onJob(j, j.inside ? 'more' : 'retry')}>
+                    Повторить
+                  </button>
+                </div>
+              ) : (
+                <p class="layer-sub">{jobStatus(j)} · новый слой</p>
+              )}
+            </li>
+          );
+        })}
         {(children.get(undefined) ?? []).map((o) => row(o, 0))}
-        <li class="background">
-          <IconPhoto size={18} stroke={STROKE} aria-hidden="true" />
-          <span>Фон</span>
+        <li class="layer background">
+          <div class="layer-row">
+            <Thumb src={`/api/doc/base/${props.doc.levels - 1}/0/0.jpg?doc=${props.doc.id}&base=${props.doc.baseState}`} />
+            <span class="layer-name">Фон</span>
+          </div>
         </li>
-        {[...fills].reverse().map((o) => row(o, 1))}
       </ol>
+      {picked.size >= 2 && (
+        <div class="merge-bar">
+          <span>
+            {picked.size} {plural(picked.size, 'слой', 'слоя', 'слоёв')}
+          </span>
+          <button onClick={props.onMerge} title="Одним слоем из того, что сейчас видно; версии уйдут (⌘E)">
+            Объединить
+          </button>
+        </div>
+      )}
     </section>
+  );
+}
+
+/**
+ * Слой, в котором работают: версии миниатюрами (исходник, генерации, идущие и с ошибкой, «+» — ещё варианты текущей),
+ * задача текущей версии с директором и критиком, ход генерации, фон под слоем и действия
+ */
+function LayerCard(props: {
+  object: ObjectDto;
+  fill?: ObjectDto;
+  patchMap: Map<string, PatchDto>;
+  thumb: (p: PatchDto | undefined) => string | undefined;
+  jobs: JobDto[];
+  maskLayer: string | null;
+  canDirect: boolean;
+  variants: number;
+  steps: number;
+  onCurrent: (o: ObjectDto, patch: string | null) => void;
+  onMask: (patch: PatchDto) => void;
+  onMore: (patch: PatchDto, change?: RedoChange) => void;
+  onExpand: (patch: PatchDto) => void;
+  onFill: (o: ObjectDto) => void;
+  onDeleteVersion: (patch: PatchDto) => void;
+  onMergeDown: (o: ObjectDto) => void;
+  onDelete: (o: ObjectDto) => void;
+  onJob: (job: JobDto, action: JobAction) => void;
+}) {
+  const { object: o, fill } = props;
+  const [redoing, setRedoing] = useState(false);
+  const [menu, setMenu] = useState(false);
+  const current = o.current ? props.patchMap.get(o.current) : undefined;
+  const jobs = props.jobs.filter((j) => j.object === o.id && !j.detach);
+  const fillJobs = props.jobs.filter((j) => j.detach === o.id);
+  // Что про вариант знает задача, пока она есть: правка почти не случилась
+  const weak = new Set(props.jobs.flatMap((j) => j.variants.flatMap((v) => (v.patch && v.insideChangedPct !== undefined && v.insideChangedPct < 2 ? [v.patch] : []))));
+  const count = (director: boolean) => (director ? props.steps : props.variants);
+  const tile = (key: string, label: string, p: PatchDto | undefined, on: boolean, title: string, pick: () => void) => (
+    <button key={key} class={['vtile', on ? 'on' : '', p && weak.has(p.id) ? 'weak' : ''].filter(Boolean).join(' ')} title={title} aria-pressed={on} onClick={pick}>
+      {p ? (
+        <>
+          <img src={props.thumb(p)} alt="" draggable={false} />
+          <span class="vtile-n">{label}</span>
+        </>
+      ) : (
+        <span>{label}</span>
+      )}
+    </button>
+  );
+  const spinners = (js: JobDto[]) =>
+    js.flatMap((j) =>
+      Array.from({ length: runningTiles(j) }, (_, i) => (
+        <span key={`${j.id}:${i}`} class="vtile wait" title={jobStatus(j)}>
+          <IconLoader2 size={16} stroke={STROKE} class="spin" aria-hidden="true" />
+        </span>
+      )),
+    );
+
+  return (
+    <div class="layer-card">
+      <div class="version-strip">
+        {tile('src', 'исх', o.layer ? props.patchMap.get(o.layer) : undefined, !o.current, o.layer ? 'Исходник слоя: копия того, что было видно' : 'Исходник: то, что под слоем', () => props.onCurrent(o, null))}
+        {o.versions.map((id, i) => {
+          const p = props.patchMap.get(id);
+          return tile(id, String(i + 1), p, o.current === id, p?.prompt ?? '', () => props.onCurrent(o, id));
+        })}
+        {spinners(jobs)}
+        {jobs
+          .filter((j) => j.status === 'error')
+          .map((j) => (
+            <span key={j.id} class="vtile failed" title={j.error}>
+              <IconAlertTriangle size={16} stroke={STROKE} aria-hidden="true" />
+            </span>
+          ))}
+        {current && !jobs.some(busyJob) && (
+          <button
+            class="vtile add"
+            title={current.directed !== undefined ? `Ещё ${countText(true, count(true))} от текущей версии` : `Ещё ${countText(false, count(false))} с той же задачей`}
+            aria-label="Ещё варианты"
+            onClick={() => props.onMore(current)}
+          >
+            <IconPlus size={16} stroke={STROKE} />
+          </button>
+        )}
+      </div>
+
+      {current && !redoing && (
+        <div class="layer-task">
+          <p title={current.prompt}>{current.prompt}</p>
+          <button class="icon" title="Поправить задачу и сгенерировать ещё" aria-label="Поправить задачу" onClick={() => setRedoing(true)}>
+            <IconPencil size={15} stroke={STROKE} />
+          </button>
+        </div>
+      )}
+      {current?.directed && !redoing && <Note label="Директор" text={current.directed} />}
+      {current?.critique && !redoing && <Note label={current.critique.done ? 'Критик: готово' : 'Критик'} text={current.critique.text} />}
+      {redoing && current && (
+        <RedoForm
+          prompt={current.prompt}
+          hide={current.hide ?? false}
+          director={current.directed !== undefined}
+          canDirect={props.canDirect}
+          variants={props.variants}
+          steps={props.steps}
+          onCancel={() => setRedoing(false)}
+          onSubmit={(change) => {
+            setRedoing(false);
+            props.onMore(current, change);
+          }}
+        />
+      )}
+      {current && weak.has(current.id) && (
+        <p class="job-warning">
+          Модель почти ничего не изменила
+          <Help>Опишите, что должно получиться, а не что исправить, или выделите область поменьше.</Help>
+        </p>
+      )}
+
+      {[...jobs, ...fillJobs].filter(busyJob).map((j) => (
+        <div class="layer-status" key={j.id}>
+          <span>
+            {j.detach ? 'Фон: ' : ''}
+            {jobStatus(j)}, {clock(Date.now() - Date.parse(j.createdAt))}
+          </span>
+          {j.chain && (
+            <button class="small" title="Готовые шаги останутся версиями" onClick={() => props.onJob(j, 'stop')}>
+              Остановить
+            </button>
+          )}
+          <button class="small" title="Готовые варианты останутся версиями" onClick={() => props.onJob(j, 'discard')}>
+            Отменить
+          </button>
+        </div>
+      ))}
+      {[...jobs, ...fillJobs]
+        .filter((j) => j.status === 'error')
+        .map((j) => (
+          <div class="layer-status error" key={j.id}>
+            <p>{j.error}</p>
+            <button class="small primary" onClick={() => props.onJob(j, j.inside ? 'more' : 'retry')}>
+              Повторить
+            </button>
+            <button class="small" onClick={() => props.onJob(j, 'discard')}>
+              Убрать
+            </button>
+          </div>
+        ))}
+
+      {(fill || fillJobs.some(busyJob)) && (
+        <div class="version-strip fill-strip">
+          <span class="strip-label">Фон</span>
+          {fill?.versions.map((id, i) => {
+            const p = props.patchMap.get(id);
+            return tile(id, String(i + 1), p, fill.current === id, 'Вариант фона под слоем', () => props.onCurrent(fill, id));
+          })}
+          {spinners(fillJobs)}
+          {fill && !fillJobs.some(busyJob) && (
+            <button class="vtile add" title="Ещё варианты фона" aria-label="Ещё варианты фона" onClick={() => props.onFill(o)}>
+              <IconPlus size={16} stroke={STROKE} />
+            </button>
+          )}
+        </div>
+      )}
+
+      <div class="layer-tools">
+        <button
+          class={current && props.maskLayer === current.id ? 'icon active' : 'icon'}
+          title={current ? 'Править маску версии' : 'У исходника маски нет'}
+          aria-label="Править маску версии"
+          disabled={!current || o.hidden}
+          onClick={() => current && props.onMask(current)}
+        >
+          <IconMask size={17} stroke={STROKE} />
+        </button>
+        {!fill && o.kind !== 'fill' && (
+          <button class="icon" title="Дорисовать фон под слоем: его можно будет сдвигать и скрывать" aria-label="Дорисовать фон под слоем" disabled={fillJobs.some(busyJob)} onClick={() => props.onFill(o)}>
+            <IconPhoto size={17} stroke={STROKE} />
+          </button>
+        )}
+        <button class="icon" title="Влить в фон" aria-label="Влить в фон" disabled={o.hidden} onClick={() => props.onMergeDown(o)}>
+          <IconArrowBarToDown size={17} stroke={STROKE} />
+        </button>
+        <button class="icon" title={o.filled ? 'Убрать с холста' : 'Удалить слой'} aria-label="Удалить слой" onClick={() => props.onDelete(o)}>
+          <IconTrash size={17} stroke={STROKE} />
+        </button>
+        {current && (
+          <span class="menu-anchor">
+            <button class="icon" title="Ещё" aria-label="Ещё" aria-expanded={menu} onClick={() => setMenu(!menu)}>
+              <IconDots size={17} stroke={STROKE} />
+            </button>
+            {menu && (
+              <>
+                <div class="click-catcher" onClick={() => setMenu(false)} />
+                <ul class="layer-menu" role="menu" onClick={() => setMenu(false)}>
+                  <li role="menuitem" onClick={() => props.onExpand(current)}>
+                    Расширить по правке
+                  </li>
+                  <li role="menuitem" class="danger" onClick={() => props.onDeleteVersion(current)}>
+                    Удалить версию
+                  </li>
+                </ul>
+              </>
+            )}
+          </span>
+        )}
+      </div>
+    </div>
   );
 }
 

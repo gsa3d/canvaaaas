@@ -152,6 +152,8 @@ export interface PatchDto {
   hide?: boolean;
   /** Задача, как её расписал директор */
   directed?: string;
+  /** Что критик сказал о версии */
+  critique?: { done: boolean; text: string };
   /** С правкой ушёл набросок */
   sketch?: boolean;
   /** Правили этот объект: его маска была выделением */

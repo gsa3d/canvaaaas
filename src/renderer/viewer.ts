@@ -164,8 +164,8 @@ export class CanvasView {
   private sketchPx = 10;
   private sketchColor = '#ff3b30';
   private jobs: JobDto[] = [];
-  private numbers = new Map<string, number>();
-  private focused: string | null = null;
+  /** Подписи рамок идущих генераций: в какой слой */
+  private labels = new Map<string, string>();
   /** Правка маски слоя или задачи: участок показывает превью, кисть меняет его сразу */
   private edit: MaskPreview | null = null;
   /** Законченная правка: её превью видно, пока холст или слой задачи не догонят последние мазки */
@@ -375,10 +375,10 @@ export class CanvasView {
     };
   }
 
-  setJobs(jobs: JobDto[], numbers: Map<string, number>, focused: string | null): void {
+  /** Идущие генерации и генерации с ошибкой — рамками с подписью, в какой слой */
+  setJobs(jobs: JobDto[], labels: Map<string, string>): void {
     this.jobs = jobs;
-    this.numbers = numbers;
-    this.focused = focused;
+    this.labels = labels;
     this.redraw();
   }
 
@@ -1117,7 +1117,7 @@ export class CanvasView {
     const lit = this.highlight && !maskMode ? this.maskImage(this.highlight) : null;
     if (lit && this.highlight) glow(lit, this.highlight, 0.2);
 
-    // Области задач с номерами, как в очереди, и границы правимого слоя: за ними маску не расширить
+    // Области идущих генераций с подписью слоя и границы правимого слоя: за ними маску не расширить
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (this.draft?.pick && this.draft.points.length > 1) {
       const [a, b] = [this.draft.points[0]!, this.draft.points[this.draft.points.length - 1]!];
@@ -1146,7 +1146,7 @@ export class CanvasView {
       const r = job.inside ?? job.bbox;
       if (!r) continue;
       const color = job.status === 'error' ? ERROR : ACCENT;
-      frame(r, `#${this.numbers.get(job.id) ?? '?'}`, color, job.id === this.focused ? 2 : 1, job.status === 'done' ? [] : [6, 4]);
+      frame(r, this.labels.get(job.id) ?? '', color, 1, [6, 4]);
     }
     if (this.edit?.view.kind === 'layer') frame(this.edit.view.rect, 'Маска слоя', ACCENT, 2, [6, 4]);
     if (this.modelFrame && !maskMode) frame(this.modelFrame, 'Видит модель', MODEL_FRAME, 1, [3, 3]);
