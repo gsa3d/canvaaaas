@@ -188,8 +188,9 @@ describe('Объекты в сессии', () => {
       if (Date.now() - started > 15_000) throw new Error('Не дождались');
       await new Promise((r) => setTimeout(r, 50));
     }
-    // Рамка задачи — по маске объекта на сервере, а не по тому, что прислал интерфейс
-    expect(s.state().jobs[0]!.bbox).toEqual({ x: 138, y: 108, width: 124, height: 84 });
+    // Рамка задачи — по маске объекта на сервере, а не по тому, что прислал интерфейс; правят весь слой — с кольцом
+    // растушёвки вокруг него
+    expect(s.state().jobs[0]!.bbox).toEqual({ x: 138 - 24, y: 108 - 24, width: 124 + 48, height: 84 + 48 });
     // Первая версия слоя — его копия, вторая — правка
     const p = s.doc!.patches.find((x) => !x.lifted)!;
     expect(p.object).toBe(goose);

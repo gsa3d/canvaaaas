@@ -110,6 +110,8 @@ export type NewPatch = Omit<Patch, 'active' | 'mask' | 'feather' | 'maskVersion'
 interface MaskState {
   mask: Uint8Array;
   version: number;
+  /** Растушёвка этой маски; у маски, правленной рукой, — 0: маска и есть прозрачность (bakeMask) */
+  feather: number;
 }
 
 type HistoryOp =
@@ -428,10 +430,24 @@ export class CanvasDocument {
   setPatchMask(patchId: string, mask: Uint8Array, changed?: Rect): void {
     const patch = this.patch(patchId);
     if (mask.length !== patch.rect.width * patch.rect.height) throw new Error('Маска не того размера');
-    const before = { mask: patch.mask, version: patch.maskVersion };
-    const after = { mask, version: ++this.maskVersions };
+    const before = { mask: patch.mask, version: patch.maskVersion, feather: patch.feather };
+    const after = { mask, version: ++this.maskVersions, feather: patch.feather };
     this.applyMask(patch, after, changed);
     this.record({ kind: 'mask', patchId, before, after, changed });
+  }
+
+  /**
+   * Маска версии — сразу её прозрачность (альфа слоя), растушёвка 0. Так её правят рукой: край мазка — какой задала
+   * мягкость кисти, а не растушёвка вклейки поверх него. Картинка не меняется, поэтому и шага отмены нет:
+   * отмена прежних правок маски возвращает и их растушёвку (MaskState)
+   */
+  bakeMask(patchId: string): void {
+    const patch = this.patch(patchId);
+    if (!patch.feather) return;
+    const mask = new Uint8Array(patch.rect.width * patch.rect.height);
+    for (let i = 0; i < mask.length; i++) mask[i] = patch.layer[i * 4 + 3]!;
+    patch.mask = mask;
+    patch.feather = 0;
   }
 
   /** Новый список объектов — шаг отмены */
@@ -636,6 +652,7 @@ export class CanvasDocument {
   /** Поставить маску слою: альфа слоя пересчитывается с растушёвкой, участок пересобирается; changed — где маска менялась */
   private applyMask(patch: Patch, state: MaskState, changed?: Rect): void {
     const { width, height } = patch.rect;
+    patch.feather = state.feather;
     const { rect, alpha } = changed
       ? featherAlphaRegion(state.mask, width, height, patch.feather, changed)
       : { rect: { x: 0, y: 0, width, height }, alpha: featherAlpha(state.mask, width, height, patch.feather) };

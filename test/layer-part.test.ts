@@ -137,18 +137,18 @@ describe('Правка части слоя', () => {
     const first = doc.patch(doc.object(id).current!);
     expect(first.part).toBeUndefined();
     expect(first.base).toBe(lifted);
-    // В растушёвке у края слоя версия полупрозрачна, и под ней — белая дыра, а не прежний красный: он в версию
-    // не скопирован (с ним зелёный упал бы до ~135)
-    const at = (x: number, y: number) => ((y - first.rect.y) * first.rect.width + x - first.rect.x) * 4;
-    const alpha = first.layer[at(110, 150) + 3]!;
-    expect(alpha).toBeGreaterThan(50);
-    expect(alpha).toBeLessThan(200);
-    expect(px(doc, 110, 150)).toEqual([0, 1, 2].map((c) => Math.round(255 + ((first.layer[at(110, 150) + c]! - 255) * alpha) / 255)));
-    expect(px(doc, 110, 150)[1]).toBeGreaterThan(200);
+    // Маска шире слоя на растушёвку: слой непрозрачен до самого края, гаснет кольцо вокруг. Слой из-за кольца не вырос
+    const at = (x: number, y: number) => ((y - first.rect.y) * first.rect.width + x - first.rect.x) * 4 + 3;
+    expect(first.layer[at(99, 150)]).toBe(255);
+    expect(first.layer[at(150, 79)]).toBe(255);
+    expect(first.layer[at(85, 150)]).toBeGreaterThan(0);
+    expect(first.layer[at(85, 150)]).toBeLessThan(255);
+    expect(doc.object(id).rect).toEqual({ x: 98, y: 78, width: 204, height: 144 });
 
-    // Маска шире по ответу модели: на бывшем краю — ответ модели целиком, такой же, как глубже в слое
+    // «Расширить» берёт ответ модели за кольцом — пиксели модели, а не прежний слой
+    const before = first.mask.reduce((n, v) => n + (v >= 128 ? 1 : 0), 0);
     expect(await s.expandVersion(first.id)).toBeGreaterThan(0);
-    expect(px(doc, 110, 150)).toEqual(px(doc, 120, 150));
+    expect(doc.patch(first.id).mask.reduce((n, v) => n + (v >= 128 ? 1 : 0), 0)).toBeGreaterThan(before);
 
     // «Ещё варианты» — так же: модель снова видит прежний красный слой, версии его заменяют
     const more = s.patchVariants(first.id, { variants: 1, model: 'flash', size: 'auto' });
@@ -162,6 +162,9 @@ describe('Правка части слоя', () => {
     const mid = ((info.height >> 1) * info.width + (info.width >> 1)) * info.channels;
     expect(data[mid]).toBeGreaterThan(180);
     expect(data[mid + 1]).toBeLessThan(80);
+    // Кольцо то же, слой с каждой перерисовкой не раздувается
+    expect(doc.object(id).rect).toEqual({ x: 98, y: 78, width: 204, height: 144 });
+    expect(second.layer[((150 - second.rect.y) * second.rect.width + 99 - second.rect.x) * 4 + 3]).toBe(255);
 
     // Проект помнит, что видела модель
     const { doc: back } = await openProject(await encodeProject(doc), 'проект.caaa');
@@ -185,6 +188,22 @@ describe('Правка части слоя', () => {
     expect(third.part).toBeUndefined();
     expect(third.base).toBe(lifted);
   }, 30_000);
+
+  it('тонкий слой (ствол) после перерисовки всего слоя непрозрачен насквозь', async () => {
+    const W = 300;
+    const H = 300;
+    const page = Buffer.alloc(W * H * 3, 255);
+    for (let y = 60; y < 240; y++) for (let x = 144; x < 156; x++) page.set([90, 60, 30], (y * W + x) * 3);
+    const s = new Session('mock', envOnlyStore());
+    await s.openDocument(await sharp(page, { raw: { width: W, height: H, channels: 3 } }).png().toBuffer(), 'a.png');
+    const doc = s.doc!;
+    const id = await s.cutObject([{ kind: 'rect', x: 144, y: 60, width: 12, height: 180 }]);
+    s.createJob({ shapes: [{ kind: 'mask', id: `obj:${id}`, x: 0, y: 0, width: 1, height: 1 }], object: id, prompt: 'ствол', variants: 1, model: 'flash', size: 'auto' });
+    await until(() => s.state().jobs.at(-1)?.status === 'done');
+    const v = doc.patch(doc.object(id).current!);
+    // Растушёвка 24 px внутрь маски по самому слою (16 px шириной) оставила бы от него в лучшем случае пятую часть
+    for (let x = 142; x < 158; x++) expect(v.layer[((150 - v.rect.y) * v.rect.width + x - v.rect.x) * 4 + 3]).toBe(255);
+  }, 10_000);
 
   it('выделение за краем слоя — слой растёт; без слоя — новый слой', async () => {
     const s = new Session('mock', envOnlyStore());

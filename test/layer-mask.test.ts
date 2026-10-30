@@ -83,8 +83,8 @@ describe('Маска слоя', () => {
         expect(doc.composite.subarray(i, i + 3).equals(beneath.subarray(i, i + 3)), `${x},${y}`).toBe(true);
       }
     }
-    // Растушёвка внутрь: у края дыры слой полупрозрачный, дальше от неё — как был
-    expect(px(doc, hole.x + hole.width + 4, hole.y + 60)).not.toEqual(px(doc, hole.x + hole.width + 60, hole.y + 60));
+    // Край дыры чёткий: растушёвка вклейки на мазок не ложится, сразу за ним слой виден целиком
+    expect(px(doc, hole.x + hole.width, hole.y + 60)).toEqual([220, 30, 30]);
 
     const edit = s.editPatchMask('a', [{ kind: 'rect', x: R.x, y: R.y, width: 50, height: 50, erase: true }]);
     const undo = s.undo();
@@ -96,4 +96,64 @@ describe('Маска слоя', () => {
     expect(doc.composite.equals(withLayer)).toBe(true);
     expect(s.state().history.map((p) => p.maskRev)).toEqual([0, 0]);
   });
+
+  it('мазок ложится прямо в прозрачность версии: мягкость 0 — чёткий край, мягкая кисть — плавный; ⌘Z возвращает как было', async () => {
+    const s = new Session('mock', envOnlyStore());
+    await s.newDocument(W, H, [10, 20, 30]);
+    const doc = s.doc!;
+    doc.addPatch(accepted(leftHalf(), 24));
+    const withLayer = Buffer.from(doc.composite);
+    const key = doc.contentKey;
+    const alpha = (x: number) => doc.patch('a').layer[(150 * R.width + x) * 4 + 3]!;
+    const line = (x: number, size: number, softness: number, erase = false) =>
+      s.editPatchMask('a', [{ kind: 'stroke', points: [[R.x + x, R.y + 50], [R.x + x, R.y + 250]], size, softness, erase }]);
+
+    // Жёсткий ластик внутри маски: сразу за краем мазка версия видна целиком
+    await line(100, 40, 0, true);
+    expect([alpha(100), alpha(78), alpha(122)]).toEqual([0, 255, 255]);
+    // Жёсткая кисть за краем маски: тонкий мазок виден целиком, а не призраком (растушёвка 24 px оставила бы ~40%)
+    await line(300, 20, 0);
+    expect([alpha(300), alpha(312)]).toEqual([255, 0]);
+    // Мягкая — плавно
+    await line(350, 40, 1);
+    expect(alpha(350)).toBeGreaterThan(245);
+    expect(alpha(362)).toBeGreaterThan(20);
+    expect(alpha(362)).toBeLessThan(235);
+    // Растушёвка вклейки на прежнем краю маски — как была
+    expect(alpha(190)).toBe(Math.round(featherAlpha(leftHalf(), R.width, R.height, 24)[150 * R.width + 190]! * 255));
+
+    await s.undo();
+    await s.undo();
+    await s.undo();
+    expect(doc.composite.equals(withLayer)).toBe(true);
+    expect(doc.contentKey).toBe(key);
+  });
+
+  it('после правки рукой «Расширить» растушёвывает добавленное, «Ещё варианты» — с растушёвкой вклейки', async () => {
+    const s = new Session('mock', envOnlyStore());
+    await s.newDocument(W, H, [10, 20, 30]);
+    const doc = s.doc!;
+    doc.addPatch(accepted(leftHalf(), 24));
+    await s.editPatchMask('a', [{ kind: 'stroke', points: [[R.x + 300, R.y + 50], [R.x + 300, R.y + 250]], size: 20, softness: 0 }]);
+    // Модель нарисовала красное на весь кусок: маска растёт до края куска, но к нему не подходит, и край мягкий
+    expect(await s.expandVersion('a')).toBeGreaterThan(0);
+    const alpha = (x: number) => doc.patch('a').layer[(150 * R.width + x) * 4 + 3]!;
+    expect(alpha(250)).toBe(255);
+    expect(alpha(R.width - 1)).toBe(0);
+    expect(alpha(R.width - 10)).toBeGreaterThan(20);
+    expect(alpha(R.width - 10)).toBeLessThan(200);
+
+    const more = s.patchVariants('a', { variants: 1, model: 'flash', size: 'auto' });
+    await until(() => s.state().jobs.find((j) => j.id === more)?.status === 'done');
+    const fresh = doc.patches.find((p) => p.jobId === more)!;
+    expect(fresh.feather).toBe(24);
+  }, 20_000);
 });
+
+async function until(ok: () => boolean): Promise<void> {
+  const started = Date.now();
+  while (!ok()) {
+    if (Date.now() - started > 15_000) throw new Error('Не дождались');
+    await new Promise((r) => setTimeout(r, 30));
+  }
+}

@@ -164,7 +164,8 @@ function layerMaskEdit(layer: PatchDto, layers: PatchDto[]): MaskEditView {
     kind: 'layer',
     target: layer.id,
     rect: layer.rect,
-    feather: layer.feather,
+    // Маска для правки — уже прозрачность версии: кисть кладёт мазки прямо в неё, растушёвки поверх нет
+    feather: 0,
     below: `${base}/below.jpg?c=${context}`,
     above: `${base}/above.png?c=${context}`,
     layer: `${base}/layer.jpg`,

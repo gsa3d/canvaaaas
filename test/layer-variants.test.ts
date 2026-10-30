@@ -178,7 +178,7 @@ describe('Версии слоя', () => {
 
     const canvas = (x: number, y: number) => [...doc.composite.subarray((y * W + x) * 3, (y * W + x) * 3 + 3)];
     // В углу выделения, вне «объекта» подставной модели, — цвет холста под версией, а не красный
-    const corner = canvas(sel.x + 40, sel.y + 40);
+    const corner = canvas(sel.x + 10, sel.y + 10);
     for (const [c, v] of BASE.entries()) expect(Math.abs(corner[c]! - v)).toBeLessThan(16);
     // Слой «верх» остался над шаром
     expect(canvas(600, 420)).toEqual([30, 200, 30]);

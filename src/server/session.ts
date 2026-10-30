@@ -165,6 +165,11 @@ interface Job {
    * растушёвку, и ни кисть, ни «Расширить по правке» его уже не убрали бы. Не задано — решает, весь ли слой в выделении
    */
   whole?: boolean;
+  /**
+   * По чему растёт слой, когда маска задачи шире выделения (кольцо у перерисовки всего слоя, `ringed`): что выделил
+   * пользователь; null — слой не растёт. Не задано — по маске задачи
+   */
+  claim?: Bitmap | null;
   /** Фон под этим слоем: вариант ложится версией слоя с дырой под ним (object) или новым слоем в самом низу (bottom) */
   fillFor?: string;
   bottom?: boolean;
@@ -810,11 +815,13 @@ export class Session {
 
   /**
    * Дорисовать или стереть маску принятого слоя: кисть возвращает его пиксели, ластик открывает холст под ним.
+   * Мазок ложится прямо в прозрачность версии (bakeMask): его край — какой задала мягкость кисти.
    * Пересчитывается только участок около мазка, поэтому холст догоняет кисть быстро и на большом слое.
    */
   editPatchMask(patchId: string, shapes: MaskShape[]): Promise<MaskEditResult> {
     return this.serialDoc(async (doc) => {
       const patch = doc.patch(patchId);
+      doc.bakeMask(patchId);
       const { mask, changed } = await applyShapesRegion(patch.mask, patch.rect, shapes);
       if (this.doc !== doc) throw new Error('Документ уже закрыт');
       if (changed) {
@@ -833,12 +840,15 @@ export class Session {
 
   /**
    * Картинки, по которым браузер сам показывает правку маски версии, не дожидаясь сервера: холст под ней,
-   * версии над ней, ответ модели на весь кусок и маска до растушёвки — в размере превью. version — чья маска в картинке.
+   * версии над ней, ответ модели на весь кусок и маска — в размере превью. Маска — прозрачность версии, как её
+   * правит кисть (bakeMask), поэтому браузер не растушёвывает её. version — чья маска в картинке.
    */
   async maskEditImage(patchId: string, part: string): Promise<{ data: Buffer; type: string; version: number }> {
     const doc = this.requireDoc();
     const patch = doc.patch(patchId);
-    const { rect, mask, maskVersion: version } = patch;
+    const { rect, maskVersion: version } = patch;
+    const mask = new Uint8Array(rect.width * rect.height);
+    for (let i = 0; i < mask.length; i++) mask[i] = patch.layer[i * 4 + 3]!;
     const skip = patch.id;
     const rgb = () => {
       const out = Buffer.alloc(rect.width * rect.height * 3);
@@ -956,7 +966,10 @@ export class Session {
     if (patch.lifted) throw new Error('Исходник перерисовывают правкой: выделите слой и напишите задачу');
     // Модель снова видит прежнюю версию слоя; у правки части слоя перерисовывается только сама правка поверх неё
     const base = patch.base && doc.hasPatch(patch.base) ? patch.base : undefined;
-    const mask = base && patch.part ? patch.part : patch.mask;
+    // Маска, правленная рукой, — прозрачность версии (растушёвка 0): новым вариантам — что видно больше чем наполовину,
+    // и растушёвка вклейки как у генерации
+    const mask = base && patch.part ? patch.part : patch.feather ? patch.mask : patch.mask.map((v) => (v >= MASK_THRESHOLD ? 255 : 0));
+    const feather = patch.feather || DEFAULT_FEATHER;
     // Версия всего слоя — и новые его заменяют; так же правка из прежних версий, накрывшая слой целиком
     const owner = patch.object ? doc.objects.find((o) => o.id === patch.object) : undefined;
     const whole = !patch.part || (!!owner && overlap(owner, { rect: patch.rect, mask: patch.part }) === area(owner));
@@ -978,7 +991,7 @@ export class Session {
       directed: patch.directed ? { key: taskKey({ prompt: patch.prompt, hide: patch.hide ?? false }), text: patch.directed } : undefined,
       base,
       whole,
-      from: { patchId, mask, rect: patch.rect, feather: patch.feather },
+      from: { patchId, mask, rect: patch.rect, feather },
     });
   }
 
@@ -1065,7 +1078,7 @@ export class Session {
       // Версию могли удалить, пока задача ждала очереди: тогда варианты — просто новые версии
       const { from } = job;
       const current = from && doc.hasPatch(from.patchId) ? doc.patch(from.patchId) : null;
-      const mask = from ? layerMask(from) : await this.rasterize(job, doc);
+      const mask = ringed(doc, job, from ? layerMask(from) : await this.rasterize(job, doc), from?.feather ?? DEFAULT_FEATHER);
       // Правка слоя: модель видит холст с его видимой версией, варианты лягут поверх неё
       if (!from && job.object) job.base = visibleVersion(doc, job.object);
       const base = job.base && doc.hasPatch(job.base) ? doc.patch(job.base) : undefined;
@@ -1419,8 +1432,9 @@ export class Session {
       const whole = job.whole ?? (!!existing && !!edited && overlap(existing, edited) === area(existing));
       const over = below && !whole ? layerOver(below, { rect: patch.rect, layer: patch.layer, mask: job.mask }) : undefined;
       const version: NewPatch = over ? { ...patch, rect: over.rect, layer: over.layer, mask: over.mask, base: below!.id, part: over.part } : { ...patch, base: below?.id };
-      // Выделение за краем слоя — слой растёт
-      const grown = existing && existing.kind !== 'fill' && edited && overlap(edited, existing) < area(edited) ? trim(unionBitmap(existing, edited)) : null;
+      // Выделение за краем слоя — слой растёт; кольцо у перерисовки всего слоя — не выделение
+      const claimed = job.claim === undefined ? edited : job.claim;
+      const grown = existing && existing.kind !== 'fill' && claimed && overlap(claimed, existing) < area(claimed) ? trim(unionBitmap(existing, claimed)) : null;
       const region = version.rect;
       const before = doc.region(region);
       let placed: string | undefined;
@@ -1510,7 +1524,14 @@ export class Session {
       const under = base ? doc.regionReplaced(p.rect, p.id, base.rect, base.layer) : doc.regionWithout(p.rect, p.id);
       const closed = { left: rect.x > 0, top: rect.y > 0, right: rect.x + width < doc.width, bottom: rect.y + height < doc.height };
       const { mask, addedPx } = expandMaskByDiff(p.mask, under, rgb, width, height, { closed });
-      if (addedPx > 0) doc.setPatchMask(p.id, mask);
+      if (addedPx > 0) {
+        // Маска, правленная рукой, — сама прозрачность: добавленное растушёвываем здесь, как растушевала бы вклейка
+        if (p.feather) doc.setPatchMask(p.id, mask);
+        else {
+          const alpha = featherAlpha(mask.map((v) => (v >= MASK_THRESHOLD ? 255 : 0)), width, height, DEFAULT_FEATHER);
+          doc.setPatchMask(p.id, p.mask.map((v, i) => Math.max(v, Math.round(alpha[i]! * 255))));
+        }
+      }
       this.changed();
       return addedPx;
     });
@@ -2008,6 +2029,23 @@ function redo(job: Job, change: RedoChange): boolean {
   if (change.hide !== undefined) job.hide = change.hide;
   if (change.director !== undefined) job.director = !!change.director;
   return `${job.director}:${taskKey(job)}` !== before;
+}
+
+/**
+ * Перерисовка всего слоя (весь он в выделении): маска задачи шире слоя на растушёвку. Растушёвка идёт внутрь маски,
+ * и по маске точно по слою весь его край выходил полупрозрачным, а тонкое (ствол дерева) — насквозь. Кольцо —
+ * не выделение: слой растёт только по выделенному (claim), «Ещё варианты» его не растят, иначе с каждой перерисовкой
+ * слой раздувался бы на кольцо
+ */
+function ringed(doc: CanvasDocument, job: Job, selected: RawImage & { x: number; y: number }, feather: number): RawImage & { x: number; y: number } {
+  const owner = job.object && !job.fillFor ? doc.objects.find((o) => o.id === job.object) : undefined;
+  if (!owner || owner.kind === 'fill') return selected;
+  const sel: Bitmap = { rect: { x: selected.x, y: selected.y, width: selected.width, height: selected.height }, mask: selected.data };
+  job.whole ??= overlap(owner, sel) === area(owner);
+  if (!job.whole) return selected;
+  job.claim = job.from ? null : trim(sel);
+  const { rect, mask } = unionBitmap(sel, dilate(owner, feather, { x: 0, y: 0, width: doc.width, height: doc.height }));
+  return { data: Buffer.from(mask.buffer, mask.byteOffset, mask.length), width: rect.width, height: rect.height, channels: 1, x: rect.x, y: rect.y };
 }
 
 /** Маска слоя одним каналом на его месте на холсте — так её принимает prepareEdit */
