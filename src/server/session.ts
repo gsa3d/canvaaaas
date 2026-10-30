@@ -15,6 +15,7 @@ import {
   blendFrame,
   buildLayer,
   criticImages,
+  DEFAULT_FEATHER,
   directorImages,
   fitGenerated,
   insideOf,
@@ -33,7 +34,7 @@ import {
 import { intersect, type Rect } from '../core/frame.ts';
 import { expandMaskByDiff } from '../core/expand.ts';
 import { readLedger, withDirectorLedger, withLedger } from '../core/ledger.ts';
-import { featherAlpha, featherAlphaRegion, maskBBox } from '../core/mask.ts';
+import { featherAlpha, featherAlphaRegion, MASK_THRESHOLD, maskBBox } from '../core/mask.ts';
 import { applyShapes, applyShapesRegion, type MaskLookup } from '../core/mask-shapes.ts';
 import { changeEdge } from '../core/lines.ts';
 import { area, descendants, dilate, layerName, overlap, removeObject, trim, unionBitmap } from '../core/objects.ts';
@@ -84,9 +85,12 @@ const LIFT_GROW = 2;
 const HOVER_LAYER_MAX = 1600;
 const LIFT_FEATHER = 2;
 
-/** Насколько шире объекта модель дорисовывает фон: контур и сглаживание вокруг него тоже уходят */
+/**
+ * Насколько шире слоя модель дорисовывает фон под ним: растушёвка вклейки и ещё запас, иначе на контуре слоя дорисованное
+ * лежит не целиком и старый контур просвечивает
+ */
 function fillGrow(rect: Rect): number {
-  return Math.min(40, Math.max(6, Math.round(0.02 * Math.max(rect.width, rect.height))));
+  return DEFAULT_FEATHER + Math.min(40, Math.max(6, Math.round(0.02 * Math.max(rect.width, rect.height))));
 }
 
 interface Reference {
@@ -156,8 +160,9 @@ interface Job {
    * остальное остаётся от неё
    */
   base?: string;
-  /** Дорисовать фон под этим слоем: варианты — версии его заплатки фона */
-  detach?: string;
+  /** Фон под этим слоем: вариант ложится версией слоя с дырой под ним (object) или новым слоем в самом низу (bottom) */
+  fillFor?: string;
+  bottom?: boolean;
   /** Границы выделения — известны сразу, ещё до подготовки куска */
   area: RectDto;
   variantsRequested: number;
@@ -406,7 +411,7 @@ export class Session {
         feather: j.prep?.feather,
         from: j.from?.patchId,
         object: j.object,
-        detach: j.detach,
+        fillFor: j.fillFor,
       })),
       history: (doc?.patches ?? []).map((p) => ({
         id: p.id,
@@ -437,7 +442,7 @@ export class Session {
         under: o.under,
         versions: doc!.patches.filter((p) => p.object === o.id && !p.lifted).map((p) => p.id),
         layer: liftedLayer(doc!, o.id)?.id,
-        filled: doc!.objects.some((f) => f.kind === 'fill' && f.under === o.id) || undefined,
+        freed: o.freed || doc!.objects.some((f) => f.kind === 'fill' && f.under === o.id) || undefined,
       })),
       segment: this.segmentation.state(),
       canUndo: doc?.canUndo ?? false,
@@ -978,7 +983,8 @@ export class Session {
       | 'shapes'
       | 'bitmaps'
       | 'object'
-      | 'detach'
+      | 'fillFor'
+      | 'bottom'
       | 'area'
       | 'references'
       | 'sketch'
@@ -1392,13 +1398,10 @@ export class Session {
         size: job.size,
         refs: job.references,
       };
-      if (job.detach) {
-        v.patch = this.landFill(doc, job, patch, show);
-        this.changed();
-        return;
-      }
       const existing = job.object ? doc.objects.find((o) => o.id === job.object) : undefined;
-      const owner = existing ?? this.layerFromJob(doc, job);
+      const freed = job.fillFor ? doc.objects.find((o) => o.id === job.fillFor) : undefined;
+      // Фон, под которым нет других слоёв, — новым слоем в самом низу, с именем того, под кем он
+      const owner = existing ?? { ...this.layerFromJob(doc, job), ...(freed ? { name: `Фон под «${freed.name}»` } : {}) };
       // Правка части слоя ложится поверх версии, которую модель видела: остальной слой остаётся от неё
       const below = existing && job.base && doc.hasPatch(job.base) ? doc.patch(job.base) : undefined;
       const over = below ? layerOver(below, { rect: patch.rect, layer: patch.layer, mask: job.mask }) : undefined;
@@ -1410,8 +1413,9 @@ export class Session {
       const before = doc.region(region);
       let placed: string | undefined;
       doc.batch(() => {
-        // Новый слой — сверху, остальные не трогаются
-        if (!existing) doc.setObjects([...doc.objects, owner]);
+        // Новый слой — сверху (фон — в самом низу), остальные не трогаются
+        if (!existing) doc.setObjects(job.bottom ? [owner, ...doc.objects] : [...doc.objects, owner]);
+        if (freed && !freed.freed) doc.setObjects(doc.objects.map((o) => (o.id === freed.id ? { ...o, freed: true } : o)));
         if (grown) doc.setObjects(doc.objects.map((o) => (o.id === owner.id ? { ...o, ...grown, version: doc.nextObjectVersion(), lost: undefined } : o)));
         placed = doc.addPatch({ ...version, object: owner.id }).id;
         if (show) doc.setObjects(doc.objects.map((o) => (o.id === owner.id ? { ...o, current: placed } : o)));
@@ -1427,33 +1431,6 @@ export class Session {
     const bitmap = trim({ rect: job.prep!.frame.inside, mask: job.prep!.insideMask });
     if (!bitmap) throw new Error('Выделение пустое');
     return { id: randomUUID(), name: layerName(job.prompt), ...bitmap, createdAt: new Date().toISOString(), version: doc.nextObjectVersion(), edit: true };
-  }
-
-  /**
-   * Вариант фона под слоем — версией его заплатки. Первый вариант снимает исходник слоя (пиксели холста без его текущей
-   * версии, по маске чуть шире) и заводит заплатку; одним шагом отмены. Возвращает id версии
-   */
-  private landFill(doc: CanvasDocument, job: Job, patch: NewPatch, show: boolean): string {
-    const obj = doc.objects.find((o) => o.id === job.detach);
-    if (!obj) throw new Error('Слоя уже нет: дорисовывать фон не под чем');
-    const existing = doc.objects.find((o) => o.kind === 'fill' && o.under === obj.id);
-    let placed = '';
-    doc.batch(() => {
-      if (!liftedLayer(doc, obj.id)) this.lift(doc, obj, job.id);
-      const fill: DocObject = existing ?? {
-        id: randomUUID(),
-        name: `Фон под «${obj.name}»`,
-        kind: 'fill',
-        under: obj.id,
-        ...job.bitmaps.get(`obj:${obj.id}`)!,
-        createdAt: new Date().toISOString(),
-        version: doc.nextObjectVersion(),
-      };
-      if (!existing) doc.setObjects([...doc.objects, fill]);
-      placed = doc.addPatch({ ...patch, object: fill.id }).id;
-      if (show || !fill.current) doc.setObjects(doc.objects.map((o) => (o.id === fill.id ? { ...o, current: placed } : o)));
-    });
-    return placed;
   }
 
   /**
@@ -1546,12 +1523,9 @@ export class Session {
     return this.serialDoc(async (doc) => {
       const bitmap = await this.selectionBitmap(doc, input);
       if (this.doc !== doc) throw new Error('Документ уже закрыт');
-      const used = new Set(doc.objects.map((o) => o.name));
-      let n = doc.objects.filter((o) => o.kind !== 'fill').length + 1;
-      while (used.has(`Слой ${n}`)) n++;
       const obj: DocObject = {
         id: randomUUID(),
-        name: name?.trim() || `Слой ${n}`,
+        name: name?.trim() || nextLayerName(doc),
         ...bitmap,
         createdAt: new Date().toISOString(),
         version: doc.nextObjectVersion(),
@@ -1559,6 +1533,63 @@ export class Session {
       doc.batch(() => {
         doc.setObjects([...doc.objects, obj]);
         this.lift(doc, obj, `copy:${obj.id}`);
+      });
+      this.changed();
+      return obj.id;
+    });
+  }
+
+  /**
+   * Вырезать в слой: копия того, что видно в выделении, новым слоем сверху, а на старом месте — дыра у того, чьи пиксели
+   * там видны: в слое — его версия теряет этот кусок (область слоя прежняя, дыра — его), в фоне — белое место. Копия
+   * шире дыры на контур, поэтому, пока слой на месте, картинка та же. Генерации нет. Одним шагом ⌘Z
+   */
+  cutObject(input: MaskShape[], name?: string): Promise<string> {
+    return this.serialDoc(async (doc) => {
+      const hole = await this.selectionBitmap(doc, input);
+      if (this.doc !== doc) throw new Error('Документ уже закрыт');
+      const obj: DocObject = { id: randomUUID(), name: name?.trim() || nextLayerName(doc), ...hole, createdAt: new Date().toISOString(), version: doc.nextObjectVersion(), freed: true, hole };
+      // Чей каждый пиксель дыры: верхней видимой версии слоя, где он непрозрачен, иначе фона
+      const order = doc.drawOrder().filter((p) => p.object).reverse();
+      const claims = new Map<string | null, Uint8Array>();
+      const { rect } = hole;
+      for (let y = 0; y < rect.height; y++) {
+        for (let x = 0; x < rect.width; x++) {
+          const i = y * rect.width + x;
+          if (hole.mask[i]! < MASK_THRESHOLD) continue;
+          const cx = rect.x + x;
+          const cy = rect.y + y;
+          const p = order.find((q) => cx >= q.rect.x && cy >= q.rect.y && cx < q.rect.x + q.rect.width && cy < q.rect.y + q.rect.height && q.layer[((cy - q.rect.y) * q.rect.width + cx - q.rect.x) * 4 + 3]! >= MASK_THRESHOLD);
+          const key = p?.id ?? null;
+          let claim = claims.get(key);
+          if (!claim) claims.set(key, (claim = new Uint8Array(rect.width * rect.height)));
+          claim[i] = 255;
+        }
+      }
+      doc.batch(() => {
+        // Сначала копия — того, что видно сейчас, с дырами ещё нет
+        doc.setObjects([...doc.objects, obj]);
+        this.lift(doc, obj, `cut:${obj.id}`);
+        for (const [patchId, claim] of claims) {
+          if (patchId === null) {
+            const b = trim({ rect, mask: claim })!;
+            const rgb = Buffer.alloc(b.rect.width * b.rect.height * 3);
+            for (let y = 0; y < b.rect.height; y++) {
+              const from = ((b.rect.y + y) * doc.width + b.rect.x) * 3;
+              doc.base.copy(rgb, y * b.rect.width * 3, from, from + b.rect.width * 3);
+              for (let x = 0; x < b.rect.width; x++) if (b.mask[y * b.rect.width + x]) rgb.fill(255, (y * b.rect.width + x) * 3, (y * b.rect.width + x) * 3 + 3);
+            }
+            doc.setBase(b.rect, rgb);
+            continue;
+          }
+          const p = doc.patch(patchId);
+          const mask = new Uint8Array(p.mask);
+          const r = intersect(p.rect, rect);
+          for (let y = r.y; y < r.y + r.height; y++) {
+            for (let x = r.x; x < r.x + r.width; x++) if (claim[(y - rect.y) * rect.width + x - rect.x]) mask[(y - p.rect.y) * p.rect.width + x - p.rect.x] = 0;
+          }
+          doc.setPatchMask(patchId, mask);
+        }
       });
       this.changed();
       return obj.id;
@@ -1682,31 +1713,71 @@ export class Session {
   }
 
   /**
-   * Дорисовать фон под слоем: задача в очереди, где модель рисует то, что за ним, — область ей стирают, с запасом вокруг
-   * контура. Первый готовый вариант снимает исходник слоя и заводит под ним заплатку фона; слой с тех пор можно сдвигать
-   * и скрывать. Уже отделённому — ещё варианты заплатки
+   * Дорисовать фон под слоем — там, где дыра: у вырезанного — откуда его вырезали, у остальных — под ним сейчас. В каждом
+   * слое под ним, чья маска накрывает это место (с запасом на растушёвку, чтобы контур не просвечивал), — версией этого
+   * слоя, по задаче на слой; где там только фон — новым слоем в самом низу. Модели область стирают, и она продолжает то,
+   * что вокруг. Возвращает id задач
    */
-  detachObject(objectId: string, req: DetachRequest): string {
+  fillUnder(objectId: string, req: DetachRequest): string[] {
     const doc = this.requireDoc();
     const obj = doc.object(objectId);
     if (obj.kind === 'fill') throw new Error('Это и есть фон');
-    if (this.jobs.some((j) => j.detach === objectId && j.status !== 'done' && j.status !== 'error')) throw new Error('Фон под этим слоем уже рисуется');
-    const grown = dilate(obj, fillGrow(obj.rect), { x: 0, y: 0, width: doc.width, height: doc.height });
-    const id = `obj:${objectId}`;
-    return this.enqueue({
-      prompt: FILL_TASK,
-      hide: true,
-      model: req.model,
-      size: req.size,
-      variants: req.variants,
-      shapes: [{ kind: 'mask', id, ...grown.rect }],
-      bitmaps: new Map([[id, grown]]),
-      object: objectId,
-      detach: objectId,
-      area: grown.rect,
-      references: [],
-      sketch: [],
-      director: false,
+    if (this.jobs.some((j) => j.fillFor === objectId && j.status !== 'done' && j.status !== 'error')) throw new Error('Фон под этим слоем уже рисуется');
+    const place = obj.hole ?? obj;
+    const region = dilate(place, fillGrow(place.rect), { x: 0, y: 0, width: doc.width, height: doc.height });
+    // Чья каждая точка под слоем: верхнего из слоёв под ним, чья маска её накрывает, иначе фона
+    const below = doc.layersBelow(objectId);
+    const claims = new Map<string | null, Uint8Array>();
+    const { rect } = region;
+    for (let y = 0; y < rect.height; y++) {
+      for (let x = 0; x < rect.width; x++) {
+        const i = y * rect.width + x;
+        if (region.mask[i]! < MASK_THRESHOLD) continue;
+        const owner = below.find((o) => covers(o, rect.x + x, rect.y + y))?.id ?? null;
+        let claim = claims.get(owner);
+        if (!claim) claims.set(owner, (claim = new Uint8Array(rect.width * rect.height)));
+        claim[i] = 255;
+      }
+    }
+    // Дорисовывают только те, у кого есть часть самой дыры; запас вокруг неё у остальных — главному из них (он подрастёт):
+    // иначе на границе с ними дорисованное опять лежало бы не целиком
+    const share = new Map<string | null, number>();
+    for (const [owner, claim] of claims) {
+      let n = 0;
+      for (let y = 0; y < rect.height; y++) {
+        for (let x = 0; x < rect.width; x++) if (claim[y * rect.width + x] && covers(place, rect.x + x, rect.y + y)) n++;
+      }
+      share.set(owner, n);
+    }
+    const main = [...share].reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+    for (const [owner, claim] of claims) {
+      if (share.get(owner)! > 0 || owner === main) continue;
+      const to = claims.get(main)!;
+      for (let i = 0; i < claim.length; i++) if (claim[i]) to[i] = 255;
+      claims.delete(owner);
+    }
+    return [...claims].flatMap(([owner, mask]) => {
+      const b = trim({ rect, mask });
+      if (!b) return [];
+      const id = `fill:${randomUUID()}`;
+      return [
+        this.enqueue({
+          prompt: FILL_TASK,
+          hide: true,
+          model: req.model,
+          size: req.size,
+          variants: req.variants,
+          shapes: [{ kind: 'mask', id, ...b.rect }],
+          bitmaps: new Map([[id, b]]),
+          object: owner ?? undefined,
+          fillFor: objectId,
+          bottom: owner === null || undefined,
+          area: b.rect,
+          references: [],
+          sketch: [],
+          director: false,
+        }),
+      ];
     });
   }
 
@@ -1840,6 +1911,21 @@ export class Session {
 /** Слой отделённого объекта; нет — объект не отделён */
 function liftedLayer(doc: CanvasDocument, objectId: string): Patch | undefined {
   return doc.patches.findLast((p) => p.lifted && p.object === objectId);
+}
+
+/** «Слой N» со следующим свободным номером */
+function nextLayerName(doc: CanvasDocument): string {
+  const used = new Set(doc.objects.map((o) => o.name));
+  let n = doc.objects.filter((o) => o.kind !== 'fill').length + 1;
+  while (used.has(`Слой ${n}`)) n++;
+  return `Слой ${n}`;
+}
+
+/** Точка холста внутри маски */
+function covers(b: Bitmap, x: number, y: number): boolean {
+  const lx = x - b.rect.x;
+  const ly = y - b.rect.y;
+  return lx >= 0 && ly >= 0 && lx < b.rect.width && ly < b.rect.height && b.mask[ly * b.rect.width + lx]! >= MASK_THRESHOLD;
 }
 
 /** Видны ли где-то обе версии разом: пиксели, где у обеих есть альфа */

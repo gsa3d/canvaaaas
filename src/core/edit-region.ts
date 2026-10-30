@@ -118,7 +118,10 @@ export interface CompositedVariant {
   stats: VariantStats;
 }
 
-const DEFAULTS = { ...FRAME_CONTEXT, feather: 24, imageSize: 'auto', maxAutoSize: AUTO_SIZE_CAP, guide: 'pair' as Guide };
+/** Растушёвка вклейки внутрь маски, пиксели холста */
+export const DEFAULT_FEATHER = 24;
+
+const DEFAULTS = { ...FRAME_CONTEXT, feather: DEFAULT_FEATHER, imageSize: 'auto', maxAutoSize: AUTO_SIZE_CAP, guide: 'pair' as Guide };
 
 export interface PromptParts {
   /** Общий стиль документа */

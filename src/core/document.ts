@@ -91,6 +91,10 @@ export interface DocObject {
   under?: string;
   /** Слой появился из генерации по выделению: частью другого стать может, а другие его частями — нет */
   edit?: boolean;
+  /** Под слоем его самого больше нет: его вырезали или под ним дорисовали фон — скрыть и сдвинуть его не открывает то же */
+  freed?: boolean;
+  /** Откуда слой вырезали: дыра на старом месте (со сдвигом не едет); «Дорисовать фон» закрашивает её, где бы слой ни был */
+  hole?: { rect: Rect; mask: Uint8Array };
 }
 
 interface Level {
@@ -686,6 +690,16 @@ export class CanvasDocument {
   visibleLayers(): DocObject[] {
     const visible = this.visibility();
     return this.stack()
+      .filter((o) => o.kind !== 'fill' && visible(o))
+      .reverse();
+  }
+
+  /** Видимые слои под слоем id (без заплаток фона), сверху вниз */
+  layersBelow(id: string): DocObject[] {
+    const stack = this.stack();
+    const visible = this.visibility();
+    return stack
+      .slice(0, Math.max(0, stack.findIndex((o) => o.id === id)))
       .filter((o) => o.kind !== 'fill' && visible(o))
       .reverse();
   }

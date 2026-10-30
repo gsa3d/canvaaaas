@@ -317,9 +317,13 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     await session.flattenLayers();
     json(res, { ok: true });
   });
-  route('POST', '/api/objects/:id/detach', async (req, res, [id]) => {
+  route('POST', '/api/objects/:id/fill', async (req, res, [id]) => {
     const body = await readJson<DetachRequest>(req);
-    json(res, { id: session.detachObject(id!, body) });
+    json(res, { ids: session.fillUnder(id!, body) });
+  });
+  route('POST', '/api/objects/cut', async (req, res) => {
+    const { shapes, name } = await readJson<{ shapes: MaskShape[]; name?: string }>(req);
+    json(res, { id: await session.cutObject(shapes, name) });
   });
   route('POST', '/api/objects/:id/current', async (req, res, [id]) => {
     const { patch } = await readJson<{ patch: string | null }>(req);

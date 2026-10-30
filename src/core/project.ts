@@ -74,6 +74,9 @@ interface Manifest {
     kind?: 'fill';
     under?: string;
     edit?: boolean;
+    freed?: boolean;
+    /** Откуда слой вырезали: рамка и маска дыры */
+    hole?: { rect: Rect; mask: Part };
     mask: Part;
   }[];
   /** Референсы: картинка, которая ушла с несколькими правками, хранится один раз */
@@ -118,6 +121,7 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
     ...patches.flatMap((p) => [png(p.layer, p.rect.width, p.rect.height, 4), png(p.mask, p.rect.width, p.rect.height, 1)]),
     ...objects.map((o) => png(o.mask, o.rect.width, o.rect.height, 1)),
     ...patches.flatMap((p) => (p.part ? [png(p.part, p.rect.width, p.rect.height, 1)] : [])),
+    ...objects.flatMap((o) => (o.hole ? [png(o.hole.mask, o.hole.rect.width, o.hole.rect.height, 1)] : [])),
   ]);
   const refs: InputImage[] = [];
   const refIndex = (ref: InputImage): number => {
@@ -174,11 +178,15 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
     kind: o.kind,
     under: o.under,
     edit: o.edit || undefined,
+    freed: o.freed || undefined,
     mask: part(images[first + i]!),
   }));
   let parts = first + objects.length;
   patches.forEach((p, i) => {
     if (p.part) manifest.layers[i]!.part = part(images[parts++]!);
+  });
+  objects.forEach((o, i) => {
+    if (o.hole) manifest.objects![i]!.hole = { rect: o.hole.rect, mask: part(images[parts++]!) };
   });
   manifest.refs = refs.map((r) => ({ mimeType: r.mimeType, data: part(r.data) }));
   const json = Buffer.from(JSON.stringify(manifest), 'utf8');
@@ -222,6 +230,7 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
     ...manifest.layers.flatMap((l) => [decode(l.pixels, l.rect.width, l.rect.height, 4), decode(l.mask, l.rect.width, l.rect.height, 1)]),
   ]);
   const objectMasks = await Promise.all(objectList.map((o) => decode(o.mask, o.rect.width, o.rect.height, 1)));
+  const holes = await Promise.all(objectList.map((o) => (o.hole && inside(o.hole.rect) ? decode(o.hole.mask, o.hole.rect.width, o.hole.rect.height, 1) : undefined)));
   const partMasks = await Promise.all(manifest.layers.map((l) => (l.part && typeof l.base === 'string' ? decode(l.part, l.rect.width, l.rect.height, 1) : undefined)));
   const ids = new Set(objectList.map((o) => o.id));
   const layerIds = new Set(manifest.layers.map((l) => l.id));
@@ -240,6 +249,8 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       kind: o.kind === 'fill' ? 'fill' : undefined,
       under: o.kind === 'fill' && typeof o.under === 'string' ? o.under : undefined,
       edit: o.edit === true || undefined,
+      freed: o.freed === true || undefined,
+      hole: holes[i] ? { rect: o.hole!.rect, mask: new Uint8Array(holes[i]!) } : undefined,
     }),
   );
   // Копия, а не кусок файла: иначе в памяти остался бы весь файл

@@ -384,8 +384,9 @@ export function App() {
     const open = jobs.filter((j) => busyJob(j) || j.status === 'error');
     const labels = new Map(
       open.map((j) => {
-        const o = objects.find((x) => x.id === (j.detach ?? j.object));
-        return [j.id, o ? (j.detach ? `Фон под «${short(o.name, 20)}»` : short(o.name, 24)) : 'Новый слой'];
+        const under = j.fillFor ? objects.find((x) => x.id === j.fillFor) : undefined;
+        const o = objects.find((x) => x.id === j.object);
+        return [j.id, under ? `Фон под «${short(under.name, 20)}»` : o ? short(o.name, 24) : 'Новый слой'];
       }),
     );
     viewRef.current?.setJobs(open, labels);
@@ -602,10 +603,10 @@ export function App() {
   // ——— Объекты ———
 
   /** ⌘J: то, что видно в выделении, — копией новым слоем сверху; работа сразу в нём */
-  const saveObject = async (): Promise<ObjectDto | undefined> => {
+  const saveObject = async (cut = false): Promise<ObjectDto | undefined> => {
     if (!doc || !selection.some((s) => !s.erase)) return;
     try {
-      const { id } = await post<{ id: string }>('/api/objects', { shapes: selection });
+      const { id } = await post<{ id: string }>(cut ? '/api/objects/cut' : '/api/objects', { shapes: selection });
       // Состояние — с новым слоем: запрошенное раньше и пришедшее позже его не перебьёт
       const seq = ++refreshSeq.current;
       const s = await getState();
@@ -623,11 +624,8 @@ export function App() {
       fail(err);
     }
   };
-  /** ⌘⇧J: то же, а под новым слоем модель дорисует фон — его можно сдвигать и скрывать */
-  const cutObject = async () => {
-    const o = await saveObject();
-    if (o) await detach(o);
-  };
+  /** ⌘⇧J: то же, но на старом месте — дыра у того, чьи пиксели там были (в фоне — белое). Генерации нет */
+  const cutObject = () => saveObject(true);
   /** ⌘E: слои в выделении (Shift-щелчком в списке) и тот, в котором работают, — одним слоем; работа сразу в нём */
   const mergeLayers = async () => {
     const ids = [...new Set([...selectedObjects, ...(active ? [active] : [])])];
@@ -678,6 +676,10 @@ export function App() {
       if (!has) formOrder.current.push('shape');
       updateSelection((sel) => (has ? sel.filter((s) => !(s.kind === 'mask' && s.id === shape.id)) : [...sel, shape]));
       setActive(null);
+    } else if (active === o.id) {
+      // Второй щелчок по слою, в котором работают, — назад к картинке
+      setActive(null);
+      clearSelection();
     } else {
       enterLayer(o);
       viewRef.current?.reveal(o.rect);
@@ -692,14 +694,15 @@ export function App() {
   };
   const selectedObjects = new Set(selection.flatMap((s) => (s.kind === 'mask' && s.id.startsWith('obj:') && !s.erase ? [s.id.slice(4)] : [])));
 
-  /** Дорисовать фон под слоем: модель нарисует то, что за ним, — тогда слой можно сдвигать и скрывать */
-  const detach = async (o: ObjectDto) => {
+  /** Дорисовать фон под слоем: в слоях, где под ним дыра, — их версиями; где только фон — новым слоем внизу */
+  const fillUnder = async (o: ObjectDto) => {
     if (needsKey(model) && !state?.hasKey) {
       setDialog('settings');
       return;
     }
     try {
-      await post(`/api/objects/${o.id}/detach`, { variants, model, size: sizeFor(model) });
+      const { ids } = await post<{ ids: string[] }>(`/api/objects/${o.id}/fill`, { variants, model, size: sizeFor(model) });
+      if (ids.length > 1) notify(`Фон дорисуется в ${ids.length} ${plural(ids.length, 'слое', 'слоях', 'слоях')}`, false);
     } catch (err) {
       fail(err);
     }
@@ -1106,7 +1109,7 @@ export function App() {
   };
   const deleteObject = (o: ObjectDto) => {
     post(`/api/objects/${o.id}/delete`)
-      .then(() => notify(`Слой «${short(o.name)}» ${o.filled ? 'убран с холста' : 'удалён'}. ⌘Z вернёт его`, false))
+      .then(() => notify(`Слой «${short(o.name)}» ${o.freed ? 'убран с холста' : 'удалён'}. ⌘Z вернёт его`, false))
       .catch(fail);
   };
   const expandVersion = (patch: PatchDto) => {
@@ -1310,7 +1313,7 @@ export function App() {
                       <button class="icon" title="Слой из выделения: копия того, что видно (⌘J)" aria-label="Слой из выделения" onClick={() => void saveObject()}>
                         <IconCubePlus size={16} stroke={STROKE} />
                       </button>
-                      <button class="icon" title="Вырезать в слой: под ним модель дорисует фон (⌘⇧J)" aria-label="Вырезать в слой" onClick={() => void cutObject()}>
+                      <button class="icon" title="Вырезать в слой: на старом месте — пусто (⌘⇧J)" aria-label="Вырезать в слой" onClick={() => void cutObject()}>
                         <IconScissors size={16} stroke={STROKE} />
                       </button>
                     </>
@@ -1514,7 +1517,7 @@ export function App() {
               onMask={editLayerMask}
               onMore={(patch, change) => void layerVariants(patch, change)}
               onExpand={expandVersion}
-              onFill={(o) => void detach(o)}
+              onFill={(o) => void fillUnder(o)}
               onDeleteVersion={deleteVersion}
               onMergeDown={mergeDown}
               onDelete={deleteObject}
@@ -1759,15 +1762,15 @@ function LayersPanel(props: {
   }
   const thumb = (p: PatchDto | undefined) => p && `/api/history/${p.id}/thumb.png?doc=${props.doc.id}&m=${p.maskRev}`;
   // Генерации новых слоёв — пока слоя нет
-  const pending = props.jobs.filter((j) => !j.object && !j.detach);
+  const pending = props.jobs.filter((j) => !j.object);
   const picked = new Set([...props.picked, ...(props.active ? [props.active] : [])]);
 
   const row = (o: ObjectDto, depth: number) => {
     const active = props.active === o.id;
-    const busy = props.jobs.some((j) => (j.object === o.id || j.detach === o.id) && busyJob(j));
+    const busy = props.jobs.some((j) => (j.object === o.id || j.fillFor === o.id) && busyJob(j));
     const failed = props.jobs.some((j) => j.object === o.id && j.status === 'error');
     // Копия без фона: скрой её — под ней то же самое
-    const needsFill = o.kind !== 'fill' && !o.filled && !o.current && !o.hidden;
+    const needsFill = o.kind !== 'fill' && !o.freed && !o.current && !o.hidden;
     return (
       <Fragment key={o.id}>
         <li
@@ -1797,7 +1800,7 @@ function LayersPanel(props: {
             )}
             {busy && <IconLoader2 size={15} stroke={STROKE} class="spin layer-badge" aria-label="Идёт генерация" />}
             {failed && !busy && <IconAlertTriangle size={15} stroke={STROKE} class="layer-badge error" aria-label="Генерация с ошибкой" />}
-            {o.filled && <IconPhoto size={14} stroke={STROKE} class="layer-badge" aria-label="Под ним дорисован фон" />}
+            {o.freed && <IconPhoto size={14} stroke={STROKE} class="layer-badge" aria-label="Под ним уже нет его самого: вырезан или дорисован фон" />}
             {!active && props.picked.has(o.id) && <IconCheck size={15} stroke={STROKE} class="layer-badge picked" aria-label="В выделении" />}
             <button
               class="layer-icon"
@@ -1859,7 +1862,7 @@ function LayersPanel(props: {
             <li class={error ? 'layer pending error' : 'layer pending'} key={j.id}>
               <div class="layer-row" title="Показать, где" onClick={() => props.onShowJob(j)}>
                 <Thumb icon={error ? IconAlertTriangle : IconLoader2} spin={!error} />
-                <span class="layer-name">{j.prompt}</span>
+                <span class="layer-name">{j.fillFor ? `Фон под «${props.objects.find((o) => o.id === j.fillFor)?.name ?? '…'}»` : j.prompt}</span>
                 {!error && <span class="dim">{clock(Date.now() - Date.parse(j.createdAt))}</span>}
                 <button
                   class="layer-icon"
@@ -1936,8 +1939,9 @@ function LayerCard(props: {
   const [redoing, setRedoing] = useState(false);
   const [menu, setMenu] = useState(false);
   const current = o.current ? props.patchMap.get(o.current) : undefined;
-  const jobs = props.jobs.filter((j) => j.object === o.id && !j.detach);
-  const fillJobs = props.jobs.filter((j) => j.detach === o.id);
+  const jobs = props.jobs.filter((j) => j.object === o.id);
+  // Фон под этим слоем дорисовывается в других слоях: здесь — только ход
+  const fillJobs = props.jobs.filter((j) => j.fillFor === o.id && j.object !== o.id);
   // Что про вариант знает задача, пока она есть: правка почти не случилась
   const weak = new Set(props.jobs.flatMap((j) => j.variants.flatMap((v) => (v.patch && v.insideChangedPct !== undefined && v.insideChangedPct < 2 ? [v.patch] : []))));
   const count = (director: boolean) => (director ? props.steps : props.variants);
@@ -2025,7 +2029,7 @@ function LayerCard(props: {
       {[...jobs, ...fillJobs].filter(busyJob).map((j) => (
         <div class="layer-status" key={j.id}>
           <span>
-            {j.detach ? 'Фон: ' : ''}
+            {j.fillFor === o.id ? 'Фон под ним: ' : j.fillFor ? 'Фон: ' : ''}
             {jobStatus(j)}, {clock(Date.now() - Date.parse(j.createdAt))}
           </span>
           {j.chain && (
@@ -2052,19 +2056,14 @@ function LayerCard(props: {
           </div>
         ))}
 
-      {(fill || fillJobs.some(busyJob)) && (
+      {/* Заплатка фона из проектов, где фон дорисовывали под слоем отдельно */}
+      {fill && (
         <div class="version-strip fill-strip">
           <span class="strip-label">Фон</span>
-          {fill?.versions.map((id, i) => {
+          {fill.versions.map((id, i) => {
             const p = props.patchMap.get(id);
             return tile(id, String(i + 1), p, fill.current === id, 'Вариант фона под слоем', () => props.onCurrent(fill, id));
           })}
-          {spinners(fillJobs)}
-          {fill && !fillJobs.some(busyJob) && (
-            <button class="vtile add" title="Ещё варианты фона" aria-label="Ещё варианты фона" onClick={() => props.onFill(o)}>
-              <IconPlus size={16} stroke={STROKE} />
-            </button>
-          )}
         </div>
       )}
 
@@ -2078,15 +2077,21 @@ function LayerCard(props: {
         >
           <IconMask size={17} stroke={STROKE} />
         </button>
-        {!fill && o.kind !== 'fill' && (
-          <button class="icon" title="Дорисовать фон под слоем: его можно будет сдвигать и скрывать" aria-label="Дорисовать фон под слоем" disabled={fillJobs.some(busyJob)} onClick={() => props.onFill(o)}>
+        {o.kind !== 'fill' && (
+          <button
+            class="icon"
+            title="Дорисовать фон под слоем: в слоях, где под ним дыра, — их версиями; где только фон — новым слоем внизу"
+            aria-label="Дорисовать фон под слоем"
+            disabled={fillJobs.some(busyJob)}
+            onClick={() => props.onFill(o)}
+          >
             <IconPhoto size={17} stroke={STROKE} />
           </button>
         )}
         <button class="icon" title="Влить в фон" aria-label="Влить в фон" disabled={o.hidden} onClick={() => props.onMergeDown(o)}>
           <IconArrowBarToDown size={17} stroke={STROKE} />
         </button>
-        <button class="icon" title={o.filled ? 'Убрать с холста' : 'Удалить слой'} aria-label="Удалить слой" onClick={() => props.onDelete(o)}>
+        <button class="icon" title={o.freed ? 'Убрать с холста' : 'Удалить слой'} aria-label="Удалить слой" onClick={() => props.onDelete(o)}>
           <IconTrash size={17} stroke={STROKE} />
         </button>
         {current && (
