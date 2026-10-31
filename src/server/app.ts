@@ -96,6 +96,14 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   route('GET', '/api/state', (_req, res) => json(res, session.state()));
 
+  // Настройки интерфейса: окно читает их раз при запуске и сохраняет каждую, когда она меняется
+  route('GET', '/api/prefs', (_req, res) => json(res, session.preferences()));
+  route('POST', '/api/prefs', async (req, res) => {
+    const { key, value } = await readJson<{ key: string; value: unknown }>(req);
+    await session.setPreference(String(key), value);
+    json(res, { ok: true });
+  });
+
   // Сервер шлёт «что-то изменилось», интерфейс после этого перечитывает /api/state
   route('GET', '/api/events', (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
@@ -237,6 +245,11 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   route('GET', '/api/history/:id/edit/:part.:ext', (_req, res, [id, part]) => editImage(res, session.maskEditImage(id!, part!)));
   route('POST', '/api/history/:id/expand', async (_req, res, [id]) => {
     json(res, { addedPx: await session.expandVersion(id!) });
+  });
+  route('POST', '/api/history/:id/object-mask', async (req, res, [id]) => {
+    const { snap } = await readJson<{ snap?: boolean }>(req);
+    await session.objectMask(id!, snap === true);
+    json(res, { ok: true });
   });
   // Отделённый объект картинкой — для превью сдвига; маска слоя меняется, поэтому не кэшируется
   // Миниатюры версий неизменны, пока не правили маску: её номер — в адресе

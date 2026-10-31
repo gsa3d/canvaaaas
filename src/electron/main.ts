@@ -7,6 +7,7 @@ import { dirname, extname, join } from 'node:path';
 import { app, BrowserWindow, dialog, Menu, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
 import { encodeImage, formatOf, IMAGE_EXTENSIONS } from '../core/image-file.ts';
 import { isProjectPath, PROJECT_EXTENSION } from '../core/project.ts';
+import { Prefs } from '../core/prefs.ts';
 import { RecentFiles } from '../core/recent.ts';
 import { Segmenter } from '../core/segment.ts';
 import { modelFiles, modelInstalled } from '../core/segment-model.ts';
@@ -163,10 +164,11 @@ app.whenReady().then(async () => {
         }),
   );
   const smoke = process.argv.includes('--smoke');
-  // Самопроверка не трогает настоящий список недавних
+  // Самопроверка не трогает настоящие список недавних и настройки
   const smokeDir = smoke ? await mkdtemp(join(tmpdir(), 'canvaaaas-smoke-')) : null;
   const recent = await RecentFiles.load(smokeDir ?? app.getPath('userData'));
-  const session = new Session(process.env.CANVAAAAS_PROVIDER === 'mock' ? 'mock' : 'laozhang', keys, { recent });
+  const prefs = await Prefs.load(smokeDir ?? app.getPath('userData'));
+  const session = new Session(process.env.CANVAAAAS_PROVIDER === 'mock' ? 'mock' : 'laozhang', keys, { recent, prefs });
   await session.init();
   const server = await startServer({ session, port: 0, staticDir: join(app.getAppPath(), 'dist', 'renderer') });
 

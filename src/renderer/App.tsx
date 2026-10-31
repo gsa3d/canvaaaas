@@ -18,6 +18,7 @@ import {
   IconMarqueeOff,
   IconMask,
   IconMinus,
+  IconPalette,
   IconPencil,
   IconPhoto,
   IconPhotoPlus,
@@ -65,7 +66,7 @@ import {
   type SketchStroke,
   type StateDto,
 } from '../shared/api.ts';
-import { getState, post, subscribe, upload, uploadReference } from './api.ts';
+import { getState, post, prefs, savePref, subscribe, upload, uploadReference } from './api.ts';
 import { CanvasView, type MaskEditView, type MaskRef, type Movable, type PickEvent, type SelectOp, type Tool } from './viewer.ts';
 
 /** Объект, выделенный «Палочкой»: его уровни и подсказки, по которым он найден */
@@ -81,22 +82,14 @@ interface Pick {
   at?: [number, number];
 }
 
-/** Настройка, которая помнится между запусками; без доступа к памяти браузера — просто по умолчанию */
-function usePref<T>(key: string, initial: T): [T, (value: T | ((prev: T) => T)) => void] {
+/** Настройка, которая помнится между запусками (её хранит сервер); valid отсеивает то, чего уже нет, — тогда по умолчанию */
+function usePref<T>(key: string, initial: T, valid?: (value: unknown) => boolean): [T, (value: T | ((prev: T) => T)) => void] {
   const [value, setValue] = useState<T>(() => {
-    try {
-      const saved = localStorage.getItem(`canvaaaas:${key}`);
-      return saved === null ? initial : (JSON.parse(saved) as T);
-    } catch {
-      return initial;
-    }
+    const saved = prefs[key];
+    return saved === undefined || saved === null || (valid && !valid(saved)) ? initial : (saved as T);
   });
   useEffect(() => {
-    try {
-      localStorage.setItem(`canvaaaas:${key}`, JSON.stringify(value));
-    } catch {
-      // Не запомнилось — в следующий раз будет по умолчанию
-    }
+    if (JSON.stringify(prefs[key] ?? initial) !== JSON.stringify(value)) savePref(key, value);
   }, [value]);
   return [value, setValue];
 }
@@ -235,6 +228,12 @@ const MODELS: { id: ModelChoice; label: string; tag: string }[] = [
   { id: 'chatgpt', label: 'ChatGPT Images, подписка', tag: 'ChatGPT' },
 ];
 
+const SIZES: SizeChoice[] = ['auto', '1K', '2K', '4K'];
+
+/** Сколько вариантов или шагов можно выбрать в форме */
+const COUNTS = [1, 2, 3, 4];
+const isCount = (v: unknown) => COUNTS.includes(v as number);
+
 /** Nano Banana идёт через laozhang.ai по ключу, ChatGPT — по подписке через Codex, ключ ему не нужен */
 const needsKey = (model: ModelChoice) => model !== 'chatgpt';
 
@@ -276,12 +275,12 @@ export function App() {
   /** Стереть модели то, что под выделением */
   const [hide, setHide] = useState(false);
   /** Перед генерацией ChatGPT расписывает задачу */
-  const [director, setDirector] = useState(false);
-  const [model, setModel] = useState<ModelChoice>('flash');
-  const [size, setSize] = useState<SizeChoice>('auto');
-  const [variants, setVariants] = useState(2);
+  const [director, setDirector] = usePref('director', false);
+  const [model, setModel] = usePref<ModelChoice>('model', 'flash', (v) => MODELS.some((m) => m.id === v));
+  const [size, setSize] = usePref<SizeChoice>('size', 'auto', (v) => SIZES.includes(v as SizeChoice));
+  const [variants, setVariants] = usePref('variants', 2, isCount);
   /** Сколько шагов с критиком, когда включён директор */
-  const [steps, setSteps] = useState(3);
+  const [steps, setSteps] = usePref('steps', 3, isCount);
   /** Слой, маску которого сейчас правят */
   const [maskLayer, setMaskLayer] = useState<string | null>(null);
   /** Слой, в котором работают: палочка ищет только в нём, генерация ложится его версией; нет — новым слоем */
@@ -289,8 +288,7 @@ export function App() {
   const [zoom, setZoom] = useState(0);
   const [toast, setToast] = useState<{ text: string; error: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [styleDraft, setStyleDraft] = useState('');
-  const [dialog, setDialog] = useState<'settings' | 'new' | null>(null);
+  const [dialog, setDialog] = useState<'settings' | 'new' | 'style' | null>(null);
   const [zoomMenu, setZoomMenu] = useState(false);
   const [refs, setRefs] = useState<string[]>([]);
   /** Объект, на который навели в списке объектов */
@@ -316,7 +314,6 @@ export function App() {
   /** В каком порядке в форму новой правки ложились фигуры выделения и штрихи наброска — ⌘Z убирает последнее */
   const formOrder = useRef<('shape' | 'sketch')[]>([]);
   const onMaskShape = useRef<(view: MaskEditView, shape: MaskShape) => Promise<MaskEditResult>>(() => Promise.reject(new Error('Нет правки маски')));
-  const styleTimer = useRef<number | undefined>(undefined);
   const toastTimer = useRef<number | undefined>(undefined);
 
   const doc = state?.doc ?? null;
@@ -364,7 +361,6 @@ export function App() {
     document.title = doc ? `${doc.name}${doc.dirty ? ' •' : ''} — canvaaaas` : 'canvaaaas';
   }, [doc?.name, doc?.dirty]);
   useEffect(() => {
-    setStyleDraft(doc?.style ?? '');
     setSelection([]);
     setSketch([]);
     formOrder.current = [];
@@ -685,6 +681,16 @@ export function App() {
       enterLayer(o);
       viewRef.current?.reveal(o.rect);
     }
+  };
+  /**
+   * Щелчок по фону в «Слоях» — работа вне слоёв, генерация ляжет новым слоем. Маски слоёв уходят из выделения,
+   * нарисованное остаётся
+   */
+  const toBackground = () => {
+    setActive(null);
+    const own = selectionRef.current.filter((s) => !(s.kind === 'mask' && s.id.startsWith('obj:')));
+    if (!own.length) clearSelection();
+    else if (own.length < selectionRef.current.length) updateSelection(() => own);
   };
   /** Работа в слое: он выделен целиком, генерация ляжет его версией */
   const enterLayer = (o: ObjectDto) => {
@@ -1053,10 +1059,7 @@ export function App() {
     }
   };
 
-  const saveStyle = (value: string) => {
-    window.clearTimeout(styleTimer.current);
-    styleTimer.current = window.setTimeout(() => post('/api/doc/style', { style: value }).catch(fail), 600);
-  };
+  const saveStyle = (style: string) => post('/api/doc/style', { style }).then(() => setDialog(null), fail);
 
   // Маску версии правят прежде всего, чтобы скрыть кусок, поэтому сразу ластик
   const editLayerMask = (patch: PatchDto) => {
@@ -1067,6 +1070,25 @@ export function App() {
     setMaskLayer(patch.id);
     setTool('eraser');
     viewRef.current?.reveal(patch.rect);
+  };
+
+  /** Маска версии по объекту, который нарисовала модель: палочка по её ответу; модели выделения нет — её баннер у палочки */
+  const objectMask = async (patch: PatchDto) => {
+    if (!segmentReady) {
+      setMaskLayer(null);
+      setTool('object');
+      notify('Нужна модель выделения объектов', false);
+      return;
+    }
+    setBusy('Ищу объект…');
+    try {
+      await post(`/api/history/${patch.id}/object-mask`, { snap: objectSnap });
+      maskChanged();
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(null);
+    }
   };
 
   const focus = (job: JobDto) => {
@@ -1232,6 +1254,11 @@ export function App() {
                   />
                 </>
               )}
+              <span class="opt-sep" />
+              <button class="opt-button" title="Маска по объекту, который нарисовала модель" onClick={() => void objectMask(editedLayer)}>
+                <IconWand size={16} stroke={STROKE} aria-hidden="true" />
+                По объекту
+              </button>
               <button class="opt-done" onClick={() => setMaskLayer(null)}>
                 Готово
               </button>
@@ -1304,7 +1331,7 @@ export function App() {
               {SELECTING.includes(tool) && hasSelection && (
                 <>
                   <span class="opt-sep" />
-                  <EdgeControl px={edgePx} onChange={changeEdge} />
+                  <Slider label="Край" title="Край выделения шире или уже, пиксели холста" min={-50} max={50} value={edgePx} onChange={changeEdge} />
                 </>
               )}
               {selection.length > 0 && (
@@ -1381,19 +1408,6 @@ export function App() {
         )}
         {doc && (
           <>
-            <section class="panel">
-              <h2>Стиль документа</h2>
-              <textarea
-                rows={2}
-                placeholder="Например: книжная иллюстрация, тёплый вечерний свет"
-                value={styleDraft}
-                onInput={(e) => {
-                  setStyleDraft(e.currentTarget.value);
-                  saveStyle(e.currentTarget.value);
-                }}
-              />
-            </section>
-
             <section
               class="panel"
               onDragOver={(e) => {
@@ -1404,7 +1418,7 @@ export function App() {
                 void addReferences(e.dataTransfer?.files ?? []);
               }}
             >
-              <h2>
+              <h2 class="panel-head">
                 Новая правка
                 <Help>
                   Выделите предмет «Палочкой» (W), область — прямоугольником (R), лассо (L) или кистью (B). Shift добавляет к
@@ -1413,6 +1427,14 @@ export function App() {
                   только выделенное. Палочка по слою открывает его, и правка ложится его версией; по фону — новым слоем. ⌘Z убирает
                   последнее, ⌘D снимает выделение, ⌘↵ — сгенерировать.
                 </Help>
+                <button
+                  class={doc.style ? 'ghost small head-button on' : 'ghost small head-button'}
+                  title={doc.style ? `Стиль документа: ${doc.style}` : 'Стиль документа'}
+                  onClick={() => setDialog('style')}
+                >
+                  <IconPalette size={15} stroke={STROKE} aria-hidden="true" />
+                  Стиль
+                </button>
               </h2>
               {sketch.length > 0 && (
                 <div class="chips">
@@ -1470,7 +1492,7 @@ export function App() {
                     value={countFor(stepwise)}
                     onChange={(e) => (stepwise ? setSteps : setVariants)(Number(e.currentTarget.value))}
                   >
-                    {[1, 2, 3, 4].map((n) => (
+                    {COUNTS.map((n) => (
                       <option value={n}>{n}</option>
                     ))}
                   </select>
@@ -1511,11 +1533,13 @@ export function App() {
               variants={variants}
               steps={steps}
               onSelect={selectObject}
+              onBackground={toBackground}
               onHover={(o) => setLitObject(o?.id ?? null)}
               onRename={(o, name) => post(`/api/objects/${o.id}/rename`, { name }).catch(fail)}
               onHidden={(o, hidden) => post(`/api/objects/${o.id}/hidden`, { hidden }).catch(fail)}
               onCurrent={(o, patch) => post(`/api/objects/${o.id}/current`, { patch }).catch(fail)}
               onMask={editLayerMask}
+              onObjectMask={(patch) => void objectMask(patch)}
               onMore={(patch, change) => void layerVariants(patch, change)}
               onExpand={expandVersion}
               onFill={(o) => void fillUnder(o)}
@@ -1545,6 +1569,7 @@ export function App() {
           onError={fail}
         />
       )}
+      {dialog === 'style' && doc && <StyleDialog style={doc.style} onClose={() => setDialog(null)} onSave={(style) => void saveStyle(style)} />}
       {dialog === 'new' && (
         <div class="modal-backdrop" onClick={() => setDialog(null)}>
           <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="new-title" onClick={(e) => e.stopPropagation()}>
@@ -1649,29 +1674,6 @@ function OptCheck(props: { label: string; title: string; checked: boolean; onCha
   );
 }
 
-/** Край всего выделения: шире или уже на столько пикселей холста */
-function EdgeControl(props: { px: number; onChange: (px: number) => void }) {
-  return (
-    <span class="opt-edge" title="Край выделения шире или уже, пиксели холста">
-      <span>Край</span>
-      <button class="icon" aria-label="Уже" onClick={() => props.onChange(props.px - 1)}>
-        <IconMinus size={14} stroke={STROKE} />
-      </button>
-      <input
-        type="number"
-        min={-100}
-        max={100}
-        value={props.px}
-        aria-label="Край выделения, пиксели"
-        onChange={(e) => props.onChange(Number(e.currentTarget.value))}
-      />
-      <button class="icon" aria-label="Шире" onClick={() => props.onChange(props.px + 1)}>
-        <IconPlus size={14} stroke={STROKE} />
-      </button>
-    </span>
-  );
-}
-
 /** Модель выделения объектов: скачать, ход скачивания и загрузки, ошибка */
 function SegmentBanner(props: { segment: StateDto['segment']; onError: (err: unknown) => void }) {
   const { segment } = props;
@@ -1732,11 +1734,13 @@ function LayersPanel(props: {
   variants: number;
   steps: number;
   onSelect: (o: ObjectDto, add: boolean) => void;
+  onBackground: () => void;
   onHover: (o: ObjectDto | null) => void;
   onRename: (o: ObjectDto, name: string) => void;
   onHidden: (o: ObjectDto, hidden: boolean) => void;
   onCurrent: (o: ObjectDto, patch: string | null) => void;
   onMask: (patch: PatchDto) => void;
+  onObjectMask: (patch: PatchDto) => void;
   onMore: (patch: PatchDto, change?: RedoChange) => void;
   onExpand: (patch: PatchDto) => void;
   onFill: (o: ObjectDto) => void;
@@ -1851,7 +1855,8 @@ function LayersPanel(props: {
         Слои
         <Help>
           Слой — кусок картинки со своими пикселями поверх остального. Щелчок по слою здесь или палочкой на холсте — работа в нём:
-          палочка ищет только в нём, генерация ложится его версией. Версии — миниатюры под слоем: щелчок показывает версию, «+» —
+          палочка ищет только в нём, генерация ложится его версией. Фон внизу — работа вне слоёв: генерация ляжет новым слоем.
+          Версии — миниатюры под слоем: щелчок показывает версию, «+» —
           ещё варианты. ⌘J — копия выделенного новым слоем, ⌘⇧J — вырезать: под слоем дорисуется фон. Shift-щелчок — несколько
           слоёв, ⌘E их объединяет. «\» — исходник всей картинки, пока держите.
         </Help>
@@ -1891,8 +1896,9 @@ function LayersPanel(props: {
           );
         })}
         {(children.get(undefined) ?? []).map((o) => row(o, 0))}
-        <li class="layer background">
-          <div class="layer-row">
+        {/* Фон выбран, когда работают не в слое и слоёв в выделении нет: генерация ляжет новым слоем */}
+        <li class={!props.active && !props.picked.size ? 'layer background active' : 'layer background'}>
+          <div class="layer-row" title="Работать на фоне: правка — новым слоем" onClick={props.onBackground}>
             <Thumb src={`/api/doc/base/${props.doc.levels - 1}/0/0.jpg?doc=${props.doc.id}&base=${props.doc.baseState}`} />
             <span class="layer-name">Фон</span>
           </div>
@@ -1928,6 +1934,7 @@ function LayerCard(props: {
   steps: number;
   onCurrent: (o: ObjectDto, patch: string | null) => void;
   onMask: (patch: PatchDto) => void;
+  onObjectMask: (patch: PatchDto) => void;
   onMore: (patch: PatchDto, change?: RedoChange) => void;
   onExpand: (patch: PatchDto) => void;
   onFill: (o: ObjectDto) => void;
@@ -2077,6 +2084,15 @@ function LayerCard(props: {
           onClick={() => current && props.onMask(current)}
         >
           <IconMask size={17} stroke={STROKE} />
+        </button>
+        <button
+          class="icon"
+          title={current ? 'Маска по объекту, который нарисовала модель' : 'У исходника маски нет'}
+          aria-label="Маска по объекту"
+          disabled={!current || o.hidden}
+          onClick={() => current && props.onObjectMask(current)}
+        >
+          <IconWand size={17} stroke={STROKE} />
         </button>
         {o.kind !== 'fill' && (
           <button
@@ -2384,6 +2400,59 @@ function SizeHint(props: { advice: SizeAdvice; auto: boolean; sizes: string[]; o
     <p class="hint size-hint" title="Кусок с контекстом → ответ модели">
       {piece} → {output.width}×{output.height}, {label}
     </p>
+  );
+}
+
+/** Стиль документа: модель получает его с каждой задачей; ⌘↵ — сохранить, Esc — передумать */
+function StyleDialog(props: { style: string; onClose: () => void; onSave: (style: string) => void }) {
+  const [value, setValue] = useState(props.style);
+  const field = useRef<HTMLTextAreaElement>(null);
+  // autofocus браузер выполняет раз за загрузку страницы, а окно открывают много раз
+  useEffect(() => {
+    const el = field.current;
+    el?.focus();
+    el?.setSelectionRange(el.value.length, el.value.length);
+  }, []);
+  const save = () => props.onSave(value.trim());
+  return (
+    <div class="modal-backdrop" onClick={props.onClose}>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="style-title" onClick={(e) => e.stopPropagation()}>
+        <h2 id="style-title">
+          Стиль документа
+          <Help>Добавляется к каждой задаче для модели и директора. Сохраняется в проекте .caaa, в картинку — нет.</Help>
+        </h2>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            save();
+          }}
+          onKeyDown={(e) => {
+            // Своё ⌘↵: общее сочетание отправило бы форму новой правки
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+              e.preventDefault();
+              e.stopPropagation();
+              save();
+            }
+          }}
+        >
+          <textarea
+            ref={field}
+            rows={5}
+            placeholder="Например: книжная иллюстрация, тёплый вечерний свет"
+            value={value}
+            onInput={(e) => setValue(e.currentTarget.value)}
+          />
+          <div class="row">
+            <button class="primary" type="submit" disabled={value.trim() === props.style.trim()} title="⌘↵">
+              Сохранить
+            </button>
+            <button type="button" onClick={props.onClose}>
+              Отмена
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 

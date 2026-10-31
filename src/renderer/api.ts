@@ -19,6 +19,28 @@ export function post<T = { ok: true }>(path: string, body?: unknown): Promise<T>
   }).then((r) => handle<T>(r));
 }
 
+/** Настройки интерфейса: их хранит сервер, окно читает раз при запуске, до первой отрисовки */
+export const prefs: Record<string, unknown> = {};
+
+export async function loadPrefs(): Promise<void> {
+  Object.assign(prefs, await fetch('/api/prefs').then((r) => handle<Record<string, unknown>>(r)).catch(() => ({})));
+}
+
+const prefTimers = new Map<string, number>();
+
+/** Сохранить настройку; ползунок меняет её много раз в секунду — на сервер уходит последнее значение */
+export function savePref(key: string, value: unknown): void {
+  prefs[key] = value;
+  window.clearTimeout(prefTimers.get(key));
+  prefTimers.set(
+    key,
+    window.setTimeout(() => {
+      prefTimers.delete(key);
+      post('/api/prefs', { key, value }).catch(() => undefined);
+    }, 300),
+  );
+}
+
 export function upload(file: File): Promise<unknown> {
   return fetch(`/api/doc/upload?name=${encodeURIComponent(file.name)}`, {
     method: 'POST',

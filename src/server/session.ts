@@ -9,6 +9,7 @@ import sharp from 'sharp';
 import { CanvasDocument, TILE_SIZE, type DocObject, type NewPatch, type Patch } from '../core/document.ts';
 import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, type ImageFormat } from '../core/image-file.ts';
 import { encodeProject, isProject, isProjectPath, openProject, PROJECT_EXTENSION } from '../core/project.ts';
+import type { Prefs } from '../core/prefs.ts';
 import type { RecentFiles } from '../core/recent.ts';
 import {
   applyLayer,
@@ -32,12 +33,12 @@ import {
   type RawImage,
 } from '../core/edit-region.ts';
 import { intersect, type Rect } from '../core/frame.ts';
-import { expandMaskByDiff } from '../core/expand.ts';
+import { changedInside, expandMaskByDiff } from '../core/expand.ts';
 import { readLedger, withDirectorLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha, featherAlphaRegion, MASK_THRESHOLD, maskBBox } from '../core/mask.ts';
 import { applyShapes, applyShapesRegion, type MaskLookup } from '../core/mask-shapes.ts';
 import { changeEdge } from '../core/lines.ts';
-import { area, descendants, dilate, layerName, overlap, removeObject, trim, unionBitmap } from '../core/objects.ts';
+import { area, clipBitmap, descendants, dilate, layerName, overlap, removeObject, trim, unionBitmap } from '../core/objects.ts';
 import type { Bitmap } from '../core/segment.ts';
 import type { KeyStore } from '../core/secrets.ts';
 import { checkSketch } from '../core/sketch.ts';
@@ -84,6 +85,8 @@ const LIFT_GROW = 2;
 /** Подсветка слоя под курсором — не больше этого по большей стороне, как у объекта под курсором */
 const HOVER_LAYER_MAX = 1600;
 const LIFT_FEATHER = 2;
+/** Объект по маске версии выходит за видимое не дальше этого от того, что модель поменяла: контур и сглаживание */
+const OBJECT_REACH = 6;
 
 /**
  * Насколько шире слоя модель дорисовывает фон под ним: растушёвка вклейки и ещё запас, иначе на контуре слоя дорисованное
@@ -222,6 +225,7 @@ export interface Host {
 export interface SessionOptions {
   host?: Host;
   recent?: RecentFiles;
+  prefs?: Prefs;
 }
 
 /** Во что записывается документ: картинка или проект .caaa со слоями */
@@ -251,6 +255,9 @@ export class Session {
   private emitTimer: NodeJS.Timeout | undefined;
   host: Host | null;
   private readonly recent: RecentFiles | null;
+  /** Настройки интерфейса: без хранилища (тесты) — только на этот запуск */
+  private readonly prefs: Prefs | null;
+  private prefsInMemory: Record<string, unknown> = {};
   /** Файл, открытый с диска; null — новый холст или картинка, загруженная из браузера */
   private file: OpenFile | null = null;
   /** Разрешение для печати: из исходника или из пресета нового холста */
@@ -285,6 +292,7 @@ export class Session {
     this.keys = keys;
     this.host = opts.host ?? null;
     this.recent = opts.recent ?? null;
+    this.prefs = opts.prefs ?? null;
     this.segmentation = new Segmentation(() => this.changed());
   }
 
@@ -542,6 +550,16 @@ export class Session {
   recentThumb(id: string): string {
     if (!this.recent?.get(id)) throw new Error('Нет такого файла в списке недавних');
     return this.recent.thumbPath(id);
+  }
+
+  /** Настройки интерфейса: модель, разрешение, кисть и прочее, что окно помнит между запусками */
+  preferences(): Record<string, unknown> {
+    return this.prefs?.all() ?? { ...this.prefsInMemory };
+  }
+
+  async setPreference(key: string, value: unknown): Promise<void> {
+    if (this.prefs) await this.prefs.set(key, value);
+    else this.prefsInMemory = { ...this.prefsInMemory, [key]: value };
   }
 
   /** Картинка или проект, загруженные из браузера (сервер для разработки): пути к файлу нет, «Сохранить» их не перезапишет */
@@ -1534,6 +1552,68 @@ export class Session {
       }
       this.changed();
       return addedPx;
+    });
+  }
+
+  /**
+   * Маска версии — по объекту, который нарисовала модель: палочка (SAM) ищет его в ответе модели. Подсказка — рамка
+   * того, что модель поменяла под маской (сравнение с холстом под версией, как у «Расширить по правке»); объект может
+   * выйти за видимое, но только туда, где модель что-то поменяла. Если изменений почти нет или поменялось почти всё,
+   * подсказка — рамка того, что от версии видно, и за него объект не выходит. Край — с контуром и растушёвкой, как у
+   * слоя из выделения, маска — сразу прозрачность (bakeMask). У текущей версии и слой становится этим объектом: его
+   * выделяет щелчок по слою, его находит палочка. Объект ищется секунды, поэтому мимо очереди правок; маску,
+   * поправленную за это время, он не перебивает. Шаг ⌘Z
+   */
+  async objectMask(patchId: string, snap: boolean): Promise<void> {
+    const doc = this.requireDoc();
+    const p = doc.patch(patchId);
+    if (p.lifted) throw new Error('У исходника слоя нет ответа модели');
+    const { rect, maskVersion } = p;
+    const n = rect.width * rect.height;
+    const rgb = Buffer.alloc(n * 3);
+    const alpha = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      p.layer.copy(rgb, i * 3, i * 4, i * 4 + 3);
+      alpha[i] = p.layer[i * 4 + 3]!;
+    }
+    const seenBox = maskBBox(alpha, rect.width, rect.height);
+    if (!seenBox) throw new Error('Версию не видно: маска пустая');
+    const seen = { rect, mask: alpha.map((a) => (a ? 255 : 0)) };
+    // Под версией — холст без неё, у правки части слоя — с прежней версией на её месте; за краем холста не сравнить
+    const base = p.base && p.part && doc.hasPatch(p.base) ? doc.patch(p.base) : undefined;
+    const onCanvas = rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= doc.width && rect.y + rect.height <= doc.height;
+    const under = onCanvas ? (base ? doc.regionReplaced(rect, p.id, base.rect, base.layer) : doc.regionWithout(rect, p.id)) : null;
+    const diff = under && changedInside(seen.mask, under, rgb, rect.width, rect.height);
+    const at = (r: Rect) => ({ x: rect.x + r.x, y: rect.y + r.y, width: r.width, height: r.height });
+    let found: Bitmap | null;
+    if (diff) {
+      const changed = { rect, mask: diff.changed };
+      const fit = { changed: { rect, mask: diff.changed.map((c, i) => c & seen.mask[i]!) }, seen };
+      found = await this.segmentation.objectOn(rgb, rect, { box: at(diff.box), snap, fit });
+      // За тем, что было видно, — только там, где модель что-то поменяла: перерисованное без изменений (линии со сдвигом) не берём
+      found = found && clipBitmap(found, unionBitmap(seen, dilate(changed, OBJECT_REACH, rect)));
+    } else {
+      found = await this.segmentation.objectOn(rgb, rect, { box: at(seenBox), snap });
+      found = found && clipBitmap(found, seen);
+    }
+    if (!found) throw new Error('Объект не нашёлся');
+    await this.serialDoc((d) => {
+      if (d !== doc || !d.hasPatch(patchId) || d.patch(patchId).maskVersion !== maskVersion) throw new Error('Маску поменяли, пока искали объект');
+      const grown = dilate(found, LIFT_GROW, rect);
+      const binary = new Uint8Array(n);
+      for (let y = 0; y < grown.rect.height; y++) {
+        binary.set(grown.mask.subarray(y * grown.rect.width, (y + 1) * grown.rect.width), (grown.rect.y - rect.y + y) * rect.width + grown.rect.x - rect.x);
+      }
+      const feathered = featherAlpha(binary, rect.width, rect.height, LIFT_FEATHER);
+      const mask = Uint8Array.from(feathered, (a) => Math.round(a * 255));
+      const area = trim({ rect, mask: binary });
+      const obj = p.object ? d.objects.find((o) => o.id === p.object && o.kind !== 'fill' && o.current === patchId) : undefined;
+      d.bakeMask(patchId);
+      d.batch(() => {
+        d.setPatchMask(patchId, mask);
+        if (obj && area) d.setObjects(d.objects.map((o) => (o === obj ? { ...o, ...area, version: d.nextObjectVersion(), lost: undefined } : o)));
+      });
+      this.changed();
     });
   }
 

@@ -409,8 +409,7 @@ button.swatch.active,
 }
 
 .opt-slider,
-.opt-check,
-.opt-edge {
+.opt-check {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -438,16 +437,11 @@ button.swatch.active,
   color: var(--ink);
 }
 
-.opt-edge button.icon {
-  min-height: 24px;
-  width: 24px;
-  padding: 0;
-}
-
-.opt-edge input {
-  width: 48px;
-  padding: 2px 4px;
-  text-align: right;
+.opt-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
 }
 
 .opt-done {
@@ -861,6 +855,25 @@ button.swap {
   font-weight: 400;
 }
 
+/* Заголовок с кнопкой справа */
+.panel h2.panel-head {
+  display: flex;
+  align-items: center;
+}
+
+.head-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.head-button.on {
+  color: var(--accent);
+}
+
 /* ——— Подсказка «?» ——— */
 
 .help {
@@ -1148,12 +1161,18 @@ button.chip-clear:hover:not(:disabled) {
 }
 
 .layer.background .layer-row {
-  cursor: default;
+  margin-top: 4px;
   color: var(--muted);
 }
 
-.layer.background .layer-row:hover {
+/* У фона выбрана строка, а не вся карточка: над ней черта списка */
+.layer.background.active {
   background: transparent;
+}
+
+.layer.background.active .layer-row {
+  background: var(--accent-soft);
+  color: var(--ink);
 }
 
 /* Миниатюра: прозрачное — шахматкой, как в редакторах */
