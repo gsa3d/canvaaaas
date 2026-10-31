@@ -42,6 +42,22 @@ describe('Линии рисунка', () => {
     expect(at(brushed, 100, 120)).toBe(false);
   });
 
+  it('привязка: сплошь тёмное под маской (кудри) остаётся целиком, задетый штрих за светлым — нет', () => {
+    const rgb = drawing();
+    const ink = (x: number, y: number) => rgb.fill(0, (y * W + x) * 3, (y * W + x) * 3 + 3);
+    // Кудри справа от квадрата: тёмная масса в мелких светлых точках; правее, за белым, — чужой штрих
+    for (let y = 60; y < 140; y++) for (let x = 146; x < 186; x++) if (x % 4 || y % 4) ink(x, y);
+    for (let y = 70; y < 80; y++) for (let x = 196; x < 199; x++) ink(x, y);
+    const map = lineMap(rgb, rect);
+    const rough = { rect: { x: 60, y: 58, width: 140, height: 36 }, mask: new Uint8Array(140 * 36).fill(255) };
+    const snapped = snapToLines(rough, map)!;
+    expect(at(snapped, 60, 60)).toBe(true);
+    // Далеко от светлой клетки, но под маской и вплотную к взятому
+    expect(at(snapped, 178, 80)).toBe(true);
+    expect(at(snapped, 178, 130)).toBe(false);
+    expect(at(snapped, 197, 75)).toBe(false);
+  });
+
   it('край шире и уже', () => {
     const square = { rect: { x: 50, y: 50, width: 20, height: 20 }, mask: new Uint8Array(400).fill(255) };
     const wider = changeEdge(square, 3, rect)!;

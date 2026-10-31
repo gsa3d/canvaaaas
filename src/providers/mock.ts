@@ -1,6 +1,7 @@
 // Провайдер без сети — для тестов и проверки интерфейса.
 // negate: первая входная картинка с инвертированными цветами (правка видна везде, в том числе вне маски);
-// blob: поверх куска рисуется «объект» крупнее выделения, как это любит делать настоящая модель.
+// blob: поверх куска рисуется «объект» крупнее выделения, как это любит делать настоящая модель;
+// mask: маска «объекта» — того, что на первой картинке тёмное: белым, остальное чёрным (как «Маска по объекту»).
 import sharp from 'sharp';
 import type { GenerateRequest, GenerateResult, ImageProvider, Size } from './types.ts';
 
@@ -9,7 +10,7 @@ export interface MockProvider extends ImageProvider {
 }
 
 export interface MockOptions {
-  mode?: 'negate' | 'blob';
+  mode?: 'negate' | 'blob' | 'mask';
   delayMs?: number;
 }
 
@@ -62,6 +63,8 @@ export function mockProvider(opts: MockOptions = {}): MockProvider {
           .composite([{ input: Buffer.from(svg) }])
           .png()
           .toBuffer();
+      } else if (opts.mode === 'mask') {
+        image = await sharp(input.data).resize(width, height, { fit: 'fill' }).greyscale().negate({ alpha: false }).threshold(156).png().toBuffer();
       } else {
         image = await sharp(input.data).resize(width, height, { fit: 'fill' }).negate({ alpha: false }).png().toBuffer();
       }

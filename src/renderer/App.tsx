@@ -57,6 +57,7 @@ import {
   type ModelChoice,
   type ModelOutputsDto,
   type ObjectDto,
+  type ObjectMaskRequest,
   type PatchDto,
   type PickResult,
   type RecentDto,
@@ -1072,17 +1073,11 @@ export function App() {
     viewRef.current?.reveal(patch.rect);
   };
 
-  /** Маска версии по объекту, который нарисовала модель: палочка по её ответу; модели выделения нет — её баннер у палочки */
+  /** Маска версии по объекту, который нарисовала модель: её рисует модель из формы — это генерация */
   const objectMask = async (patch: PatchDto) => {
-    if (!segmentReady) {
-      setMaskLayer(null);
-      setTool('object');
-      notify('Нужна модель выделения объектов', false);
-      return;
-    }
-    setBusy('Ищу объект…');
+    setBusy('Модель рисует маску…');
     try {
-      await post(`/api/history/${patch.id}/object-mask`, { snap: objectSnap });
+      await post(`/api/history/${patch.id}/object-mask`, { model } satisfies ObjectMaskRequest);
       maskChanged();
     } catch (err) {
       fail(err);
@@ -1255,7 +1250,7 @@ export function App() {
                 </>
               )}
               <span class="opt-sep" />
-              <button class="opt-button" title="Маска по объекту, который нарисовала модель" onClick={() => void objectMask(editedLayer)}>
+              <button class="opt-button" title="Маска по объекту: её рисует модель из формы — это генерация" onClick={() => void objectMask(editedLayer)}>
                 <IconWand size={16} stroke={STROKE} aria-hidden="true" />
                 По объекту
               </button>
@@ -2087,7 +2082,7 @@ function LayerCard(props: {
         </button>
         <button
           class="icon"
-          title={current ? 'Маска по объекту, который нарисовала модель' : 'У исходника маски нет'}
+          title={current ? 'Маска по объекту: её рисует модель из формы — это генерация' : 'У исходника маски нет'}
           aria-label="Маска по объекту"
           disabled={!current || o.hidden}
           onClick={() => current && props.onObjectMask(current)}

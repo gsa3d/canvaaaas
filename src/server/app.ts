@@ -11,7 +11,9 @@ import {
   type DetachRequest,
   type EdgeRequest,
   type MaskShape,
+  MODEL_CHOICES,
   type MoreVariantsRequest,
+  type ObjectMaskRequest,
   type PatchVariantsRequest,
   type PickRequest,
   type RectDto,
@@ -247,8 +249,9 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     json(res, { addedPx: await session.expandVersion(id!) });
   });
   route('POST', '/api/history/:id/object-mask', async (req, res, [id]) => {
-    const { snap } = await readJson<{ snap?: boolean }>(req);
-    await session.objectMask(id!, snap === true);
+    const { model } = await readJson<ObjectMaskRequest>(req);
+    if (!MODEL_CHOICES.includes(model)) throw new HttpError(400, 'Непонятная модель');
+    await session.objectMask(id!, model);
     json(res, { ok: true });
   });
   // Отделённый объект картинкой — для превью сдвига; маска слоя меняется, поэтому не кэшируется

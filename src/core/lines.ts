@@ -117,6 +117,24 @@ export function snapToLines(b: Bitmap, map: LineMap, reach = 0): Bitmap | null {
     const cov = inside[r]! / sizes[r]!;
     if (cov >= WHOLE || (mask[i] && (reach > 0 || cov > STRAY))) out[i] = 255;
   }
+  // Тёмное под маской, которое без разрыва примыкает к взятому, — тоже его: сплошь тёмное (кудри, чёрная одежда) — не
+  // линия, и светлых областей, по которым его взять, в нём нет. Задетые маской штрихи соседей отделены от взятого светлым
+  const queue = new Int32Array(n);
+  let tail = 0;
+  for (let i = 0; i < n; i++) if (out[i]) queue[tail++] = i;
+  for (let head = 0; head < tail; head++) {
+    const i = queue[head]!;
+    const x = i % width;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx;
+        const j = i + dy * width + dx;
+        if (nx < 0 || nx >= width || j < 0 || j >= n || out[j] || region[j]! >= 0 || !mask[j]) continue;
+        out[j] = 255;
+        queue[tail++] = j;
+      }
+    }
+  }
   // Линии и щели рядом со взятым — его контур
   const toOut = insideDistance(invert(out), width, height);
   for (let i = 0; i < n; i++) if (region[i]! < 0 && !out[i] && toOut[i]! <= LINE_WIDTH + gap) out[i] = 255;

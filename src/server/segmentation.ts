@@ -5,9 +5,9 @@ import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { CanvasDocument } from '../core/document.ts';
 import { intersect, type Rect } from '../core/frame.ts';
-import { changeEdge, lineMap, snapToLines } from '../core/lines.ts';
-import { area, clipBitmap, clipOut, clipScaled, overlap, unionBitmap } from '../core/objects.ts';
-import { levels, LOW, rasterize, Segmenter, type Backend, type Bitmap, type Candidate, type Embedding, type SegmentPrompt } from '../core/segment.ts';
+import { lineMap, snapToLines } from '../core/lines.ts';
+import { area, clipBitmap, clipOut, clipScaled, overlap } from '../core/objects.ts';
+import { levels, rasterize, Segmenter, type Backend, type Bitmap, type Candidate, type Embedding, type SegmentPrompt } from '../core/segment.ts';
 import { installModel, modelFiles, modelInstalled } from '../core/segment-model.ts';
 import { OUTSIDE_LAYER, type MaskResult, type PickRequest, type PickResult, type RectDto, type SegmentDto, type SegmentPoint } from '../shared/api.ts';
 
@@ -21,8 +21,6 @@ const REFINE_BELOW = 0.45;
 const HOVER_MAX = 1600;
 /** Уровень заметно меняет выделение, если добавляет (или вычитает) хотя бы такую свою долю */
 const CHANGES = 0.25;
-/** Маска с рамкой шире берётся, если совпадает с изменённым моделью хуже не больше чем на столько */
-const WIDER_WORSE = 0.02;
 
 interface CachedEmbedding {
   docId: string;
@@ -289,59 +287,6 @@ export class Segmentation {
     return bitmaps.map((b) => snapToLines(b, map, reach) ?? b);
   }
 
-  /**
-   * Объект на картинке, которой на холсте нет целиком (ответ модели у версии): rgb — её пиксели размером с rect,
-   * box — рамка подсказки на холсте. Признаки — одноразовые, мимо кэша участков холста. fit — что модель поменяла
-   * (changed, внутри seen — того, что от версии видно): из масок разного охвата берётся та, что лучше с этим совпадает,
-   * без fit — лучшая по оценке декодера. Объект, упёршийся в рамку, модель нарисовала крупнее, чем видно: с fit рамка
-   * до двух раз шире в ту сторону, пока маска с ней совпадает с изменённым не хуже (с широкой рамкой SAM, бывает,
-   * отдаёт фон вокруг объекта). Мелкий для картинки объект ищется второй раз вокруг себя, как у refine. snap — край по
-   * линиям этой же картинки. null — объекта нет
-   */
-  async objectOn(rgb: Buffer, rect: Rect, opts: { box: Rect; snap: boolean; fit?: { changed: Bitmap; seen: Bitmap } }): Promise<Bitmap | null> {
-    const s = await this.segmenter();
-    const { fit } = opts;
-    const score = (b: Bitmap, decoder: number) => {
-      if (!fit) return decoder;
-      const common = overlap(b, fit.changed);
-      return common / (overlap(b, fit.seen) + area(fit.changed) - common);
-    };
-    const find = async (emb: Embedding, prompt: Rect) => {
-      const found = (await s.decode(emb, { box: prompt })).flatMap((c) => {
-        const b = rasterize(c, 1, rect);
-        return b ? [{ b, score: score(b, c.score) }] : [];
-      });
-      return found.length ? found.reduce((a, f) => (f.score > a.score ? f : a)) : null;
-    };
-    const inside = (r: Rect, pad: number) => intersect(grow(r, pad, { width: rect.x + rect.width, height: rect.y + rect.height }), rect);
-    const padOf = (r: Rect, k: number) => Math.max(16, k * Math.max(r.width, r.height));
-    const whole = await s.encode(rgb, rect);
-    // Рамка с запасом: целый объект в неё не упирается
-    let prompt = inside(opts.box, padOf(opts.box, 0.1));
-    let top = await find(whole, prompt);
-    for (let i = 0; top && fit && i < 2; i++) {
-      const wider = widen(prompt, top.b.rect, rect, padOf(prompt, 0.25));
-      if (!wider) break;
-      const next = await find(whole, wider);
-      if (!next || next.score < top.score - WIDER_WORSE) break;
-      prompt = wider;
-      top = next;
-    }
-    if (!top) return null;
-    let b = top.b;
-    const side = Math.max(b.rect.width, b.rect.height);
-    if (side < REFINE_BELOW * Math.max(rect.width, rect.height)) {
-      const crop = inside(b.rect, Math.max(32, 0.4 * side));
-      b = (await find(await s.encode(cut(rgb, rect, crop), crop), inside(b.rect, padOf(b.rect, 0.03))))?.b ?? b;
-    }
-    if (!opts.snap) return b;
-    const around = inside(b.rect, Math.max(24, 0.15 * Math.max(b.rect.width, b.rect.height)));
-    const snapped = snapToLines(b, lineMap(cut(rgb, rect, around), around));
-    // Линии правят только край: толстый тёмный штрих внутри объекта — линия, и без этого стал бы в маске дырой
-    const core = changeEdge(b, -2 * (Math.max(rect.width, rect.height) / LOW), rect);
-    return snapped && core ? unionBitmap(snapped, core) : (snapped ?? b);
-  }
-
   /** Сохранить готовую маску выделения (край, мазок): её id — для фигуры kind: 'mask' */
   keep(bitmap: Bitmap): MaskResult {
     return { id: this.store({ bitmap, points: [], crop: bitmap.rect, refined: true }), rect: bitmap.rect };
@@ -384,33 +329,6 @@ export class Segmentation {
   bitmap(id: string): Bitmap {
     return this.stored(id).bitmap;
   }
-}
-
-/**
- * Рамка шире на by с тех сторон, где в неё упёрся объект found (на клетку сетки модели над rect), но не за rect;
- * null — не упёрся
- */
-function widen(box: Rect, found: Rect, rect: Rect, by: number): Rect | null {
-  const near = 1.5 * (Math.max(rect.width, rect.height) / LOW);
-  const x0 = found.x - box.x <= near && box.x > rect.x ? Math.max(rect.x, box.x - by) : box.x;
-  const y0 = found.y - box.y <= near && box.y > rect.y ? Math.max(rect.y, box.y - by) : box.y;
-  const right = box.x + box.width;
-  const bottom = box.y + box.height;
-  const x1 = right - (found.x + found.width) <= near && right < rect.x + rect.width ? Math.min(rect.x + rect.width, right + by) : right;
-  const y1 = bottom - (found.y + found.height) <= near && bottom < rect.y + rect.height ? Math.min(rect.y + rect.height, bottom + by) : bottom;
-  if (x0 === box.x && y0 === box.y && x1 === right && y1 === bottom) return null;
-  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
-}
-
-/** Пиксели участка part из RGB картинки размером с rect */
-function cut(rgb: Buffer, rect: Rect, part: Rect): Buffer {
-  if (part.x === rect.x && part.y === rect.y && part.width === rect.width && part.height === rect.height) return rgb;
-  const out = Buffer.alloc(part.width * part.height * 3);
-  for (let y = 0; y < part.height; y++) {
-    const from = ((part.y - rect.y + y) * rect.width + part.x - rect.x) * 3;
-    rgb.copy(out, y * part.width * 3, from, from + part.width * 3);
-  }
-  return out;
 }
 
 /** Где ищет палочка: в слое, где работают, или на фоне — всё, кроме видимых слоёв */

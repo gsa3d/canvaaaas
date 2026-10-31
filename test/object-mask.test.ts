@@ -2,19 +2,19 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { changedInside } from '../src/core/expand.ts';
 import { featherAlpha } from '../src/core/mask.ts';
+import { alignMask, objectMaskRequest } from '../src/core/object-mask.ts';
 import { area, overlap, trim } from '../src/core/objects.ts';
 import { Prefs } from '../src/core/prefs.ts';
 import type { Bitmap } from '../src/core/segment.ts';
-import { modelInstalled } from '../src/core/segment-model.ts';
 import { envOnlyStore } from '../src/core/secrets.ts';
+import { mockProvider } from '../src/providers/mock.ts';
 import { Session } from '../src/server/session.ts';
 
 const W = 900;
 const H = 700;
 const BASE: [number, number, number] = [235, 232, 225];
-/** Выделение, по которому модель рисовала: куда шире «дерева» */
+/** Выделение, по которому модель рисовала: куда шире «дерева»; 5:4 — у подставной модели таких пропорций нет */
 const R = { x: 100, y: 100, width: 500, height: 400 };
 /** «Дерево» — тёмный круг не в середине выделения */
 const TREE = { cx: 280, cy: 300, r: 80 };
@@ -47,45 +47,7 @@ function treeMask(): Bitmap {
   return { rect, mask };
 }
 
-describe('Что модель поменяла под маской', () => {
-  it('рамка — по изменённому, редкий шум по всему куску её не раздувает; без изменений — null', () => {
-    const w = 200;
-    const h = 100;
-    const before = new Uint8Array(w * h * 3).fill(200);
-    const after = Uint8Array.from(before);
-    const mask = new Uint8Array(w * h).fill(255);
-    expect(changedInside(mask, before, after, w, h)).toBeNull();
-    for (let y = 30; y < 70; y++) for (let x = 120; x < 170; x++) after.fill(20, (y * w + x) * 3, (y * w + x) * 3 + 3);
-    // Две одиночные точки шума в углах
-    after.fill(0, 0, 3);
-    after.fill(0, (h * w - 1) * 3, h * w * 3);
-    const found = changedInside(mask, before, after, w, h)!;
-    expect(found.box.x).toBeGreaterThanOrEqual(118);
-    expect(found.box.x + found.box.width).toBeLessThanOrEqual(172);
-    expect(found.box.y).toBeGreaterThanOrEqual(28);
-    expect(found.box.y + found.box.height).toBeLessThanOrEqual(72);
-    // Вне маски изменённого нет
-    expect(changedInside(new Uint8Array(w * h), before, after, w, h)).toBeNull();
-  });
-});
-
-describe('Настройки интерфейса', () => {
-  it('помнятся после перезапуска; чужое имя и слишком длинное значение — ошибка', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'canvaaaas-prefs-'));
-    try {
-      const prefs = await Prefs.load(dir);
-      await prefs.set('model', 'pro');
-      await prefs.set('variants', 3);
-      expect((await Prefs.load(dir)).all()).toEqual({ model: 'pro', variants: 3 });
-      expect(() => prefs.set('../x', 1)).toThrow();
-      expect(() => prefs.set('style', 'x'.repeat(5000))).toThrow();
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe.skipIf(!modelInstalled())('Маска по объекту (SAM)', () => {
+describe('Маска по объекту', () => {
   /** Слой «дерево» с версией: ответ модели на весь R, видно его по выделению selected (растушёвка 24) */
   async function setup(selected: Uint8Array) {
     const s = new Session('mock', envOnlyStore());
@@ -103,30 +65,26 @@ describe.skipIf(!modelInstalled())('Маска по объекту (SAM)', () =>
     return { s, doc };
   }
 
-  it('модель нарисовала дерево шире выделения: маска — всё дерево, а не обрезанное рамкой; за выделением — только дерево', { timeout: 60_000 }, async () => {
-    // Выделение кончается посреди дерева: справа от x = TREE.cx + 30
-    const right = TREE.cx + 30 - R.x;
-    const selected = new Uint8Array(R.width * R.height);
-    for (let y = 0; y < R.height; y++) selected.fill(255, y * R.width, y * R.width + right);
-    const { s, doc } = await setup(selected);
-    await s.objectMask('a', false);
-    const p = doc.patch('a');
-    expect(iou(trim({ rect: R, mask: p.mask })!, treeMask())).toBeGreaterThan(0.85);
-    // За выделением рядом с деревом модель ничего не поменяла — там версии нет
-    const i = (TREE.cy - R.y) * R.width + TREE.cx + TREE.r + 30 - R.x;
-    expect(p.layer[i * 4 + 3]).toBe(0);
+  it('кусок не в пропорциях модели дополняется серыми полями до ближайших, разрешение — не меньше куска', async () => {
+    const rgb = answer();
+    const req = await objectMaskRequest(rgb, new Uint8Array(R.width * R.height).fill(255), R.width, R.height, mockProvider());
+    expect(req.generate.aspectRatio).toBe('4:3');
+    expect(req.frame).toEqual({ width: 533, height: 400 });
+    expect(req.at).toEqual({ x: 16, y: 0 });
+    expect(req.generate.imageSize).toBe('1K');
+    expect(req.generate.images).toHaveLength(2);
+    expect(req.generate.prompt).toContain('padding');
   });
 
-  it('маска версии и слой — по дереву, а не по выделению; вне дерева холст побайтно как под версией; ⌘Z возвращает', { timeout: 60_000 }, async () => {
+  it('маска версии и слой — по дереву, а не по выделению; вне дерева холст побайтно как под версией; ⌘Z возвращает', { timeout: 30_000 }, async () => {
     const { s, doc } = await setup(new Uint8Array(R.width * R.height).fill(255));
     const withRect = Buffer.from(doc.composite);
 
-    await s.objectMask('a', false);
+    await s.objectMask('a', 'flash');
     const p = doc.patch('a');
-    const found = trim({ rect: R, mask: p.mask })!;
-    expect(iou(found, treeMask())).toBeGreaterThan(0.85);
+    expect(iou(trim({ rect: R, mask: p.mask })!, treeMask())).toBeGreaterThan(0.9);
     // Слой — тоже дерево: щелчок по нему выделит его, а не прямоугольник
-    expect(iou(doc.object('tree'), treeMask())).toBeGreaterThan(0.85);
+    expect(iou(doc.object('tree'), treeMask())).toBeGreaterThan(0.9);
     // Там, где маска 0, холст — исходник, побайтно
     for (const [x, y] of [
       [R.x + 5, R.y + 5],
@@ -137,9 +95,76 @@ describe.skipIf(!modelInstalled())('Маска по объекту (SAM)', () =>
       expect(p.layer[i * 4 + 3]).toBe(0);
       expect([...doc.composite.subarray((y * W + x) * 3, (y * W + x) * 3 + 3)]).toEqual([...doc.base.subarray((y * W + x) * 3, (y * W + x) * 3 + 3)]);
     }
+    expect(s.state().generations.session).toBe(1);
 
     await s.undo();
     expect(doc.composite.equals(withRect)).toBe(true);
     expect(doc.object('tree').rect).toEqual(R);
+  });
+
+  it('модель нарисовала дерево шире выделения: маска — всё дерево', { timeout: 30_000 }, async () => {
+    // Выделение кончается посреди дерева: справа от x = TREE.cx + 30
+    const right = TREE.cx + 30 - R.x;
+    const selected = new Uint8Array(R.width * R.height);
+    for (let y = 0; y < R.height; y++) selected.fill(255, y * R.width, y * R.width + right);
+    const { s, doc } = await setup(selected);
+    await s.objectMask('a', 'chatgpt');
+    expect(iou(trim({ rect: R, mask: doc.patch('a').mask })!, treeMask())).toBeGreaterThan(0.9);
+  });
+});
+
+describe('Маска от модели на рисунке', () => {
+  const w = 300;
+  const h = 260;
+  const C = { x: 150, y: 130 };
+  /** Рисунок: светлый фон в тёмных точках, на нём круг с тёмным контуром толщиной 4 до радиуса 72 */
+  function drawing(): Uint8Array {
+    const rgb = new Uint8Array(w * h * 3);
+    let seed = 11;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const r = Math.hypot(x - C.x, y - C.y);
+        const v = r <= 68 ? 200 : r <= 72 ? 30 : rnd() < 0.02 ? 40 : 230;
+        rgb.fill(v, (y * w + x) * 3, (y * w + x) * 3 + 3);
+      }
+    }
+    return rgb;
+  }
+  const disk = (cx: number, cy: number, r: number) => {
+    const m = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (Math.hypot(x - cx, y - cy) <= r) m[y * w + x] = 255;
+    return m;
+  };
+  const bitmap = (mask: Uint8Array): Bitmap => ({ rect: { x: 0, y: 0, width: w, height: h }, mask });
+
+  it('сдвинутая на несколько пикселей маска возвращается на рисунок, на месте — остаётся', () => {
+    const rgb = drawing();
+    const truth = disk(C.x, C.y, 72);
+    expect(alignMask(truth, rgb, w, h)).toMatchObject({ dx: 0, dy: 0 });
+    const moved = alignMask(disk(C.x + 5, C.y - 3, 72), rgb, w, h);
+    expect(Math.abs(moved.dx + 5)).toBeLessThanOrEqual(1);
+    expect(Math.abs(moved.dy - 3)).toBeLessThanOrEqual(1);
+    expect(iou(bitmap(moved.mask), bitmap(truth))).toBeGreaterThan(0.97);
+  });
+
+  it('растянутая маска сдвигом не совмещается — ошибка', () => {
+    expect(() => alignMask(disk(C.x, C.y, 80), drawing(), w, h)).toThrow(/растянула|сдвинула/);
+  });
+});
+
+describe('Настройки интерфейса', () => {
+  it('помнятся после перезапуска; чужое имя и слишком длинное значение — ошибка', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'canvaaaas-prefs-'));
+    try {
+      const prefs = await Prefs.load(dir);
+      await prefs.set('model', 'pro');
+      await prefs.set('variants', 3);
+      expect((await Prefs.load(dir)).all()).toEqual({ model: 'pro', variants: 3 });
+      expect(() => prefs.set('../x', 1)).toThrow();
+      expect(() => prefs.set('style', 'x'.repeat(5000))).toThrow();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -97,59 +97,6 @@ export function expandMaskByDiff(
   return { mask: out, addedPx };
 }
 
-/** Меньше этой доли видимого изменилось — модель почти ничего не нарисовала, искать нечего */
-const BARELY = 0.01;
-/** Больше этой доли видимого изменилось — перерисовано всё, и где объект, по изменениям не понять */
-const WHOLESALE = 0.7;
-/** Столько изменённых пикселей с каждой стороны не раздвигают рамку: редкий шум по всему куску */
-const OUTLIERS = 0.01;
-
-/**
- * Что модель поменяла: изменённые пиксели всего куска (как у «Расширить по правке», сдвиг до tolerance не в счёт, 255 —
- * изменён) и рамка основной части изменённого внутри маски, без процента крайних с каждой стороны. null — по изменениям
- * объект не найти: внутри маски почти ничего не поменялось или поменялось почти всё
- */
-export function changedInside(
-  mask: Uint8Array,
-  original: Uint8Array,
-  generated: Uint8Array,
-  width: number,
-  height: number,
-  opts: Pick<ExpandOptions, 'threshold' | 'tolerance'> = {},
-): { changed: Uint8Array; box: Rect } | null {
-  const changed = changedPixels(original, generated, width, height, opts.threshold ?? 28, opts.tolerance ?? 4);
-  const cols = new Float64Array(width);
-  const rows = new Float64Array(height);
-  let seen = 0;
-  let count = 0;
-  for (let i = 0; i < changed.length; i++) {
-    if (!changed[i]) {
-      if (mask[i]! >= MASK_THRESHOLD) seen++;
-      continue;
-    }
-    changed[i] = 255;
-    if (mask[i]! < MASK_THRESHOLD) continue;
-    seen++;
-    count++;
-    const x = i % width;
-    const y = (i - x) / width;
-    cols[x] = cols[x]! + 1;
-    rows[y] = rows[y]! + 1;
-  }
-  if (!count || count < BARELY * seen || count > WHOLESALE * seen) return null;
-  const span = (hist: Float64Array): [number, number] => {
-    const skip = OUTLIERS * count;
-    let from = 0;
-    for (let acc = hist[0]!; acc <= skip && from < hist.length - 1; acc += hist[++from]!);
-    let to = hist.length - 1;
-    for (let acc = hist[to]!; acc <= skip && to > from; acc += hist[--to]!);
-    return [from, to];
-  };
-  const [x0, x1] = span(cols);
-  const [y0, y1] = span(rows);
-  return { changed, box: { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 } };
-}
-
 /**
  * Где картинки (RGB) различаются больше чем на threshold, если прощать сдвиг до tolerance пикселей: пиксель одной
  * изменён, если по какому-то каналу выходит за пределы того, что есть у другой в квадрате ±tolerance вокруг него.

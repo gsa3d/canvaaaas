@@ -25,6 +25,15 @@
       "port": 5173
     },
     {
+      "name": "canvaaaas-mock-5194",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "npx vite build --outDir ../../work/ui-5194 --emptyOutDir --logLevel warn && PORT=5194 CANVAAAAS_PROVIDER=mock CANVAAAAS_STATIC=work/ui-5194 exec node --disable-warning=ExperimentalWarning src/server/main.ts"
+      ],
+      "port": 5194
+    },
+    {
       "name": "canvaaaas-real",
       "runtimeExecutable": "/usr/bin/env",
       "runtimeArgs": [

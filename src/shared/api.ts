@@ -33,6 +33,7 @@ export interface SketchStroke {
 
 /** flash и pro — Nano Banana через laozhang.ai по ключу; chatgpt — ChatGPT Images по подписке через Codex CLI */
 export type ModelChoice = 'flash' | 'pro' | 'chatgpt';
+export const MODEL_CHOICES: readonly ModelChoice[] = ['flash', 'pro', 'chatgpt'];
 export type SizeChoice = 'auto' | '1K' | '2K' | '4K';
 
 export interface DocDto {
@@ -313,6 +314,11 @@ export interface RedoChange {
 }
 
 /** «Ещё варианты» принятого слоя: задача, маска и референсы — слоя, модель и разрешение — слоя, если он их помнит */
+/** «Маска по объекту»: какая модель её рисует */
+export interface ObjectMaskRequest {
+  model: ModelChoice;
+}
+
 export interface PatchVariantsRequest extends RedoChange {
   variants: number;
   model: ModelChoice;

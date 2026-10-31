@@ -33,14 +33,15 @@ import {
   type RawImage,
 } from '../core/edit-region.ts';
 import { intersect, type Rect } from '../core/frame.ts';
-import { changedInside, expandMaskByDiff } from '../core/expand.ts';
+import { expandMaskByDiff } from '../core/expand.ts';
 import { readLedger, withDirectorLedger, withLedger } from '../core/ledger.ts';
 import { featherAlpha, featherAlphaRegion, MASK_THRESHOLD, maskBBox } from '../core/mask.ts';
 import { applyShapes, applyShapesRegion, type MaskLookup } from '../core/mask-shapes.ts';
 import { changeEdge } from '../core/lines.ts';
-import { area, clipBitmap, descendants, dilate, layerName, overlap, removeObject, trim, unionBitmap } from '../core/objects.ts';
+import { area, descendants, dilate, layerName, overlap, removeObject, trim, unionBitmap } from '../core/objects.ts';
 import type { Bitmap } from '../core/segment.ts';
 import type { KeyStore } from '../core/secrets.ts';
+import { alignMask, objectMaskRequest, readObjectMask } from '../core/object-mask.ts';
 import { checkSketch } from '../core/sketch.ts';
 import { chatgptCodex, chatgptDirector, findCodex } from '../providers/chatgpt-codex.ts';
 import { mockDirector, type PromptDirector } from '../providers/director.ts';
@@ -85,8 +86,6 @@ const LIFT_GROW = 2;
 /** Подсветка слоя под курсором — не больше этого по большей стороне, как у объекта под курсором */
 const HOVER_LAYER_MAX = 1600;
 const LIFT_FEATHER = 2;
-/** Объект по маске версии выходит за видимое не дальше этого от того, что модель поменяла: контур и сглаживание */
-const OBJECT_REACH = 6;
 
 /**
  * Насколько шире слоя модель дорисовывает фон под ним: растушёвка вклейки и ещё запас, иначе на контуре слоя дорисованное
@@ -247,6 +246,7 @@ export class Session {
   doc: CanvasDocument | null = null;
   private jobs: Job[] = [];
   private readonly providers = new Map<ModelChoice, ImageProvider>();
+  private mockMask: ImageProvider | undefined;
   private directorImpl: PromptDirector | null = null;
   private generations = 0;
   private todayAtStart = 0;
@@ -329,6 +329,13 @@ export class Session {
       this.providers.set(model, p);
     }
     return p;
+  }
+
+  /** Модель, которая рисует маску по объекту: та же, что генерирует; у подставной — маска того, что на куске тёмное */
+  private maskProvider(model: ModelChoice): ImageProvider {
+    if (this.providerKind !== 'mock') return this.provider(model);
+    this.mockMask ??= mockProvider({ mode: 'mask', delayMs: 1500 });
+    return this.mockMask;
   }
 
   private director(): PromptDirector {
@@ -1556,49 +1563,37 @@ export class Session {
   }
 
   /**
-   * Маска версии — по объекту, который нарисовала модель: палочка (SAM) ищет его в ответе модели. Подсказка — рамка
-   * того, что модель поменяла под маской (сравнение с холстом под версией, как у «Расширить по правке»); объект может
-   * выйти за видимое, но только туда, где модель что-то поменяла. Если изменений почти нет или поменялось почти всё,
-   * подсказка — рамка того, что от версии видно, и за него объект не выходит. Край — с контуром и растушёвкой, как у
-   * слоя из выделения, маска — сразу прозрачность (bakeMask). Слой у текущей версии становится этим объектом (followMask). Объект ищется секунды, поэтому мимо очереди правок; маску,
-   * поправленную за это время, он не перебивает. Шаг ⌘Z
+   * Маска версии — по объекту, который нарисовала модель: модель генерации перекрашивает ответ у версии на месте — объект
+   * белым, остальное чёрным (object-mask.ts); какой объект, она видит по подсветке того, что от версии видно. Сдвиг
+   * картинки на несколько пикселей исправляется по краям рисунка, растянутая картинка — ошибка (alignMask). Край — с
+   * контуром и растушёвкой, как у слоя из выделения, маска — сразу прозрачность (bakeMask); слой у текущей версии
+   * становится этим объектом (followMask). Генерация идёт десятки секунд мимо очереди правок; маску, поправленную за это
+   * время, она не перебивает. Шаг ⌘Z
    */
-  async objectMask(patchId: string, snap: boolean): Promise<void> {
+  async objectMask(patchId: string, model: ModelChoice): Promise<void> {
     const doc = this.requireDoc();
     const p = doc.patch(patchId);
     if (p.lifted) throw new Error('У исходника слоя нет ответа модели');
     const { rect, maskVersion } = p;
-    const n = rect.width * rect.height;
+    const { width, height } = rect;
+    const n = width * height;
     const rgb = Buffer.alloc(n * 3);
-    const alpha = new Uint8Array(n);
+    const seen = new Uint8Array(n);
     for (let i = 0; i < n; i++) {
       p.layer.copy(rgb, i * 3, i * 4, i * 4 + 3);
-      alpha[i] = p.layer[i * 4 + 3]!;
+      seen[i] = p.layer[i * 4 + 3]! >= MASK_THRESHOLD ? 255 : 0;
     }
-    const seenBox = maskBBox(alpha, rect.width, rect.height);
-    if (!seenBox) throw new Error('Версию не видно: маска пустая');
-    const seen = { rect, mask: alpha.map((a) => (a ? 255 : 0)) };
-    // Под версией — холст без неё, у правки части слоя — с прежней версией на её месте; за краем холста не сравнить
-    const base = p.base && p.part && doc.hasPatch(p.base) ? doc.patch(p.base) : undefined;
-    const onCanvas = rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= doc.width && rect.y + rect.height <= doc.height;
-    const under = onCanvas ? (base ? doc.regionReplaced(rect, p.id, base.rect, base.layer) : doc.regionWithout(rect, p.id)) : null;
-    const diff = under && changedInside(seen.mask, under, rgb, rect.width, rect.height);
-    const at = (r: Rect) => ({ x: rect.x + r.x, y: rect.y + r.y, width: r.width, height: r.height });
-    let found: Bitmap | null;
-    if (diff) {
-      const changed = { rect, mask: diff.changed };
-      const fit = { changed: { rect, mask: diff.changed.map((c, i) => c & seen.mask[i]!) }, seen };
-      found = await this.segmentation.objectOn(rgb, rect, { box: at(diff.box), snap, fit });
-      // За тем, что было видно, — только там, где модель что-то поменяла: перерисованное без изменений (линии со сдвигом) не берём
-      found = found && clipBitmap(found, unionBitmap(seen, dilate(changed, OBJECT_REACH, rect)));
-    } else {
-      found = await this.segmentation.objectOn(rgb, rect, { box: at(seenBox), snap });
-      found = found && clipBitmap(found, seen);
-    }
-    if (!found) throw new Error('Объект не нашёлся');
+    if (!seen.includes(255)) throw new Error('Версию не видно: маска пустая');
+    const provider = this.maskProvider(model);
+    const req = await objectMaskRequest(rgb, seen, width, height, provider);
+    this.generations++;
+    this.changed();
+    const res = await provider.generate(req.generate);
+    const found = alignMask(await readObjectMask(res.image, req), rgb, width, height).mask;
+    if (!found.includes(255)) throw new Error('Модель не нашла объект');
     await this.serialDoc((d) => {
-      if (d !== doc || !d.hasPatch(patchId) || d.patch(patchId).maskVersion !== maskVersion) throw new Error('Маску поменяли, пока искали объект');
-      const grown = dilate(found, LIFT_GROW, rect);
+      if (d !== doc || !d.hasPatch(patchId) || d.patch(patchId).maskVersion !== maskVersion) throw new Error('Маску поменяли, пока модель её рисовала');
+      const grown = dilate({ rect, mask: found }, LIFT_GROW, rect);
       const binary = new Uint8Array(n);
       for (let y = 0; y < grown.rect.height; y++) {
         binary.set(grown.mask.subarray(y * grown.rect.width, (y + 1) * grown.rect.width), (grown.rect.y - rect.y + y) * rect.width + grown.rect.x - rect.x);
