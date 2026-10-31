@@ -12,6 +12,15 @@
   --accent-soft: #e3e9fd;
   --danger: #c8431a;
   --warn: #8a5a00;
+  /* Кнопки на бумаге — заливкой, без рамки */
+  --fill: #e2e0d9;
+  --fill-hover: #d8d5cd;
+  --sel: #dcd8cf;
+  /* Стол под холстом, где лежат картинки версий */
+  --table: #3a3b3e;
+  --table-2: #46474b;
+  --on-table: #ecebe7;
+  --on-table-dim: #a6a7ab;
   --radius: 6px;
   font-family: 'Golos Text Variable', system-ui, sans-serif;
   font-size: 13px;
@@ -49,16 +58,26 @@ textarea {
 }
 
 .app {
+  --band: 140px;
   display: grid;
-  grid-template-columns: 48px 1fr 360px;
-  grid-template-rows: 44px 40px 1fr;
+  grid-template-columns: 48px minmax(0, 1fr) 352px;
+  grid-template-rows: 44px 40px minmax(0, 1fr) var(--band);
   height: 100%;
+}
+
+/* Лента версий свёрнута в строку; без документа её нет */
+.app.band-folded {
+  --band: 38px;
+}
+
+.app.no-doc {
+  --band: 0px;
 }
 
 /* ——— Верхняя полоса ——— */
 
 .topbar {
-  grid-column: 1 / 3;
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   gap: 16px;
@@ -273,7 +292,7 @@ input[type='color'] {
 /* ——— Инструменты ——— */
 
 .rail {
-  grid-row: 3;
+  grid-row: 3 / 5;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -540,29 +559,6 @@ button.swatch.active,
   font-weight: 500;
 }
 
-/* Слой, в котором работают: слева, чтобы не спорить с другими плашками */
-.stage-banner.layer-banner {
-  left: 12px;
-  transform: none;
-  gap: 8px;
-  padding: 4px 4px 4px 12px;
-  font-size: 13px;
-}
-
-.stage-banner button.layer-banner-close {
-  min-height: 0;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  background: rgba(255, 255, 255, 0.18);
-  color: #fff;
-}
-
-.stage-banner button.layer-banner-close:hover:not(:disabled) {
-  background: #fff;
-  color: var(--accent);
-}
-
 .stage-banner.error {
   background: var(--danger);
 }
@@ -826,12 +822,15 @@ button.swap {
   height: 30px;
 }
 
-/* ——— Правая панель ——— */
+/* ——— Правая панель: слои и правка ——— */
 
+/* Слои занимают всё, что над правкой; правка прибита к низу и не меняет высоту, что бы ни выбрали */
 .side {
-  grid-row: 1 / 4;
+  grid-row: 2 / 5;
   grid-column: 3;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   background: var(--paper);
   border-left: 1px solid var(--line);
 }
@@ -841,7 +840,6 @@ button.swap {
   flex-direction: column;
   gap: 8px;
   padding: 14px 16px;
-  border-bottom: 1px solid var(--line);
 }
 
 .panel h2 {
@@ -855,23 +853,348 @@ button.swap {
   font-weight: 400;
 }
 
-/* Заголовок с кнопкой справа */
+/* Заголовок с кнопками справа */
 .panel h2.panel-head {
   display: flex;
   align-items: center;
+  gap: 2px;
+}
+
+.grow {
+  flex: 1;
 }
 
 .head-button {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-left: auto;
   color: var(--muted);
   font-weight: 400;
 }
 
-.head-button.on {
-  color: var(--accent);
+/* ——— Правка ——— */
+
+.compose {
+  flex: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  padding: 12px 14px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--paper-2);
+}
+
+.compose-key {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  background: #fff3d6;
+  color: var(--warn);
+  font-size: 12px;
+}
+
+.compose-key button.link {
+  color: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+}
+
+/* Рамка — только у поля задачи: всё остальное в правке — заливкой */
+.compose-box {
+  padding: 8px 10px 6px;
+  border: 1px solid #c9c5bc;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.compose-box:focus-within {
+  border-color: var(--ink);
+}
+
+.compose-box textarea,
+.compose-box textarea:focus {
+  display: block;
+  height: 44px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  resize: none;
+  line-height: 1.4;
+}
+
+.compose-box textarea::placeholder {
+  color: #9a9ca1;
+}
+
+.compose-attach {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  margin-top: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+button.att,
+span.att {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  min-height: 0;
+  height: 24px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 4px;
+  background: var(--paper-2);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+button.att:hover:not(:disabled) {
+  background: var(--fill);
+  color: var(--ink);
+}
+
+.att.on {
+  background: var(--fill);
+  color: var(--ink);
+}
+
+button.att-x {
+  min-height: 0;
+  width: 16px;
+  height: 16px;
+  margin-right: -3px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+.ref {
+  position: relative;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin-right: 2px;
+}
+
+.ref img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 3px;
+}
+
+button.ref-remove {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-height: 0;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--ink);
+  color: #fff;
+}
+
+/* Поправка задачи версии — плашкой в поле, на месте вложений: высота правки та же */
+.redo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 3px 0 8px;
+  border-radius: 4px;
+  background: #fbefd2;
+  color: #6b4a00;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.redo-chip button {
+  min-height: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: inherit;
+}
+
+.redo-chip button:hover:not(:disabled) {
+  background: rgba(107, 74, 0, 0.12);
+}
+
+.compose-toggles {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 2px;
+}
+
+.compose-toggles .help {
+  margin-left: auto;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.toggle.on {
+  color: var(--ink);
+}
+
+.toggle input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--ink);
+}
+
+.compose-settings {
+  display: flex;
+  gap: 6px;
+}
+
+button.sum {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: 6px;
+  min-height: 0;
+  height: 28px;
+  padding: 0 8px 0 10px;
+  border: none;
+  background: var(--fill);
+  font-size: 12.5px;
+}
+
+button.sum span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+button.sum:hover:not(:disabled) {
+  background: var(--fill-hover);
+}
+
+button.sum.warn {
+  background: #fff3d6;
+  color: var(--warn);
+}
+
+button.sum:disabled {
+  opacity: 1;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--muted);
+}
+
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 28px;
+  border-radius: var(--radius);
+  background: var(--fill);
+}
+
+.stepper button {
+  min-height: 0;
+  width: 26px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+}
+
+.stepper button:hover:not(:disabled) {
+  background: var(--fill-hover);
+  color: var(--ink);
+}
+
+.stepper span {
+  width: 78px;
+  text-align: center;
+  font-size: 12.5px;
+}
+
+/* Одна главная кнопка, чернилами: что сделать и подписью — куда ляжет и сколько это генераций (или почему нельзя) */
+button.go {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  justify-content: stretch;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 8px;
+  background: var(--ink);
+  color: #fff;
+  text-align: left;
+}
+
+button.go:hover:not(:disabled) {
+  background: #33373e;
+}
+
+button.go:disabled {
+  opacity: 1;
+  background: var(--fill);
+  color: var(--muted);
+}
+
+.go-text {
+  display: grid;
+  min-width: 0;
+}
+
+.go-text b {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.go-text small {
+  overflow: hidden;
+  color: #b9bbc0;
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.go:disabled small {
+  color: var(--muted);
+}
+
+button.go kbd {
+  color: #9a9ca1;
+  font-size: 12px;
 }
 
 /* ——— Подсказка «?» ——— */
@@ -916,78 +1239,9 @@ button.help-toggle.active {
   white-space: normal;
 }
 
-/* ——— Что уже есть в форме ——— */
-
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 1px 2px 1px 8px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.chip.plain {
-  padding: 3px 10px 3px 8px;
-}
-
-button.chip-clear {
-  min-height: 0;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border-color: transparent;
-  border-radius: 50%;
-  background: transparent;
-  color: inherit;
-}
-
-button.chip-clear:hover:not(:disabled) {
-  border-color: transparent;
-  background: rgba(47, 91, 234, 0.15);
-}
-
-.checks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 14px;
-}
-
 .hint {
   margin: 0;
   color: var(--muted);
-}
-
-.hint.ok {
-  color: var(--accent);
-}
-
-.options {
-  display: grid;
-  grid-template-columns: 1.3fr 1.1fr 0.8fr;
-  gap: 6px;
-}
-
-.options label {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.options select {
-  padding: 4px 6px;
-  color: var(--ink);
 }
 
 .row {
@@ -1010,76 +1264,36 @@ button.chip-clear:hover:not(:disabled) {
   font-size: 12px;
 }
 
-/* Задача, как её расписал директор: две строки, по щелчку — целиком */
-.directed {
-  margin: 0;
-  padding-left: 8px;
-  border-left: 2px solid var(--accent-soft);
-  color: var(--muted);
-  font-size: 12px;
-  /* Замечания критика — по строке на каждое */
-  white-space: pre-line;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  cursor: pointer;
-}
-
-.directed.open {
-  display: block;
-  user-select: text;
-}
-
-.directed-label {
-  color: var(--accent);
-  font-weight: 500;
-}
-
-/* Повтор с поправкой: прежняя задача уже в поле, её остаётся поправить */
-.redo {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  cursor: default;
-}
-
-/* Флажок с подписью и «?»: у полей ширина 100%, у флажка — своя */
-.check {
-  display: inline-flex;
-  align-items: center;
-  font-size: 12px;
-}
-
-.check label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-}
-
-.check input {
-  width: auto;
-  margin: 0;
-  accent-color: var(--accent);
-}
-
 /* ——— Слои ——— */
 
-/* Строка слоя: миниатюра, имя, значки, глаз; группы — папками. Длинный список прокручивается сам: свойства под ним видны */
+/* Дерево во всю высоту над правкой: строка — миниатюра, имя, значки, «⋯» и глаз; группы — папками; фон — последней строкой */
+.layers-panel {
+  flex: 1;
+  min-height: 0;
+  gap: 4px;
+  padding: 8px 8px 0;
+}
+
+.layers-panel h2.panel-head {
+  min-height: 32px;
+  padding-left: 6px;
+}
+
 .layers {
   list-style: none;
+  flex: 1;
+  min-height: 0;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  max-height: 46vh;
+  gap: 1px;
   overflow-y: auto;
 }
 
 .layer {
   position: relative;
+  flex: none;
   border-radius: var(--radius);
 }
 
@@ -1104,7 +1318,7 @@ button.chip-clear:hover:not(:disabled) {
   right: 0;
   height: 2px;
   border-radius: 1px;
-  background: var(--accent);
+  background: var(--ink);
   pointer-events: none;
 }
 
@@ -1117,11 +1331,11 @@ button.chip-clear:hover:not(:disabled) {
 }
 
 .layer.background.drop-above::before {
-  top: -3px;
+  top: -1px;
 }
 
 .layer.drop-into > .layer-row {
-  box-shadow: inset 0 0 0 2px var(--accent);
+  box-shadow: inset 0 0 0 2px var(--ink);
 }
 
 /* Стрелка группы: свернуть или развернуть */
@@ -1151,8 +1365,8 @@ button.layer-fold:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 38px;
-  padding: 4px 4px 4px 6px;
+  min-height: 34px;
+  padding: 3px 4px 3px 6px;
   border-radius: var(--radius);
   cursor: pointer;
 }
@@ -1161,20 +1375,26 @@ button.layer-fold:hover {
   background: rgba(0, 0, 0, 0.04);
 }
 
-.layer.active {
-  background: var(--accent-soft);
+/* Выбранное — заливкой строки и синим кольцом у миниатюры: синий — то, что выделено на холсте */
+.layer.active > .layer-row,
+.layer.picked > .layer-row {
+  background: var(--sel);
 }
 
-.layer.active .layer-row:hover {
-  background: transparent;
+.layer.active .thumb:not(.folder),
+.layer.picked .thumb {
+  box-shadow:
+    0 0 0 1.5px var(--paper),
+    0 0 0 3px var(--accent);
 }
 
-.layer.active .layer-name {
-  font-weight: 500;
+.layer.group.active .thumb.folder {
+  color: var(--accent);
 }
 
-.layer.picked .layer-row {
-  box-shadow: inset 0 0 0 1px var(--accent);
+.layer.active .layer-name,
+.layer.group .layer-name {
+  font-weight: 600;
 }
 
 .layer.off .layer-name,
@@ -1203,50 +1423,47 @@ button.layer-fold:hover {
   color: var(--danger);
 }
 
-.layer-badge.picked {
-  color: var(--accent);
+.layer-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 11.5px;
 }
 
 .layer.pending .layer-name {
   color: var(--muted);
 }
 
+.layer.pending.error .layer-name,
+.layer.pending.error .layer-count,
 .layer.pending.error .thumb {
   color: var(--danger);
 }
 
-.layer-sub {
-  margin: -4px 0 4px 44px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
+/* Фон — сразу под деревом; когда список длинный, остаётся у нижнего края */
 .layer.background {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
   margin-top: 4px;
+  padding: 4px 0 6px;
   border-top: 1px solid var(--line);
   border-radius: 0;
+  background: var(--paper);
 }
 
 .layer.background .layer-row {
-  margin-top: 4px;
   color: var(--muted);
 }
 
-/* У фона выбрана строка, а не вся карточка: над ней черта списка */
-.layer.background.active {
-  background: transparent;
-}
-
 .layer.background.active .layer-row {
-  background: var(--accent-soft);
   color: var(--ink);
 }
 
 /* Миниатюра: прозрачное — шахматкой, как в редакторах */
 .thumb {
   flex: none;
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1257,288 +1474,10 @@ button.layer-fold:hover {
   color: var(--muted);
 }
 
-.thumb img,
-.vtile img {
+.thumb img {
   width: 100%;
   height: 100%;
   object-fit: contain;
-}
-
-.version-strip {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 5px;
-}
-
-.strip-label {
-  margin-right: 2px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-/* Версия миниатюрой: номер в углу, текущая — в рамке акцента */
-.vtile {
-  position: relative;
-  flex: none;
-  width: 38px;
-  height: 38px;
-  min-height: 0;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: repeating-conic-gradient(#e4e2dc 0% 25%, #f7f6f3 0% 50%) 0 0 / 8px 8px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-button.vtile:hover:not(:disabled) {
-  border-color: var(--accent);
-  background: repeating-conic-gradient(#e4e2dc 0% 25%, #f7f6f3 0% 50%) 0 0 / 8px 8px;
-}
-
-.vtile.on,
-button.vtile.on:hover:not(:disabled) {
-  border: 2px solid var(--accent);
-}
-
-.vtile-n {
-  position: absolute;
-  right: 1px;
-  bottom: 1px;
-  padding: 0 3px;
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.85);
-  color: var(--ink);
-  font-size: 10px;
-  line-height: 13px;
-}
-
-.vtile.on .vtile-n {
-  background: var(--accent);
-  color: #fff;
-}
-
-/* Правка почти не случилась */
-.vtile.weak::after {
-  content: '';
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--warn);
-}
-
-.vtile.wait {
-  background: var(--paper-2);
-  color: var(--accent);
-}
-
-/* Модель рисует версии маску по объекту */
-.vtile-busy {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 255, 255, 0.55);
-  color: var(--accent);
-}
-
-.vtile.failed {
-  background: var(--paper-2);
-  border-color: var(--danger);
-  color: var(--danger);
-}
-
-button.vtile.add,
-button.vtile.add:hover:not(:disabled) {
-  border-style: dashed;
-  background: transparent;
-  color: var(--accent);
-}
-
-.layer-task {
-  display: flex;
-  align-items: flex-start;
-  gap: 4px;
-}
-
-.layer-task p {
-  flex: 1;
-  margin: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  font-size: 12px;
-}
-
-.layer-task button.icon,
-button.props-icon {
-  min-width: 0;
-  min-height: 0;
-  width: 28px;
-  height: 26px;
-  padding: 0;
-  border-color: transparent;
-  background: transparent;
-  color: var(--muted);
-}
-
-.layer-task button.icon:hover:not(:disabled),
-button.props-icon:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.06);
-  color: var(--ink);
-}
-
-/* Свойства слоя или группы, в которых работают, — под списком: версии, то, что видно сейчас (задача и маска), сам слой */
-.props {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 8px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--paper-2);
-}
-
-.props-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  color: var(--muted);
-}
-
-.props-head strong {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--ink);
-  font-weight: 500;
-}
-
-.props-block {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
-}
-
-.props-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 22px;
-}
-
-.props-label {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.props-row {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.props-key {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.props-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.props-note {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-/* Действие подписью со значком */
-button.act {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 26px;
-  padding: 2px 8px;
-  font-size: 12px;
-}
-
-button.act.on,
-button.act.on:hover:not(:disabled) {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: #fff;
-}
-
-button.act.danger:hover:not(:disabled) {
-  border-color: var(--danger);
-  color: var(--danger);
-}
-
-/* Ход генерации и ошибка — строкой с кнопками */
-.layer-status {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--accent);
-}
-
-.layer-status span {
-  flex: 1;
-}
-
-.layer-status.error {
-  color: var(--danger);
-}
-
-.layer-status.error p {
-  flex: 1 1 100%;
-  margin: 0;
-  word-break: break-word;
-}
-
-.layer.pending .layer-status {
-  padding: 0 8px 6px 44px;
-}
-
-/* Несколько слоёв в выделении — их можно сгруппировать или объединить */
-.merge-bar span {
-  flex: 1;
-}
-
-.merge-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-  padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--paper-2);
-  color: var(--muted);
 }
 
 .spin {
@@ -1561,7 +1500,7 @@ button.act.danger:hover:not(:disabled) {
   font-size: 12px;
 }
 
-/* Глаз — как у слоёв в графических редакторах */
+/* Глаз и «⋯» — как у слоёв в графических редакторах; «⋯» видно у строки под курсором */
 button.layer-icon {
   flex: none;
   min-width: 0;
@@ -1574,10 +1513,501 @@ button.layer-icon {
   color: var(--muted);
 }
 
-button.layer-icon:hover:not(:disabled) {
+button.layer-icon:hover:not(:disabled),
+button.layer-icon.open {
   background: rgba(0, 0, 0, 0.06);
   border-color: transparent;
   color: var(--ink);
+}
+
+.layer:not(:hover) button.layer-more:not(.open):not(:focus-visible) {
+  opacity: 0;
+}
+
+/* ——— Лента версий: картинки — на тёмном столе под холстом ——— */
+
+.band {
+  grid-row: 4;
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--table);
+  color: var(--on-table);
+  border-top: 1px solid #2c2d30;
+}
+
+.app.no-doc .band {
+  display: none;
+}
+
+.band-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 38px;
+  min-width: 0;
+  padding: 0 10px 0 6px;
+}
+
+.band-head strong {
+  max-width: 40%;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.band-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--on-table-dim);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.bbtn {
+  flex: none;
+  gap: 6px;
+  min-height: 0;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--table-2);
+  color: var(--on-table);
+  font-size: 12.5px;
+}
+
+button.bbtn:hover:not(:disabled) {
+  background: #55565b;
+}
+
+button.bbtn.on,
+button.bbtn.open {
+  background: var(--on-table);
+  color: var(--ink);
+}
+
+button.bicon {
+  flex: none;
+  min-width: 0;
+  min-height: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--on-table-dim);
+}
+
+button.bicon:hover:not(:disabled),
+button.bicon.on {
+  background: var(--table-2);
+  color: var(--on-table);
+}
+
+/* Плитки слева со своей прокруткой, текст — колонкой постоянной ширины справа: число плиток его не двигает */
+.band-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 400px);
+  gap: 18px;
+  padding: 0 14px 12px;
+}
+
+.band-body.solo {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.band-tiles {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  margin: -4px;
+  padding: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.vt {
+  position: relative;
+  flex: none;
+  width: 84px;
+  height: 84px;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  border: none;
+  border-radius: 4px;
+  background: repeating-conic-gradient(#4d4e52 0% 25%, #444549 0% 50%) 0 0 / 10px 10px;
+  color: var(--on-table);
+}
+
+.vt img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+button.vt:hover:not(:disabled):not(.on) {
+  border-color: transparent;
+  box-shadow: 0 0 0 2px #8d8f94;
+}
+
+.vt.on {
+  overflow: visible;
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 0 0 4px rgba(255, 255, 255, 0.9);
+}
+
+.vt-n {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: rgba(20, 21, 24, 0.75);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.vt.on .vt-n {
+  background: var(--accent);
+}
+
+.vt-weak {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: #f2c46b;
+  color: #2a2208;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.vt-cover {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 3px;
+  padding: 0 4px;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.25;
+  text-align: center;
+  white-space: normal;
+}
+
+.vt-cover.dim {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.vt.wait {
+  background: #2f3033;
+}
+
+.vt.wait .vt-cover {
+  padding-bottom: 18px;
+}
+
+.vt-ctl {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  bottom: 4px;
+  display: flex;
+  gap: 4px;
+}
+
+.vt-ctl button {
+  flex: 1;
+  min-height: 0;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.vt-ctl button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.vt.err {
+  background: #4a3530;
+  box-shadow: inset 0 0 0 1.5px #ff8f6b;
+}
+
+.vt.err .vt-cover {
+  color: #ff8f6b;
+}
+
+.vt.err.on {
+  box-shadow:
+    inset 0 0 0 1.5px #ff8f6b,
+    0 0 0 2px #ff8f6b;
+}
+
+.vt.add {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 2px;
+  background: none;
+  box-shadow: inset 0 0 0 1.5px #5a5b60;
+  color: var(--on-table-dim);
+  font-size: 12px;
+}
+
+button.vt.add:hover:not(:disabled) {
+  box-shadow: inset 0 0 0 1.5px #8d8f94;
+  color: #fff;
+}
+
+.vt-sep {
+  align-self: center;
+  margin: 0 2px 0 6px;
+  color: var(--on-table-dim);
+  font-size: 12px;
+}
+
+.band-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.band-tabs {
+  display: flex;
+  flex: none;
+  gap: 2px;
+}
+
+.band-tabs button {
+  min-height: 0;
+  height: 22px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--on-table-dim);
+  font-size: 12px;
+}
+
+.band-tabs button:hover:not(:disabled) {
+  color: var(--on-table);
+}
+
+.band-tabs button.on {
+  background: var(--table-2);
+  color: var(--on-table);
+}
+
+/* Замечания критика — по строке на каждое */
+.band-para {
+  flex: none;
+  min-height: 0;
+  margin: 0;
+  overflow-y: auto;
+  color: #d9d8d4;
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre-line;
+  user-select: text;
+}
+
+.band-para:last-child {
+  flex: 1;
+}
+
+.band-para.err,
+.band-line .err {
+  color: #ff8f6b;
+}
+
+.band-para.warn {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  color: #f2c46b;
+}
+
+.band-line {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--on-table-dim);
+  font-size: 12px;
+}
+
+.band button.link {
+  color: var(--on-table);
+  font-size: 12px;
+  text-decoration: underline;
+}
+
+.band button.help-toggle {
+  color: var(--on-table-dim);
+}
+
+/* ——— Всплывающие меню и окно модели ——— */
+
+.pop {
+  position: fixed;
+  z-index: 30;
+  min-width: 210px;
+  max-width: 320px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper-2);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.pop hr {
+  margin: 4px 0;
+  border: none;
+  border-top: 1px solid var(--line);
+}
+
+button.mi {
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-height: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  text-align: left;
+}
+
+button.mi:hover:not(:disabled) {
+  background: var(--fill);
+}
+
+button.mi.danger {
+  margin-left: 0;
+  color: var(--danger);
+}
+
+button.mi small {
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.settings-pop {
+  width: 290px;
+  max-width: 290px;
+}
+
+.pop-label {
+  padding: 6px 8px 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+button.radio {
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-height: 0;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  text-align: left;
+  white-space: normal;
+}
+
+button.radio:hover:not(:disabled) {
+  background: var(--fill);
+}
+
+.radio-dot {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid #b8b4aa;
+  border-radius: 50%;
+}
+
+.radio.on .radio-dot {
+  border-color: var(--ink);
+}
+
+.radio.on .radio-dot::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+
+.radio-text {
+  display: grid;
+}
+
+.radio-text small {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.pop-row {
+  padding: 2px 8px 4px;
+}
+
+.pop-note {
+  margin: 6px 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pop-advice {
+  margin: 6px 8px 4px;
+}
+
+/* Ошибки генераций — в верхней полосе, щелчок ведёт к первой */
+button.errs {
+  gap: 5px;
+  min-height: 0;
+  height: 24px;
+  padding: 0 9px;
+  border: none;
+  border-radius: var(--radius);
+  background: #f8e1d8;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 /* ——— Подсказка о разрешении ——— */
@@ -1649,52 +2079,6 @@ kbd {
   position: fixed;
   inset: 0;
   z-index: 15;
-}
-
-/* ——— Референсы ——— */
-
-.refs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.ref {
-  position: relative;
-  width: 56px;
-  height: 56px;
-  margin: 0;
-}
-
-.ref img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border-radius: var(--radius);
-  border: 1px solid var(--line);
-}
-
-.ref-remove {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  min-height: 0;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border-radius: 50%;
-  font-size: 13px;
-  line-height: 1;
-}
-
-.ref-add {
-  height: 56px;
-  border-style: dashed;
-  color: var(--muted);
-}
-
-.panel.notice {
-  background: #fff3d6;
 }
 
 button.danger {
