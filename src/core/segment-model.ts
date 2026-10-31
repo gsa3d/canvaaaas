@@ -8,6 +8,7 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createInflateRaw } from 'node:zlib';
 import { appDataDir } from './ledger.ts';
+import { L } from '../shared/i18n.ts';
 
 export const SAM_MODEL = {
   name: 'sam2.1_hiera_base_plus',
@@ -38,7 +39,7 @@ export async function installModel(opts: { dir?: string; onProgress?: (fraction:
   const zip = join(dir, 'download.zip.part');
   try {
     const res = await fetch(SAM_MODEL.url, { signal: opts.signal, redirect: 'follow' });
-    if (!res.ok || !res.body) throw new Error(`Hugging Face ответил ${res.status}`);
+    if (!res.ok || !res.body) throw new Error(L(`Hugging Face ответил ${res.status}`, `Hugging Face responded ${res.status}`));
     const total = Number(res.headers.get('content-length')) || SAM_MODEL.size;
     const hash = createHash('sha256');
     let got = 0;
@@ -56,7 +57,7 @@ export async function installModel(opts: { dir?: string; onProgress?: (fraction:
       },
     });
     await pipeline(Readable.fromWeb(res.body as import('node:stream/web').ReadableStream), count, createWriteStream(zip), { signal: opts.signal });
-    if (hash.digest('hex') !== SAM_MODEL.sha256) throw new Error('Скачанный архив модели повреждён: контрольная сумма не сходится');
+    if (hash.digest('hex') !== SAM_MODEL.sha256) throw new Error(L('Скачанный архив модели повреждён: контрольная сумма не сходится', 'The downloaded model archive is damaged: checksum mismatch'));
     const files = modelFiles(dir);
     for (const [name, dest] of [
       [SAM_MODEL.encoder, files.encoder],
@@ -86,17 +87,17 @@ async function zipEntries(path: string): Promise<ZipEntry[]> {
     const tail = Buffer.alloc(Math.min(size, 65_557));
     await fh.read(tail, 0, tail.length, size - tail.length);
     const eocd = tail.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
-    if (eocd < 0) throw new Error('Архив модели повреждён: нет каталога');
+    if (eocd < 0) throw new Error(L('Архив модели повреждён: нет каталога', 'Model archive is damaged: no directory'));
     const count = tail.readUInt16LE(eocd + 10);
     const dirSize = tail.readUInt32LE(eocd + 12);
     const dirOffset = tail.readUInt32LE(eocd + 16);
-    if (dirOffset === 0xffffffff) throw new Error('Архив модели в формате zip64 — такой не распаковать');
+    if (dirOffset === 0xffffffff) throw new Error(L('Архив модели в формате zip64 — такой не распаковать', 'Model archive is zip64 — cannot unpack it'));
     const cd = Buffer.alloc(dirSize);
     await fh.read(cd, 0, dirSize, dirOffset);
     const entries: ZipEntry[] = [];
     let p = 0;
     for (let i = 0; i < count; i++) {
-      if (cd.readUInt32LE(p) !== 0x02014b50) throw new Error('Архив модели повреждён: каталог');
+      if (cd.readUInt32LE(p) !== 0x02014b50) throw new Error(L('Архив модели повреждён: каталог', 'Model archive is damaged: directory'));
       const nameLen = cd.readUInt16LE(p + 28);
       const extraLen = cd.readUInt16LE(p + 30);
       const commentLen = cd.readUInt16LE(p + 32);
@@ -118,8 +119,8 @@ async function zipEntries(path: string): Promise<ZipEntry[]> {
 /** Достать из архива файл с таким именем (в любой папке архива) */
 async function extract(zip: string, name: string, dest: string): Promise<void> {
   const entry = (await zipEntries(zip)).find((e) => e.name === name || e.name.endsWith(`/${name}`));
-  if (!entry) throw new Error(`В архиве модели нет ${name}`);
-  if (entry.method !== 0 && entry.method !== 8) throw new Error(`Архив модели сжат неизвестным способом (${entry.method})`);
+  if (!entry) throw new Error(L(`В архиве модели нет ${name}`, `Model archive has no ${name}`));
+  if (entry.method !== 0 && entry.method !== 8) throw new Error(L(`Архив модели сжат неизвестным способом (${entry.method})`, `Model archive uses an unknown compression method (${entry.method})`));
   const fh = await open(zip, 'r');
   const header = Buffer.alloc(30);
   try {
@@ -127,10 +128,10 @@ async function extract(zip: string, name: string, dest: string): Promise<void> {
   } finally {
     await fh.close();
   }
-  if (header.readUInt32LE(0) !== 0x04034b50) throw new Error('Архив модели повреждён: заголовок файла');
+  if (header.readUInt32LE(0) !== 0x04034b50) throw new Error(L('Архив модели повреждён: заголовок файла', 'Model archive is damaged: file header'));
   const start = entry.offset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
   const source = createReadStream(zip, { start, end: start + entry.compressed - 1 });
   if (entry.method === 8) await pipeline(source, createInflateRaw(), createWriteStream(dest));
   else await pipeline(source, createWriteStream(dest));
-  if ((await stat(dest)).size !== entry.size) throw new Error(`Архив модели повреждён: ${name} не того размера`);
+  if ((await stat(dest)).size !== entry.size) throw new Error(L(`Архив модели повреждён: ${name} не того размера`, `Model archive is damaged: ${name} has the wrong size`));
 }

@@ -13,6 +13,7 @@ import { CanvasDocument, type DocGroup, type DocObject, type Patch } from './doc
 import type { Rect } from './frame.ts';
 import { layerName, trim } from './objects.ts';
 import { checkSketch } from './sketch.ts';
+import { L } from '../shared/i18n.ts';
 
 export const PROJECT_EXTENSION = 'caaa';
 const MAGIC = Buffer.from('CAAA\r\n\x1a\n', 'latin1');
@@ -203,34 +204,34 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
 
 /** Открыть проект: документ со слоями, стилем и разрешением для печати */
 export async function openProject(data: Buffer, name: string): Promise<{ doc: CanvasDocument; density?: number }> {
-  const broken = (why: string) => new Error(`Не открыть «${name}»: ${why}`);
-  if (!isProject(data)) throw broken('это не проект canvaaaas или файл повреждён');
+  const broken = (why: string) => new Error(L(`Не открыть «${name}»: ${why}`, `Cannot open “${name}”: ${why}`));
+  if (!isProject(data)) throw broken(L('это не проект canvaaaas или файл повреждён', 'this is not a canvaaaas project or the file is damaged'));
   const start = MAGIC.length + 4;
   const body = start + data.readUInt32BE(MAGIC.length);
   let manifest: Manifest;
   try {
     manifest = JSON.parse(data.toString('utf8', start, body)) as Manifest;
   } catch {
-    throw broken('файл повреждён');
+    throw broken(L('файл повреждён', 'the file is damaged'));
   }
-  if (manifest.version > VERSION) throw broken('проект сохранён более новой версией canvaaaas — обновите приложение');
+  if (manifest.version > VERSION) throw broken(L('проект сохранён более новой версией canvaaaas — обновите приложение', 'the project was saved by a newer version of canvaaaas — update the app'));
   const { width, height } = manifest;
   const slice = (p: Part) => {
-    if (body + p.offset + p.length > data.length) throw broken('файл обрезан');
+    if (body + p.offset + p.length > data.length) throw broken(L('файл обрезан', 'the file is truncated'));
     return data.subarray(body + p.offset, body + p.offset + p.length);
   };
   const decode = async (p: Part, w: number, h: number, channels: 1 | 3 | 4) => {
     let img = sharp(slice(p), { limitInputPixels: false });
     img = channels === 1 ? img.extractChannel(0) : channels === 3 ? img.removeAlpha() : img.ensureAlpha();
     const { data: raw, info } = await img.raw({ depth: 'uchar' }).toBuffer({ resolveWithObject: true });
-    if (info.width !== w || info.height !== h || info.channels !== channels) throw broken('размеры слоёв не сходятся');
+    if (info.width !== w || info.height !== h || info.channels !== channels) throw broken(L('размеры слоёв не сходятся', 'layer sizes do not match'));
     return raw;
   };
 
   const baseBytes = slice(manifest.base);
   const inside = (r: Rect) => r.x >= 0 && r.y >= 0 && r.width > 0 && r.height > 0 && r.x + r.width <= width && r.y + r.height <= height;
   const objectList = manifest.objects ?? [];
-  for (const o of objectList) if (!inside(o.rect)) throw broken('объект за краем холста');
+  for (const o of objectList) if (!inside(o.rect)) throw broken(L('объект за краем холста', 'an object is outside the canvas'));
   const [base, ...layers] = await Promise.all([
     decode(manifest.base, width, height, 3),
     ...manifest.layers.flatMap((l) => [decode(l.pixels, l.rect.width, l.rect.height, 4), decode(l.mask, l.rect.width, l.rect.height, 1)]),
@@ -277,10 +278,10 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
   const refs = (manifest.refs ?? []).map((r): InputImage => ({ mimeType: r.mimeType, data: Buffer.from(slice(r.data)) }));
   const patches = manifest.layers.map((l, i): Patch => {
     const { x, y, width: w, height: h } = l.rect;
-    if (x < 0 || y < 0 || x + w > width || y + h > height) throw broken('слой за краем холста');
+    if (x < 0 || y < 0 || x + w > width || y + h > height) throw broken(L('слой за краем холста', 'a layer is outside the canvas'));
     const layerRefs = l.refs?.map((n) => {
       const ref = refs[n];
-      if (!ref) throw broken('нет референса слоя');
+      if (!ref) throw broken(L('нет референса слоя', 'a layer reference is missing'));
       return ref;
     });
     return {
@@ -329,7 +330,7 @@ function migrate(patches: Patch[], objects: DocObject[]): void {
     const owner = under ? objects.find((o) => o.id === under) : undefined;
     const layer: DocObject = {
       id: randomUUID(),
-      name: owner ? `Фон под «${owner.name}»` : layerName(p.prompt),
+      name: owner ? L(`Фон под «${owner.name}»`, `Background under “${owner.name}”`) : layerName(p.prompt),
       ...bitmap,
       createdAt: p.createdAt,
       version: 0,

@@ -4,6 +4,7 @@
 import sharp from 'sharp';
 import { shapesBBox, type SketchStroke } from '../shared/api.ts';
 import { intersect, type Rect } from './frame.ts';
+import { L } from '../shared/i18n.ts';
 
 const COLOR = /^#[0-9a-f]{6}$/i;
 const MAX_STROKES = 500;
@@ -12,7 +13,7 @@ const MAX_POINTS = 20_000;
 /** Набросок из запроса: что не похоже на штрих, — ошибка */
 export function checkSketch(value: unknown): SketchStroke[] {
   if (value === undefined || value === null) return [];
-  if (!Array.isArray(value) || value.length > MAX_STROKES) throw new Error('Набросок не похож на набросок');
+  if (!Array.isArray(value) || value.length > MAX_STROKES) throw new Error(L('Набросок не похож на набросок', 'The sketch does not look like a sketch'));
   return value.map((s: Partial<SketchStroke>) => {
     const ok =
       Array.isArray(s.points) &&
@@ -24,7 +25,7 @@ export function checkSketch(value: unknown): SketchStroke[] {
       s.size < 10_000 &&
       typeof s.color === 'string' &&
       COLOR.test(s.color);
-    if (!ok) throw new Error('Набросок не похож на набросок');
+    if (!ok) throw new Error(L('Набросок не похож на набросок', 'The sketch does not look like a sketch'));
     return { points: s.points!.map(([x, y]) => [x, y] as [number, number]), size: s.size!, color: s.color!.toLowerCase(), erase: s.erase === true || undefined };
   });
 }

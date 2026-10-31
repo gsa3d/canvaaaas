@@ -4,6 +4,7 @@ import type { DocObject } from './document.ts';
 import { intersect, type Rect } from './frame.ts';
 import { insideDistance, MASK_THRESHOLD } from './mask.ts';
 import type { Bitmap } from './segment.ts';
+import { L } from '../shared/i18n.ts';
 
 
 export function area(b: Bitmap): number {
@@ -169,12 +170,12 @@ export function dilate(b: Bitmap, r: number, bounds: Rect): Bitmap {
 /** Имя слоя из задачи: первые слова, не длиннее 40 знаков */
 export function layerName(prompt: string): string {
   const text = prompt.trim().replace(/\s+/g, ' ');
-  return text.length > 40 ? `${text.slice(0, 39).trimEnd()}…` : text || 'Слой';
+  return text.length > 40 ? `${text.slice(0, 39).trimEnd()}…` : text || L('Слой', 'Layer');
 }
 
 /** Без объекта: его части переходят к его родителю */
 export function removeObject(objects: DocObject[], id: string): DocObject[] {
   const gone = objects.find((o) => o.id === id);
-  if (!gone) throw new Error('Нет такого объекта');
+  if (!gone) throw new Error(L('Нет такого объекта', 'No such object'));
   return objects.filter((o) => o.id !== id).map((o) => (o.parent === id ? { ...o, parent: gone.parent } : o));
 }

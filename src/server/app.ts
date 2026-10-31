@@ -21,6 +21,7 @@ import {
   type SnapRequest,
 } from '../shared/api.ts';
 import type { Session } from './session.ts';
+import { L, type LangChoice } from '../shared/i18n.ts';
 
 export interface ServerOptions {
   session: Session;
@@ -60,7 +61,7 @@ async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   let size = 0;
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > limit) throw new HttpError(413, 'Слишком большой запрос');
+    if (size > limit) throw new HttpError(413, L('Слишком большой запрос', 'Request too large'));
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks);
@@ -71,7 +72,7 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
   try {
     return JSON.parse(body.toString('utf8') || '{}') as T;
   } catch {
-    throw new HttpError(400, 'Тело запроса — не JSON');
+    throw new HttpError(400, L('Тело запроса — не JSON', 'Request body is not JSON'));
   }
 }
 
@@ -106,6 +107,14 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     json(res, { ok: true });
   });
 
+  // Язык интерфейса: окно читает его до первой отрисовки, после смены — перезагружается
+  route('GET', '/api/lang', (_req, res) => json(res, session.language()));
+  route('POST', '/api/lang', async (req, res) => {
+    const { choice } = await readJson<{ choice: LangChoice }>(req);
+    await session.setLanguage(choice);
+    json(res, session.language());
+  });
+
   // Сервер шлёт «что-то изменилось», интерфейс после этого перечитывает /api/state
   route('GET', '/api/events', (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
@@ -120,8 +129,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   route('POST', '/api/doc/upload', async (req, res, _p, url) => {
     const body = await readBody(req, 4 * 1024 * 1024 * 1024);
-    if (!body.length) throw new HttpError(400, 'Пустой файл');
-    json(res, { opened: await session.openDocument(body, url.searchParams.get('name') ?? 'Без имени') });
+    if (!body.length) throw new HttpError(400, L('Пустой файл', 'Empty file'));
+    json(res, { opened: await session.openDocument(body, url.searchParams.get('name') ?? L('Без имени', 'Untitled')) });
   });
 
   // Окна выбора файла и вопросы «Сохранить изменения?» показывает Electron; ответ приходит, когда их закроют
@@ -151,7 +160,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   route('POST', '/api/refs', async (req, res) => {
     const body = await readBody(req, 500 * 1024 * 1024);
-    if (!body.length) throw new HttpError(400, 'Пустой файл');
+    if (!body.length) throw new HttpError(400, L('Пустой файл', 'Empty file'));
     json(res, { id: await session.addReference(body) });
   });
   route('GET', '/api/refs/:id/thumb.jpg', (_req, res, [id]) => {
@@ -174,19 +183,19 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   route('GET', '/api/doc/tile/:k/:x/:y.jpg', async (_req, res, [k, x, y]) => {
     const doc = session.doc;
-    if (!doc) throw new HttpError(404, 'Документ не открыт');
+    if (!doc) throw new HttpError(404, L('Документ не открыт', 'No document open'));
     send(res, 200, await doc.tile(Number(k), Number(x), Number(y)), 'image/jpeg', IMMUTABLE);
   });
   // Исходник без слоёв — для сравнения; он не меняется, пока документ открыт
   route('GET', '/api/doc/base/:k/:x/:y.jpg', async (_req, res, [k, x, y]) => {
     const doc = session.doc;
-    if (!doc) throw new HttpError(404, 'Документ не открыт');
+    if (!doc) throw new HttpError(404, L('Документ не открыт', 'No document open'));
     send(res, 200, await doc.baseTile(Number(k), Number(x), Number(y)), 'image/jpeg', IMMUTABLE);
   });
 
   route('GET', '/api/doc/export.png', async (_req, res) => {
     const doc = session.doc;
-    if (!doc) throw new HttpError(404, 'Документ не открыт');
+    if (!doc) throw new HttpError(404, L('Документ не открыт', 'No document open'));
     const name = `${doc.name.replace(/\.[a-z0-9]+$/i, '')}-canvaaaas.png`;
     send(res, 200, await doc.exportPng(), 'image/png', {
       'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
@@ -196,7 +205,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   // Проект со слоями — скачиванием, когда нет окна сохранения (интерфейс в браузере для разработки)
   route('GET', '/api/doc/export.caaa', async (_req, res) => {
     const doc = session.doc;
-    if (!doc) throw new HttpError(404, 'Документ не открыт');
+    if (!doc) throw new HttpError(404, L('Документ не открыт', 'No document open'));
     const name = `${doc.name.replace(/\.[a-z0-9]+$/i, '')}.caaa`;
     send(res, 200, await session.exportProject(), 'application/octet-stream', {
       'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
@@ -250,7 +259,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
   route('POST', '/api/history/:id/object-mask', async (req, res, [id]) => {
     const { model } = await readJson<ObjectMaskRequest>(req);
-    if (!MODEL_CHOICES.includes(model)) throw new HttpError(400, 'Непонятная модель');
+    if (!MODEL_CHOICES.includes(model)) throw new HttpError(400, L('Непонятная модель', 'Unknown model'));
     await session.objectMask(id!, model);
     json(res, { ok: true });
   });
@@ -281,7 +290,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   route('GET', '/api/segment/hover.png', async (_req, res, _p, url) => {
     const n = (k: string) => Number(url.searchParams.get(k) ?? NaN);
     const view = { x: n('vx'), y: n('vy'), width: n('vw'), height: n('vh') };
-    if (![n('x'), n('y'), view.x, view.y, view.width, view.height].every(Number.isFinite)) throw new HttpError(400, 'Нет точки или вида');
+    if (![n('x'), n('y'), view.x, view.y, view.width, view.height].every(Number.isFinite)) throw new HttpError(400, L('Нет точки или вида', 'No point or view'));
     const hit = await session.hoverObject(view, n('x'), n('y'), url.searchParams.get('within') ?? undefined);
     if (!hit) {
       res.writeHead(204, { 'Cache-Control': 'no-store' });
@@ -329,7 +338,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
   route('POST', '/api/objects/merge', async (req, res) => {
     const { ids } = await readJson<{ ids: string[] }>(req);
-    if (!Array.isArray(ids)) throw new HttpError(400, 'Нет слоёв');
+    if (!Array.isArray(ids)) throw new HttpError(400, L('Нет слоёв', 'No layers'));
     json(res, { id: await session.mergeLayers(ids.map(String)) });
   });
   route('POST', '/api/doc/flatten', async (_req, res) => {
@@ -362,7 +371,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
   route('POST', '/api/groups', async (req, res) => {
     const { ids, name } = await readJson<{ ids: string[]; name?: string }>(req);
-    if (!Array.isArray(ids)) throw new HttpError(400, 'Нет слоёв');
+    if (!Array.isArray(ids)) throw new HttpError(400, L('Нет слоёв', 'No layers'));
     json(res, { id: await session.groupLayers(ids.map(String), name) });
   });
   route('POST', '/api/groups/:id/ungroup', async (_req, res, [id]) => {
@@ -385,7 +394,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
   route('POST', '/api/objects/:id/move', async (req, res, [id]) => {
     const { dx, dy } = await readJson<{ dx: number; dy: number }>(req);
-    if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new HttpError(400, 'Нет сдвига');
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new HttpError(400, L('Нет сдвига', 'No offset'));
     json(res, await session.moveObject(id!, dx, dy));
   });
 
@@ -415,16 +424,16 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
 
   async function serveStatic(res: ServerResponse, pathname: string): Promise<void> {
-    if (!opts.staticDir) throw new HttpError(404, 'Не найдено');
+    if (!opts.staticDir) throw new HttpError(404, L('Не найдено', 'Not found'));
     const root = resolve(opts.staticDir);
     let file = resolve(join(root, decodeURIComponent(pathname)));
-    if (file !== root && !file.startsWith(root + sep)) throw new HttpError(403, 'Нельзя');
+    if (file !== root && !file.startsWith(root + sep)) throw new HttpError(403, L('Нельзя', 'Forbidden'));
     if (file === root || !extname(file)) file = join(root, 'index.html');
     try {
       const body = await readFile(file);
       send(res, 200, body, CONTENT_TYPES[extname(file)] ?? 'application/octet-stream', { 'Cache-Control': 'no-cache' });
     } catch {
-      throw new HttpError(404, 'Не найдено');
+      throw new HttpError(404, L('Не найдено', 'Not found'));
     }
   }
 
@@ -432,10 +441,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const server = createServer(async (req, res) => {
     try {
       const allowedHosts = [`127.0.0.1:${port}`, `localhost:${port}`];
-      if (!allowedHosts.includes(req.headers.host ?? '')) throw new HttpError(403, 'Чужой Host');
+      if (!allowedHosts.includes(req.headers.host ?? '')) throw new HttpError(403, L('Чужой Host', 'Foreign Host'));
       const method = req.method ?? 'GET';
       if (method !== 'GET' && method !== 'HEAD' && req.headers[API_HEADER] !== '1') {
-        throw new HttpError(403, 'Нет заголовка приложения');
+        throw new HttpError(403, L('Нет заголовка приложения', 'Missing app header'));
       }
       const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
       for (const [m, re, handler] of routes) {
@@ -446,7 +455,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           return;
         }
       }
-      if (url.pathname.startsWith('/api/')) throw new HttpError(404, 'Нет такого запроса');
+      if (url.pathname.startsWith('/api/')) throw new HttpError(404, L('Нет такого запроса', 'No such request'));
       await serveStatic(res, url.pathname);
     } catch (err) {
       const status = err instanceof HttpError ? err.status : 400;

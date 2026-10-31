@@ -55,7 +55,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { adviseSize, intersect, type ModelOutputs, type SizeAdvice } from '../core/frame.ts';
 import { layerName } from '../core/objects.ts';
 import {
-  CANVAS_PRESETS,
+  canvasPresets,
   COMMAND_EVENT,
   MAX_REFERENCES,
   OUTSIDE_LAYER,
@@ -82,6 +82,10 @@ import {
 } from '../shared/api.ts';
 import { getState, post, prefs, savePref, subscribe, upload, uploadReference } from './api.ts';
 import { CanvasView, type MaskEditView, type MaskRef, type Movable, type PeekView, type PickEvent, type SelectOp, type Tool } from './viewer.ts';
+import { decimal, L, lang, plural, type Lang, type LangChoice } from '../shared/i18n.ts';
+
+/** Названия языков — каждый на себе */
+const LANG_NAMES: Record<Lang, string> = { en: 'English', ru: 'Русский' };
 
 /** Объект, выделенный «Палочкой»: его уровни и подсказки, по которым он найден */
 interface Pick {
@@ -110,7 +114,7 @@ function usePref<T>(key: string, initial: T, valid?: (value: unknown) => boolean
 
 /** Подписи уровней объекта от мелкого к крупному */
 function levelNames(n: number): string[] {
-  return n >= 3 ? ['Деталь', 'Часть', 'Целое'].concat(Array.from({ length: n - 3 }, (_, i) => `${i + 4}`)) : ['Часть', 'Целое'].slice(2 - n);
+  return n >= 3 ? [L('Деталь', 'Detail'), L('Часть', 'Part'), L('Целое', 'Whole')].concat(Array.from({ length: n - 3 }, (_, i) => `${i + 4}`)) : [L('Часть', 'Part'), L('Целое', 'Whole')].slice(2 - n);
 }
 
 /** Сохранённый объект как фигура выделения */
@@ -118,17 +122,9 @@ function objectShape(o: ObjectDto): MaskRef {
   return { kind: 'mask', id: `obj:${o.id}`, ...o.rect, rev: o.rev };
 }
 
-function plural(n: number, one: string, few: string, many: string): string {
-  const d = n % 10;
-  const dd = n % 100;
-  if (d === 1 && dd !== 11) return one;
-  if (d >= 2 && d <= 4 && (dd < 12 || dd > 14)) return few;
-  return many;
-}
-
 /** Сколько сгенерировать: варианты разом или, с директором, шаги с критиком */
 function countText(director: boolean, n: number): string {
-  return `${n} ${director ? plural(n, 'шаг', 'шага', 'шагов') : plural(n, 'вариант', 'варианта', 'вариантов')}`;
+  return `${n} ${director ? plural(n, ['шаг', 'шага', 'шагов'], ['step', 'steps']) : plural(n, ['вариант', 'варианта', 'вариантов'], ['variant', 'variants'])}`;
 }
 
 function fileName(path: string): string {
@@ -181,7 +177,7 @@ function modelOutputs(dto: ModelOutputsDto): ModelOutputs {
     imageSizes: dto.imageSizes,
     outputSize: (aspectRatio, imageSize) => {
       const out = dto.outputs[aspectRatio]?.[imageSize];
-      if (!out) throw new Error(`Модель не умеет ${aspectRatio} в ${imageSize}`);
+      if (!out) throw new Error(L(`Модель не умеет ${aspectRatio} в ${imageSize}`, `The model cannot do ${aspectRatio} at ${imageSize}`));
       return out;
     },
   };
@@ -214,13 +210,13 @@ const TOOL_ICONS: Record<Tool, Icon> = {
 
 /** name — на панели настроек, label — во всплывающей подсказке */
 const TOOLS: { id: Tool; name: string; label: string; key: string }[] = [
-  { id: 'object', name: 'Палочка', label: 'Палочка: объект под щелчком', key: 'W' },
-  { id: 'move', name: 'Сдвинуть', label: 'Сдвинуть слой', key: 'V' },
-  { id: 'rect', name: 'Прямоугольник', label: 'Прямоугольник', key: 'R' },
-  { id: 'lasso', name: 'Лассо', label: 'Лассо', key: 'L' },
-  { id: 'brush', name: 'Кисть', label: 'Кисть', key: 'B' },
-  { id: 'sketch', name: 'Набросок', label: 'Набросок для модели, Alt стирает', key: 'S' },
-  { id: 'hand', name: 'Рука', label: 'Рука (или зажать пробел)', key: 'H' },
+  { id: 'object', name: L('Палочка', 'Wand'), label: L('Палочка: объект под щелчком', 'Wand: object under the click'), key: 'W' },
+  { id: 'move', name: L('Сдвинуть', 'Move'), label: L('Сдвинуть слой', 'Move layer'), key: 'V' },
+  { id: 'rect', name: L('Прямоугольник', 'Rectangle'), label: L('Прямоугольник', 'Rectangle'), key: 'R' },
+  { id: 'lasso', name: L('Лассо', 'Lasso'), label: L('Лассо', 'Lasso'), key: 'L' },
+  { id: 'brush', name: L('Кисть', 'Brush'), label: L('Кисть', 'Brush'), key: 'B' },
+  { id: 'sketch', name: L('Набросок', 'Sketch'), label: L('Набросок для модели, Alt стирает', 'Sketch for the model, Alt erases'), key: 'S' },
+  { id: 'hand', name: L('Рука', 'Hand'), label: L('Рука (или зажать пробел)', 'Hand (or hold Space)'), key: 'H' },
 ];
 
 /** Инструменты выделения: у них режим «Новое / Добавить / Вычесть» и край */
@@ -231,9 +227,9 @@ const SKETCH_COLORS = ['#ff3b30', '#1e88ff', '#22b14c', '#111111', '#ffffff'];
 
 /** label — в списке моделей, short — в сводке над кнопкой генерации, via — откуда она */
 const MODELS: { id: ModelChoice; label: string; short: string; via: string }[] = [
-  { id: 'flash', label: 'Nano Banana 2', short: 'Banana 2', via: 'ключ laozhang.ai' },
-  { id: 'pro', label: 'Nano Banana Pro', short: 'Banana Pro', via: 'ключ laozhang.ai, вдвое дольше' },
-  { id: 'chatgpt', label: 'ChatGPT Images', short: 'ChatGPT', via: 'подписка ChatGPT' },
+  { id: 'flash', label: 'Nano Banana 2', short: 'Banana 2', via: L('ключ laozhang.ai', 'laozhang.ai key') },
+  { id: 'pro', label: 'Nano Banana Pro', short: 'Banana Pro', via: L('ключ laozhang.ai, вдвое дольше', 'laozhang.ai key, twice as slow') },
+  { id: 'chatgpt', label: 'ChatGPT Images', short: 'ChatGPT', via: L('подписка ChatGPT', 'ChatGPT subscription') },
 ];
 const modelInfo = (id: ModelChoice) => MODELS.find((m) => m.id === id) ?? MODELS[0]!;
 
@@ -248,10 +244,10 @@ const needsKey = (model: ModelChoice) => model !== 'chatgpt';
 
 /** Что сейчас с задачей: директор расписывает её до генерации */
 function jobStatus(job: JobDto): string {
-  if (job.directing) return 'Директор думает';
-  if (job.reviewing) return 'Критик смотрит';
-  if (job.chain?.step) return `Шаг ${job.chain.step} из ${job.chain.steps}`;
-  if (masksOnly(job)) return 'Маска по объекту';
+  if (job.directing) return L('Директор думает', 'Director is thinking');
+  if (job.reviewing) return L('Критик смотрит', 'Critic is reviewing');
+  if (job.chain?.step) return L(`Шаг ${job.chain.step} из ${job.chain.steps}`, `Step ${job.chain.step} of ${job.chain.steps}`);
+  if (masksOnly(job)) return L('Маска по объекту', 'Object mask');
   return STATUS[job.status];
 }
 
@@ -261,11 +257,11 @@ function masksOnly(job: JobDto): boolean {
 }
 
 const STATUS: Record<JobDto['status'], string> = {
-  queued: 'Ждёт очереди',
-  preparing: 'Готовлю кусок',
-  running: 'Генерация',
-  done: 'Готово',
-  error: 'Ошибка',
+  queued: L('Ждёт очереди', 'Queued'),
+  preparing: L('Готовлю кусок', 'Preparing crop'),
+  running: L('Генерация', 'Generating'),
+  done: L('Готово', 'Done'),
+  error: L('Ошибка', 'Error'),
 };
 
 export function App() {
@@ -342,7 +338,7 @@ export function App() {
   const onShape = useRef<(shape: MaskShape, op: SelectOp) => void>(() => undefined);
   const onSketch = useRef<(stroke: SketchStroke) => void>(() => undefined);
   const onPick = useRef<(event: PickEvent) => void>(() => undefined);
-  const onMove = useRef<(id: string, dx: number, dy: number) => Promise<number>>(() => Promise.reject(new Error('Нет документа')));
+  const onMove = useRef<(id: string, dx: number, dy: number) => Promise<number>>(() => Promise.reject(new Error(L('Нет документа', 'No document'))));
   /** Как найдена каждая фигура «Палочки» в выделении */
   const picks = useRef(new WeakMap<MaskShape, Pick>());
   /** Выделение на этот миг: щелчки «Палочкой» идут по очереди и не ждут перерисовки */
@@ -350,7 +346,7 @@ export function App() {
   const pickChain = useRef<Promise<unknown>>(Promise.resolve());
   /** В каком порядке в форму новой правки ложились фигуры выделения и штрихи наброска — ⌘Z убирает последнее */
   const formOrder = useRef<('shape' | 'sketch')[]>([]);
-  const onMaskShape = useRef<(view: MaskEditView, shape: MaskShape) => Promise<MaskEditResult>>(() => Promise.reject(new Error('Нет правки маски')));
+  const onMaskShape = useRef<(view: MaskEditView, shape: MaskShape) => Promise<MaskEditResult>>(() => Promise.reject(new Error(L('Нет правки маски', 'No mask edit'))));
   const toastTimer = useRef<number | undefined>(undefined);
 
   const doc = state?.doc ?? null;
@@ -454,7 +450,7 @@ export function App() {
       open.map((j) => {
         const under = j.fillFor ? objects.find((x) => x.id === j.fillFor) : undefined;
         const o = objects.find((x) => x.id === j.object);
-        return [j.id, under ? `Фон под «${short(under.name, 20)}»` : o ? short(o.name, 24) : 'Новый слой'];
+        return [j.id, under ? L(`Фон под «${short(under.name, 20)}»`, `Background under “${short(under.name, 20)}”`) : o ? short(o.name, 24) : L('Новый слой', 'New layer')];
       }),
     );
     viewRef.current?.setJobs(open, labels);
@@ -467,7 +463,7 @@ export function App() {
       if (j.status !== 'done' || busyJob(j) || discarded.current.has(j.id)) continue;
       discarded.current.add(j.id);
       const failed = j.variants.find((v) => v.maskError);
-      if (failed) notify(`Маска по объекту: ${failed.maskError}`);
+      if (failed) notify(L(`Маска по объекту: ${failed.maskError}`, `Object mask: ${failed.maskError}`));
       post(`/api/jobs/${j.id}/discard`).catch(() => discarded.current.delete(j.id));
     }
   }, [state?.jobs]);
@@ -611,7 +607,7 @@ export function App() {
       const res = await post<PickResult>('/api/segment/pick', { view: e.view, points, box: e.box, snap: objectSnap, op: e.op, selection, within: within?.id }).catch(
         (err: unknown) => {
           // Добавить или вычесть можно только там же, где работают: объекты разных слоёв не смешиваются
-          if (err instanceof Error && err.message === OUTSIDE_LAYER) notify(within ? `Вне слоя «${short(within.name, 24)}»` : 'Здесь слой: щелчок без Shift откроет его', false);
+          if (err instanceof Error && err.message === OUTSIDE_LAYER) notify(within ? L(`Вне слоя «${short(within.name, 24)}»`, `Outside layer “${short(within.name, 24)}”`) : L('Здесь слой: щелчок без Shift откроет его', 'There is a layer here: click without Shift to open it'), false);
           else throw err;
         },
       );
@@ -625,7 +621,7 @@ export function App() {
       // Объект нашёлся на фоне — работа вне слоя
       if (e.op === 'new' && res.owner !== (within?.id ?? null)) setActive(res.owner);
       // Уровень, который ничего не меняет, всё равно ложится в выделение: [ и ] переключат его на другой
-      if (res.unchanged) notify(`${e.op === 'add' ? 'Это уже в выделении' : 'Этого нет в выделении'}: [ и ] — мельче или крупнее`, false);
+      if (res.unchanged) notify(L(`${e.op === 'add' ? 'Это уже в выделении' : 'Этого нет в выделении'}: [ и ] — мельче или крупнее`, `${e.op === 'add' ? 'Already selected' : 'Not in the selection'}: [ and ] — smaller or larger`), false);
       await showPick({ ...res, points, box: e.box, erase: e.op === 'sub', snap: objectSnap, at: p }, e.op === 'new' ? 'all' : 'add');
     });
   };
@@ -692,7 +688,7 @@ export function App() {
         setSelection([objectShape(o)]);
         setActive(o.id);
         setActiveGroup(null);
-        notify(`Слой «${o.name}»`, false);
+        notify(L(`Слой «${o.name}»`, `Layer “${o.name}”`), false);
       }
       return o;
     } catch (err) {
@@ -705,7 +701,7 @@ export function App() {
   const mergeLayers = async () => {
     const ids = [...new Set([...selectedObjects, ...(active ? [active] : [])])];
     if (ids.length < 2) {
-      notify('Выделите в «Слоях» два слоя или больше: Shift-щелчок', false);
+      notify(L('Выделите в «Слоях» два слоя или больше: Shift-щелчок', 'Select two or more layers in Layers: Shift-click'), false);
       return;
     }
     try {
@@ -715,7 +711,7 @@ export function App() {
       if (seq === refreshSeq.current) setState(s);
       const o = s.objects.find((x) => x.id === id);
       if (o) enterLayer(o);
-      notify('Слои объединены. ⌘Z вернёт их', false);
+      notify(L('Слои объединены. ⌘Z вернёт их', 'Layers merged. ⌘Z brings them back'), false);
     } catch (err) {
       fail(err);
     }
@@ -724,7 +720,7 @@ export function App() {
   const groupLayers = async () => {
     const ids = activeGroup ? [activeGroup] : [...new Set([...selectedObjects, ...(active ? [active] : [])])];
     if (!ids.length) {
-      notify('Выберите в «Слоях» слои: щелчок или Shift-щелчок', false);
+      notify(L('Выберите в «Слоях» слои: щелчок или Shift-щелчок', 'Select layers in Layers: click or Shift-click'), false);
       return;
     }
     try {
@@ -742,7 +738,7 @@ export function App() {
   /** ⇧⌘G: слои из группы — на её место */
   const ungroup = (g: GroupDto | undefined) => {
     if (!g) {
-      notify('Выберите группу в «Слоях»', false);
+      notify(L('Выберите группу в «Слоях»', 'Select a group in Layers'), false);
       return;
     }
     post(`/api/groups/${g.id}/ungroup`).then(() => setActiveGroup(null), fail);
@@ -752,7 +748,7 @@ export function App() {
       .then(() => {
         setActiveGroup(null);
         clearSelection();
-        notify(`Группа «${short(g.name)}» удалена со слоями. ⌘Z вернёт`, false);
+        notify(L(`Группа «${short(g.name)}» удалена со слоями. ⌘Z вернёт`, `Group “${short(g.name)}” deleted with its layers. ⌘Z brings it back`), false);
       })
       .catch(fail);
   };
@@ -786,13 +782,13 @@ export function App() {
   /** Влить слой в фон: то, что от него видно, становится исходником */
   const mergeDown = (o: ObjectDto | undefined) => {
     if (!o) {
-      notify('Откройте слой: щелчок по нему', false);
+      notify(L('Откройте слой: щелчок по нему', 'Open a layer: click it'), false);
       return;
     }
     post(`/api/objects/${o.id}/merge-down`).then(() => {
       if (active === o.id) setActive(null);
       clearSelection();
-      notify(`«${short(o.name)}» влит в фон. ⌘Z вернёт`, false);
+      notify(L(`«${short(o.name)}» влит в фон. ⌘Z вернёт`, `“${short(o.name)}” merged into the background. ⌘Z brings it back`), false);
     }, fail);
   };
   /** Свести все слои в плоскую картинку */
@@ -800,7 +796,7 @@ export function App() {
     post('/api/doc/flatten').then(() => {
       setActive(null);
       clearSelection();
-      notify('Слои сведены. ⌘Z вернёт их', false);
+      notify(L('Слои сведены. ⌘Z вернёт их', 'Layers flattened. ⌘Z brings them back'), false);
     }, fail);
   /**
    * Щелчок по слою в списке — работа в нём: его маска становится выделением; с ⌘ или Shift — маска добавляется
@@ -866,7 +862,7 @@ export function App() {
     }
     try {
       const { ids } = await post<{ ids: string[] }>(`/api/objects/${o.id}/fill`, { variants, model, size: sizeFor(model) });
-      if (ids.length > 1) notify(`Фон дорисуется в ${ids.length} ${plural(ids.length, 'слое', 'слоях', 'слоях')}`, false);
+      if (ids.length > 1) notify(`${L('Фон дорисуется в', 'The background will be filled in')} ${ids.length} ${plural(ids.length, ['слое', 'слоях', 'слоях'], ['layer', 'layers'])}`, false);
     } catch (err) {
       fail(err);
     }
@@ -924,26 +920,26 @@ export function App() {
     for (let i = 0, g = groups.find((x) => x.id === id); g && i < 64; i++, g = groups.find((x) => x.id === g!.group)) if (g.hidden) return true;
     return false;
   };
-  const hiddenWhy = (o: ObjectDto) => (o.hidden ? 'слой скрыт' : 'группа скрыта');
+  const hiddenWhy = (o: ObjectDto) => (o.hidden ? L('слой скрыт', 'layer is hidden') : L('группа скрыта', 'group is hidden'));
   // Куда ляжет правка и почему её сейчас не сделать — подписью на кнопке генерации
   let target: string;
-  let blocked = maskLayer ? 'идёт правка маски' : '';
+  let blocked = maskLayer ? L('идёт правка маски', 'mask is being edited') : '';
   if (redoPatch) {
-    target = redoObj ? `к версии ${redoObj.versions.indexOf(redoPatch.id) + 1}` : 'к версии';
+    target = redoObj ? L(`к версии ${redoObj.versions.indexOf(redoPatch.id) + 1}`, `to version ${redoObj.versions.indexOf(redoPatch.id) + 1}`) : L('к версии', 'to the version');
     if (redoObj && !redoObj.visible) blocked ||= hiddenWhy(redoObj);
   } else {
     if (activeObj) {
-      target = `в «${short(activeObj.name, 24)}»`;
+      target = L(`в «${short(activeObj.name, 24)}»`, `into “${short(activeObj.name, 24)}”`);
       if (!activeObj.visible) blocked ||= hiddenWhy(activeObj);
     } else if (activeGrp) {
-      target = `новым слоем в «${short(activeGrp.name, 20)}»`;
-      if (groupHidden(activeGrp.id)) blocked ||= 'группа скрыта';
+      target = L(`новым слоем в «${short(activeGrp.name, 20)}»`, `as a new layer in “${short(activeGrp.name, 20)}”`);
+      if (groupHidden(activeGrp.id)) blocked ||= L('группа скрыта', 'group is hidden');
     } else if (selectedObjects.size > 1) {
-      target = 'новым слоем сверху';
+      target = L('новым слоем сверху', 'as a new layer on top');
     } else {
-      target = prompt.trim() ? `новым слоем «${short(layerName(prompt), 22)}»` : 'новым слоем';
+      target = prompt.trim() ? L(`новым слоем «${short(layerName(prompt), 22)}»`, `as new layer “${short(layerName(prompt), 22)}”`) : L('новым слоем', 'as a new layer');
     }
-    if (!hasSelection) blocked ||= 'выделите область';
+    if (!hasSelection) blocked ||= L('выделите область', 'select an area');
   }
   const canGenerate = !!doc && !blocked && prompt.trim().length > 0;
   const count = countFor(stepwise);
@@ -1091,7 +1087,7 @@ export function App() {
     }
     try {
       const { path } = await post<{ path: string | null }>(`/api/doc/${how}`);
-      if (path) notify(`${how === 'export' ? 'Экспортировано' : 'Сохранено'}: ${fileName(path)}`, false);
+      if (path) notify(L(`${how === 'export' ? 'Экспортировано' : 'Сохранено'}: ${fileName(path)}`, `${how === 'export' ? 'Exported' : 'Saved'}: ${fileName(path)}`), false);
     } catch (err) {
       fail(err);
     }
@@ -1102,10 +1098,10 @@ export function App() {
     if (!images.length) return;
     const room = MAX_REFERENCES - refs.length;
     if (room <= 0) {
-      notify(`Не больше ${MAX_REFERENCES} референсов на правку`);
+      notify(L(`Не больше ${MAX_REFERENCES} референсов на правку`, `No more than ${MAX_REFERENCES} references per edit`));
       return;
     }
-    if (images.length > room) notify(`Добавлю только ${room}: не больше ${MAX_REFERENCES} референсов на правку`);
+    if (images.length > room) notify(L(`Добавлю только ${room}: не больше ${MAX_REFERENCES} референсов на правку`, `Adding only ${room}: no more than ${MAX_REFERENCES} references per edit`));
     try {
       for (const file of images.slice(0, room)) {
         const { id } = await uploadReference(file);
@@ -1349,7 +1345,7 @@ export function App() {
 
   // Загрузка из браузера — только когда нет окон выбора файла (интерфейс для разработки)
   const openFile = async (file: File) => {
-    setBusy(`Открываю ${file.name}…`);
+    setBusy(L(`Открываю ${file.name}…`, `Opening ${file.name}…`));
     try {
       await upload(file);
       refresh();
@@ -1376,7 +1372,7 @@ export function App() {
 
   /** Маска версии по объекту, который нарисовала модель: её рисует модель из формы — это генерация */
   const objectMask = async (patch: PatchDto) => {
-    setBusy('Модель рисует маску…');
+    setBusy(L('Модель рисует маску…', 'The model is drawing the mask…'));
     try {
       await post(`/api/history/${patch.id}/object-mask`, { model } satisfies ObjectMaskRequest);
       maskChanged();
@@ -1410,7 +1406,7 @@ export function App() {
         focus(open);
         const idle = (open.status === 'done' || open.status === 'error') && !open.variants.some((v) => v.status === 'running');
         if (idle) await redoJob(open, change);
-        else notify('Варианты этой версии уже генерируются', false);
+        else notify(L('Варианты этой версии уже генерируются', 'Variants of this version are already generating'), false);
         return;
       }
       const count = countFor(change.director ?? patch.directed !== undefined);
@@ -1423,12 +1419,12 @@ export function App() {
 
   const deleteVersion = (patch: PatchDto) => {
     post(`/api/history/${patch.id}/delete`)
-      .then(() => notify('Версия удалена. ⌘Z вернёт её', false))
+      .then(() => notify(L('Версия удалена. ⌘Z вернёт её', 'Version deleted. ⌘Z brings it back'), false))
       .catch(fail);
   };
   const deleteObject = (o: ObjectDto) => {
     post(`/api/objects/${o.id}/delete`)
-      .then(() => notify(`Слой «${short(o.name)}» ${o.freed ? 'убран с холста' : 'удалён'}. ⌘Z вернёт его`, false))
+      .then(() => notify(L(`Слой «${short(o.name)}» ${o.freed ? 'убран с холста' : 'удалён'}. ⌘Z вернёт его`, `Layer “${short(o.name)}” ${o.freed ? 'removed from the canvas' : 'deleted'}. ⌘Z brings it back`), false))
       .catch(fail);
   };
   const expandVersion = (patch: PatchDto) => {
@@ -1436,7 +1432,7 @@ export function App() {
       .then(({ addedPx }) => {
         if (addedPx) maskChanged();
         const area = patch.rect.width * patch.rect.height;
-        notify(addedPx ? `Маска выросла на ${((100 * addedPx) / area).toFixed(1)}% куска` : 'За краем маски модель ничего не дорисовала', false);
+        notify(addedPx ? L(`Маска выросла на ${((100 * addedPx) / area).toFixed(1)}% куска`, `Mask grew by ${((100 * addedPx) / area).toFixed(1)}% of the crop`) : L('За краем маски модель ничего не дорисовала', 'The model drew nothing beyond the mask edge'), false);
       })
       .catch(fail);
   };
@@ -1449,8 +1445,8 @@ export function App() {
             <>
               <strong>{doc.name}</strong>
               {doc.dirty && (
-                <span class="unsaved" title="Принятые правки ещё не записаны в файл (⌘S)">
-                  не сохранено
+                <span class="unsaved" title={L('Принятые правки ещё не записаны в файл (⌘S)', 'Changes are not written to the file yet (⌘S)')}>
+                  {L('не сохранено', 'unsaved')}
                 </span>
               )}
               <span class="dim">
@@ -1467,37 +1463,37 @@ export function App() {
               <span class="sep" />
               <button
                 class="ghost icon"
-                title="Отменить (⌘Z)"
-                aria-label="Отменить"
+                title={L('Отменить (⌘Z)', 'Undo (⌘Z)')}
+                aria-label={L('Отменить', 'Undo')}
                 disabled={!state?.canUndo && !selection.length && !sketch.length}
                 onClick={undo}
               >
                 <IconArrowBackUp size={20} stroke={STROKE} />
               </button>
-              <button class="ghost icon" title="Повторить (⇧⌘Z)" aria-label="Повторить" disabled={!state?.canRedo} onClick={redo}>
+              <button class="ghost icon" title={L('Повторить (⇧⌘Z)', 'Redo (⇧⌘Z)')} aria-label={L('Повторить', 'Redo')} disabled={!state?.canRedo} onClick={redo}>
                 <IconArrowForwardUp size={20} stroke={STROKE} />
               </button>
               <span class="sep" />
               <div class="zoom-control">
-                <button class="ghost icon" title="Уменьшить (⌘−)" aria-label="Уменьшить" onClick={() => run('zoom-out')}>
+                <button class="ghost icon" title={L('Уменьшить (⌘−)', 'Zoom out (⌘−)')} aria-label={L('Уменьшить', 'Zoom out')} onClick={() => run('zoom-out')}>
                   <IconMinus size={18} stroke={STROKE} />
                 </button>
                 <button
                   class="ghost zoom"
-                  title="Масштаб"
+                  title={L('Масштаб', 'Zoom')}
                   aria-haspopup="menu"
                   aria-expanded={zoomMenu}
                   onClick={() => setZoomMenu((v) => !v)}
                 >
                   {zoom}%
                 </button>
-                <button class="ghost icon" title="Увеличить (⌘=)" aria-label="Увеличить" onClick={() => run('zoom-in')}>
+                <button class="ghost icon" title={L('Увеличить (⌘=)', 'Zoom in (⌘=)')} aria-label={L('Увеличить', 'Zoom in')} onClick={() => run('zoom-in')}>
                   <IconPlus size={18} stroke={STROKE} />
                 </button>
                 {zoomMenu && (
                   <ul class="zoom-menu" role="menu" onClick={() => setZoomMenu(false)}>
                     <li role="menuitem" onClick={() => run('zoom-fit')}>
-                      Вписать в окно <kbd>⌘0</kbd>
+                      {L('Вписать в окно', 'Fit to window')} <kbd>⌘0</kbd>
                     </li>
                     {[25, 50, 100, 200, 400].map((p) => (
                       <li role="menuitem" onClick={() => viewRef.current?.zoomTo(p)}>
@@ -1511,44 +1507,44 @@ export function App() {
               <span class="sep" />
               <button
                 class={doc.dirty ? 'ghost save-pending' : 'ghost'}
-                title={doc.path && !doc.saveBlocker ? `Записать в ${fileName(doc.path)} (⌘S)` : 'Сохранить в файл (⌘S)'}
+                title={doc.path && !doc.saveBlocker ? L(`Записать в ${fileName(doc.path)} (⌘S)`, `Write to ${fileName(doc.path)} (⌘S)`) : L('Сохранить в файл (⌘S)', 'Save to file (⌘S)')}
                 onClick={() => void save('save')}
               >
-                Сохранить
+                {L('Сохранить', 'Save')}
               </button>
             </>
           )}
         </div>
-        <div class="counter" title="Каждая генерация платная">
+        <div class="counter" title={L('Каждая генерация платная', 'Every generation costs money')}>
           {failedJobs.length > 0 && (
-            <button class="errs" title="Показать" onClick={showError}>
+            <button class="errs" title={L('Показать', 'Show')} onClick={showError}>
               <IconAlertTriangle size={14} stroke={STROKE} aria-hidden="true" />
-              {failedJobs.length} {plural(failedJobs.length, 'ошибка', 'ошибки', 'ошибок')}
+              {failedJobs.length} {plural(failedJobs.length, ['ошибка', 'ошибки', 'ошибок'], ['error', 'errors'])}
             </button>
           )}
-          {state?.provider === 'mock' && <span class="badge">подставная модель</span>}
-          Генераций: {state?.generations.session ?? 0} за сеанс, {state?.generations.today ?? 0} сегодня
+          {state?.provider === 'mock' && <span class="badge">{L('подставная модель', 'mock model')}</span>}
+          {L('Генераций:', 'Generations:')} {state?.generations.session ?? 0} {L('за сеанс,', 'this session,')} {state?.generations.today ?? 0} {L('сегодня', 'today')}
         </div>
       </header>
 
-      <div class="optbar" role="toolbar" aria-label="Настройки инструмента">
+      <div class="optbar" role="toolbar" aria-label={L('Настройки инструмента', 'Tool options')}>
         {doc &&
           (editedLayer ? (
             <>
               <span class="opt-title">
                 <IconMask size={16} stroke={STROKE} aria-hidden="true" />
-                {`Маска «${short(objects.find((o) => o.id === editedLayer.object)?.name ?? editedLayer.prompt, 24)}»`}
-                <Help>Кисть и фигуры скрывают часть версии или возвращают её — и за краем прежнего выделения. Alt — наоборот, X — сменить. ⌘Z отменяет мазок.</Help>
+                {L(`Маска «${short(objects.find((o) => o.id === editedLayer.object)?.name ?? editedLayer.prompt, 24)}»`, `Mask “${short(objects.find((o) => o.id === editedLayer.object)?.name ?? editedLayer.prompt, 24)}”`)}
+                <Help>{L('Кисть и фигуры скрывают часть версии или возвращают её — и за краем прежнего выделения. Alt — наоборот, X — сменить. ⌘Z отменяет мазок.', 'The brush and shapes hide part of the version or bring it back — even beyond the original selection. Alt does the opposite, X switches. ⌘Z undoes a stroke.')}</Help>
               </span>
               {tool !== 'hand' && (
                 <>
                   <span class="opt-sep" />
                   <Seg
-                    label="Кисть по маске"
+                    label={L('Кисть по маске', 'Mask brush')}
                     value={maskOp}
                     options={[
-                      { value: 'add' as const, icon: IconLayersUnion, title: 'Вернуть часть версии (X)' },
-                      { value: 'sub' as const, icon: IconLayersSubtract, title: 'Скрыть часть версии (X, Alt)' },
+                      { value: 'add' as const, icon: IconLayersUnion, title: L('Вернуть часть версии (X)', 'Reveal part of the version (X)') },
+                      { value: 'sub' as const, icon: IconLayersSubtract, title: L('Скрыть часть версии (X, Alt)', 'Hide part of the version (X, Alt)') },
                     ]}
                     onChange={setMaskOp}
                   />
@@ -1556,10 +1552,10 @@ export function App() {
               )}
               {tool === 'brush' && (
                 <>
-                  <Slider label="Размер" title="Размер кисти на экране ([ и ])" min={4} max={400} value={brush} onChange={setBrush} />
+                  <Slider label={L('Размер', 'Size')} title={L('Размер кисти на экране ([ и ])', 'Brush size on screen ([ and ])')} min={4} max={400} value={brush} onChange={setBrush} />
                   <Slider
-                    label="Мягкость"
-                    title="0% — жёсткий край, 100% — затухает от середины (⇧[ и ⇧])"
+                    label={L('Мягкость', 'Softness')}
+                    title={L('0% — жёсткий край, 100% — затухает от середины (⇧[ и ⇧])', '0% — hard edge, 100% — fades from the center (⇧[ and ⇧])')}
                     min={0}
                     max={100}
                     step={5}
@@ -1570,12 +1566,12 @@ export function App() {
                 </>
               )}
               <span class="opt-sep" />
-              <button class="opt-button" title="Маска по объекту: её рисует модель из формы — это генерация" onClick={() => void objectMask(editedLayer)}>
+              <button class="opt-button" title={L('Маска по объекту: её рисует модель из формы — это генерация', 'Object mask: drawn by the model chosen in the edit panel — this is a generation')} onClick={() => void objectMask(editedLayer)}>
                 <IconSparkles size={16} stroke={STROKE} aria-hidden="true" />
-                По объекту
+                {L('По объекту', 'By object')}
               </button>
               <button class="opt-done" onClick={() => setMaskLayer(null)}>
-                Готово
+                {L('Готово', 'Done')}
               </button>
             </>
           ) : (
@@ -1591,12 +1587,12 @@ export function App() {
                 <>
                   <span class="opt-sep" />
                   <Seg
-                    label="Режим выделения"
+                    label={L('Режим выделения', 'Selection mode')}
                     value={tool === 'brush' && selectMode === 'new' ? 'add' : selectMode}
                     options={[
-                      ...(tool === 'brush' ? [] : [{ value: 'new' as const, icon: IconSquare, title: 'Новое выделение' }]),
-                      { value: 'add' as const, icon: IconLayersUnion, title: 'Добавить к выделению (Shift)' },
-                      { value: 'sub' as const, icon: IconLayersSubtract, title: 'Вычесть из выделения (Alt)' },
+                      ...(tool === 'brush' ? [] : [{ value: 'new' as const, icon: IconSquare, title: L('Новое выделение', 'New selection') }]),
+                      { value: 'add' as const, icon: IconLayersUnion, title: L('Добавить к выделению (Shift)', 'Add to selection (Shift)') },
+                      { value: 'sub' as const, icon: IconLayersSubtract, title: L('Вычесть из выделения (Alt)', 'Subtract from selection (Alt)') },
                     ]}
                     onChange={setSelectMode}
                   />
@@ -1606,26 +1602,26 @@ export function App() {
                 <>
                   {currentPick && currentPick.levels.length > 1 && (
                     <Seg
-                      label="Уровень объекта"
+                      label={L('Уровень объекта', 'Object level')}
                       value={currentPick.level}
-                      options={levelNames(currentPick.levels.length).map((name, i) => ({ value: i, text: name, title: 'Мельче или крупнее: [ и ] или щелчок туда же' }))}
+                      options={levelNames(currentPick.levels.length).map((name, i) => ({ value: i, text: name, title: L('Мельче или крупнее: [ и ] или щелчок туда же', 'Smaller or larger: [ and ] or click the same spot') }))}
                       onChange={(i) => stepLevel(i - currentPick.level)}
                     />
                   )}
-                  <OptCheck label="По линиям" title="Край выделения — по линиям рисунка, с контуром" checked={objectSnap} onChange={setObjectSnap} />
+                  <OptCheck label={L('По линиям', 'Snap to lines')} title={L('Край выделения — по линиям рисунка, с контуром', 'Selection edge follows the lines of the drawing, outline included')} checked={objectSnap} onChange={setObjectSnap} />
                 </>
               )}
               {tool === 'brush' && (
                 <>
-                  <Slider label="Размер" title="Размер кисти на экране ([ и ])" min={4} max={400} value={brush} onChange={setBrush} />
-                  <OptCheck label="По линиям" title="Клетки рисунка, которые задел мазок, — целиком, с контуром" checked={brushSnap} onChange={setBrushSnap} />
+                  <Slider label={L('Размер', 'Size')} title={L('Размер кисти на экране ([ и ])', 'Brush size on screen ([ and ])')} min={4} max={400} value={brush} onChange={setBrush} />
+                  <OptCheck label={L('По линиям', 'Snap to lines')} title={L('Клетки рисунка, которые задел мазок, — целиком, с контуром', 'Drawing cells the stroke touched — whole, with their outline')} checked={brushSnap} onChange={setBrushSnap} />
                 </>
               )}
               {tool === 'sketch' && (
                 <>
                   <span class="opt-sep" />
-                  <Slider label="Толщина" title="Толщина наброска на экране ([ и ])" min={2} max={120} value={sketchSize} onChange={setSketchSize} />
-                  <div class="sketch-colors" role="radiogroup" aria-label="Цвет наброска">
+                  <Slider label={L('Толщина', 'Thickness')} title={L('Толщина наброска на экране ([ и ])', 'Sketch thickness on screen ([ and ])')} min={2} max={120} value={sketchSize} onChange={setSketchSize} />
+                  <div class="sketch-colors" role="radiogroup" aria-label={L('Цвет наброска', 'Sketch color')}>
                     {SKETCH_COLORS.map((c) => (
                       <button
                         key={c}
@@ -1637,8 +1633,8 @@ export function App() {
                         onClick={() => setSketchColor(c)}
                       />
                     ))}
-                    <label class={SKETCH_COLORS.includes(sketchColor) ? 'swatch custom' : 'swatch custom active'} title="Другой цвет" style={{ background: sketchColor }}>
-                      <input type="color" value={sketchColor} aria-label="Другой цвет наброска" onInput={(e) => setSketchColor(e.currentTarget.value)} />
+                    <label class={SKETCH_COLORS.includes(sketchColor) ? 'swatch custom' : 'swatch custom active'} title={L('Другой цвет', 'Other color')} style={{ background: sketchColor }}>
+                      <input type="color" value={sketchColor} aria-label={L('Другой цвет наброска', 'Other sketch color')} onInput={(e) => setSketchColor(e.currentTarget.value)} />
                     </label>
                   </div>
                 </>
@@ -1646,22 +1642,22 @@ export function App() {
               {SELECTING.includes(tool) && hasSelection && (
                 <>
                   <span class="opt-sep" />
-                  <Slider label="Край" title="Край выделения шире или уже, пиксели холста" min={-50} max={50} value={edgePx} onChange={changeEdge} />
+                  <Slider label={L('Край', 'Edge')} title={L('Край выделения шире или уже, пиксели холста', 'Expand or contract the selection edge, in canvas pixels')} min={-50} max={50} value={edgePx} onChange={changeEdge} />
                 </>
               )}
               {selection.length > 0 && (
                 <span class="opt-actions">
                   {hasSelection && !(selectedObjects.size === 1 && selection.length === 1) && (
                     <>
-                      <button class="icon" title="Слой из выделения: копия того, что видно (⌘J)" aria-label="Слой из выделения" onClick={() => void saveObject()}>
+                      <button class="icon" title={L('Слой из выделения: копия того, что видно (⌘J)', 'Layer via Copy: a copy of what is visible (⌘J)')} aria-label={L('Слой из выделения', 'Layer via Copy')} onClick={() => void saveObject()}>
                         <IconCubePlus size={16} stroke={STROKE} />
                       </button>
-                      <button class="icon" title="Вырезать в слой: на старом месте — пусто (⌘⇧J)" aria-label="Вырезать в слой" onClick={() => void cutObject()}>
+                      <button class="icon" title={L('Вырезать в слой: на старом месте — пусто (⌘⇧J)', 'Layer via Cut: leaves a hole behind (⌘⇧J)')} aria-label={L('Вырезать в слой', 'Layer via Cut')} onClick={() => void cutObject()}>
                         <IconScissors size={16} stroke={STROKE} />
                       </button>
                     </>
                   )}
-                  <button class="icon" title="Снять выделение (⌘D)" aria-label="Снять выделение" onClick={clearSelection}>
+                  <button class="icon" title={L('Снять выделение (⌘D)', 'Deselect (⌘D)')} aria-label={L('Снять выделение', 'Deselect')} onClick={clearSelection}>
                     <IconMarqueeOff size={16} stroke={STROKE} />
                   </button>
                 </span>
@@ -1670,7 +1666,7 @@ export function App() {
           ))}
       </div>
 
-      <nav class="rail" aria-label="Инструменты">
+      <nav class="rail" aria-label={L('Инструменты', 'Tools')}>
         {TOOLS.map((t) => {
           const ToolIcon = TOOL_ICONS[t.id];
           // Набросок — подсказка модели к новой правке, а не выделение: отдельно от инструментов выделения.
@@ -1680,7 +1676,7 @@ export function App() {
             <button
               key={t.id}
               class={tool === t.id ? 'tool active' : 'tool'}
-              title={formOnly ? `${t.label} — только для новой правки` : `${t.label} (${t.key})`}
+              title={formOnly ? L(`${t.label} — только для новой правки`, `${t.label} — only for a new edit`) : `${t.label} (${t.key})`}
               aria-label={t.label}
               aria-pressed={tool === t.id}
               disabled={formOnly}
@@ -1696,7 +1692,7 @@ export function App() {
       <main class={maskLayer ? 'stage mask-mode' : 'stage'}>
         <div ref={stageRef} class="osd" />
         {doc && tool === 'object' && segment && !maskLayer && segment.status !== 'ready' && <SegmentBanner segment={segment} onError={fail} />}
-        {comparing && <div class="stage-banner">Исходник</div>}
+        {comparing && <div class="stage-banner">{L('Исходник', 'Original')}</div>}
         {!doc && state && <StartScreen recent={state.recent} onOpen={openDialog} onOpenRecent={openRecent} onError={fail} />}
         {(busy ?? state?.activity) && <div class="busy">{busy ?? state?.activity}</div>}
         {toast && <div class={toast.error ? 'toast error' : 'toast'}>{toast.text}</div>}
@@ -1782,7 +1778,7 @@ export function App() {
 
             <section
               class="compose"
-              aria-label="Правка"
+              aria-label={L('Правка', 'Edit')}
               onDragOver={(e) => {
                 if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
               }}
@@ -1793,20 +1789,20 @@ export function App() {
             >
               {state && !state.hasKey && needsKey(redoPatch?.model ?? model) && (
                 <p class="compose-key">
-                  Нужен ключ laozhang.ai
+                  {L('Нужен ключ laozhang.ai', 'laozhang.ai key needed')}
                   <button class="link" onClick={() => setDialog('settings')}>
-                    Настройки
+                    {L('Настройки', 'Settings')}
                   </button>
                 </p>
               )}
               <div class="compose-box">
-                <textarea ref={promptRef} rows={2} placeholder="Что должно получиться" aria-label="Задача" value={prompt} onInput={(e) => setPrompt(e.currentTarget.value)} />
+                <textarea ref={promptRef} rows={2} placeholder={L('Что должно получиться', 'Describe the result')} aria-label={L('Задача', 'Task')} value={prompt} onInput={(e) => setPrompt(e.currentTarget.value)} />
                 <div class="compose-attach">
                   {redoPatch ? (
-                    <span class="redo-chip" title="Модель, разрешение и референсы — как у версии">
+                    <span class="redo-chip" title={L('Модель, разрешение и референсы — как у версии', 'Model, resolution and references — same as the version')}>
                       <IconPencil size={14} stroke={STROKE} aria-hidden="true" />
-                      Поправка версии {redoObj ? redoObj.versions.indexOf(redoPatch.id) + 1 : ''}
-                      <button title="Не поправлять (Esc)" aria-label="Не поправлять" onClick={endRedo}>
+                      {L('Поправка версии', 'Revising version')} {redoObj ? redoObj.versions.indexOf(redoPatch.id) + 1 : ''}
+                      <button title={L('Не поправлять (Esc)', 'Cancel revision (Esc)')} aria-label={L('Не поправлять', 'Cancel revision')} onClick={endRedo}>
                         <IconX size={14} stroke={2} />
                       </button>
                     </span>
@@ -1814,30 +1810,30 @@ export function App() {
                     <>
                       {refs.map((id) => (
                         <span class="ref" key={id}>
-                          <img src={`/api/refs/${id}/thumb.jpg`} alt="Референс" />
-                          <button class="ref-remove" aria-label="Убрать референс" onClick={() => setRefs((r) => r.filter((x) => x !== id))}>
+                          <img src={`/api/refs/${id}/thumb.jpg`} alt={L('Референс', 'Reference')} />
+                          <button class="ref-remove" aria-label={L('Убрать референс', 'Remove reference')} onClick={() => setRefs((r) => r.filter((x) => x !== id))}>
                             <IconX size={10} stroke={2.5} />
                           </button>
                         </span>
                       ))}
                       {refs.length < MAX_REFERENCES && (
-                        <button class="att" title="Референс: или перетащите картинку сюда, или вставьте её через ⌘V" aria-label="Референс" onClick={() => refRef.current?.click()}>
+                        <button class="att" title={L('Референс: или перетащите картинку сюда, или вставьте её через ⌘V', 'Reference: or drag an image here, or paste one with ⌘V')} aria-label={L('Референс', 'Reference')} onClick={() => refRef.current?.click()}>
                           <IconPhotoPlus size={15} stroke={STROKE} aria-hidden="true" />
-                          {!refs.length && 'Референс'}
+                          {!refs.length && L('Референс', 'Reference')}
                         </button>
                       )}
                       {sketch.length > 0 && (
-                        <span class="att on" title="Набросок на холсте (S); Alt стирает">
+                        <span class="att on" title={L('Набросок на холсте (S); Alt стирает', 'Sketch on the canvas (S); Alt erases')}>
                           <IconScribble size={15} stroke={STROKE} aria-hidden="true" />
-                          Набросок
-                          <button class="att-x" title="Стереть набросок" aria-label="Стереть набросок" onClick={clearSketch}>
+                          {L('Набросок', 'Sketch')}
+                          <button class="att-x" title={L('Стереть набросок', 'Clear sketch')} aria-label={L('Стереть набросок', 'Clear sketch')} onClick={clearSketch}>
                             <IconX size={13} stroke={2} />
                           </button>
                         </span>
                       )}
-                      <button class={doc.style ? 'att on' : 'att'} title={doc.style ? `Стиль документа: ${doc.style}` : 'Стиль документа'} onClick={() => setDialog('style')}>
+                      <button class={doc.style ? 'att on' : 'att'} title={doc.style ? L(`Стиль документа: ${doc.style}`, `Document style: ${doc.style}`) : L('Стиль документа', 'Document style')} onClick={() => setDialog('style')}>
                         <IconPalette size={15} stroke={STROKE} aria-hidden="true" />
-                        Стиль
+                        {L('Стиль', 'Style')}
                       </button>
                     </>
                   )}
@@ -1845,20 +1841,16 @@ export function App() {
               </div>
               <div class="compose-toggles">
                 <Toggle
-                  label="Директор"
+                  label={L('Директор', 'Director')}
                   checked={stepwise}
                   disabled={!canDirect}
-                  title={canDirect ? 'ChatGPT сначала расписывает задачу, правка идёт шагами с критиком' : 'Директор работает через Codex, а он не найден'}
+                  title={canDirect ? L('ChatGPT сначала расписывает задачу, правка идёт шагами с критиком', 'ChatGPT writes out the task first; the edit goes in steps with a critic') : L('Директор работает через Codex, а он не найден', 'The director works through Codex, which was not found')}
                   onChange={setOptDirector}
                 />
-                <Toggle label="Маска по объекту" checked={autoMask} title="Каждой новой версии модель сразу рисует маску по объекту — ещё генерация" onChange={setAutoMask} />
-                <Toggle label="С нуля" checked={optHide} title="Скрыть от модели, что под маской: она нарисует область заново" onChange={setOptHide} />
+                <Toggle label={L('Маска по объекту', 'Object mask')} checked={autoMask} title={L('Каждой новой версии модель сразу рисует маску по объекту — ещё генерация', 'The model draws an object mask for every new version right away — one more generation each')} onChange={setAutoMask} />
+                <Toggle label={L('С нуля', 'From scratch')} checked={optHide} title={L('Скрыть от модели, что под маской: она нарисует область заново', 'Hide what is under the mask from the model: it will draw the area anew')} onChange={setOptHide} />
                 <Help>
-                  Выделите предмет «Палочкой» (W), область — прямоугольником (R), лассо (L) или кистью (B); набросок (S) подскажет модели,
-                  где и каким должно быть то, что в задаче. Модель видит кусок в пунктирной рамке, меняет — только выделенное. В слое
-                  правка ложится его версией, на фоне — новым слоем. Директор: ChatGPT смотрит на кусок и расписывает задачу, правка идёт
-                  шагами — после каждого критик говорит, что исправить. «С нуля»: модель получит область залитой серым и нарисует её
-                  заново, не держась за то, что там было. ⌘↵ — сгенерировать.
+                  {L('Выделите предмет «Палочкой» (W), область — прямоугольником (R), лассо (L) или кистью (B); набросок (S) подскажет модели, где и каким должно быть то, что в задаче. Модель видит кусок в пунктирной рамке, меняет — только выделенное. В слое правка ложится его версией, на фоне — новым слоем. Директор: ChatGPT смотрит на кусок и расписывает задачу, правка идёт шагами — после каждого критик говорит, что исправить. «С нуля»: модель получит область залитой серым и нарисует её заново, не держась за то, что там было. ⌘↵ — сгенерировать.', 'Select an object with the Wand (W), an area with the rectangle (R), lasso (L) or brush (B); a sketch (S) tells the model where and how the thing in the task should look. The model sees the crop in the dashed frame and changes only the selection. In a layer, the edit becomes its version; on the background, a new layer. Director: ChatGPT looks at the crop and writes out the task, and the edit goes in steps — after each one a critic says what to fix. “From scratch”: the model gets the area filled with gray and draws it anew, without holding on to what was there. ⌘↵ — generate.')}
                 </Help>
               </div>
               <div class="compose-settings">
@@ -1872,20 +1864,20 @@ export function App() {
                   onModel={setModel}
                   onSize={setSize}
                 />
-                <span class="stepper" title={stepwise ? 'Шаги с критиком — по очереди, пока он не скажет «готово»' : 'Варианты — разом'}>
-                  <button aria-label="Меньше" disabled={count <= COUNTS[0]!} onClick={() => (stepwise ? setSteps : setVariants)(Math.max(COUNTS[0]!, count - 1))}>
+                <span class="stepper" title={stepwise ? L('Шаги с критиком — по очереди, пока он не скажет «готово»', 'Steps with a critic — one at a time, until it says “done”') : L('Варианты — разом', 'Variants — all at once')}>
+                  <button aria-label={L('Меньше', 'Fewer')} disabled={count <= COUNTS[0]!} onClick={() => (stepwise ? setSteps : setVariants)(Math.max(COUNTS[0]!, count - 1))}>
                     <IconMinus size={14} stroke={2} />
                   </button>
                   <span>{countText(stepwise, count)}</span>
-                  <button aria-label="Больше" disabled={count >= COUNTS.at(-1)!} onClick={() => (stepwise ? setSteps : setVariants)(Math.min(COUNTS.at(-1)!, count + 1))}>
+                  <button aria-label={L('Больше', 'More')} disabled={count >= COUNTS.at(-1)!} onClick={() => (stepwise ? setSteps : setVariants)(Math.min(COUNTS.at(-1)!, count + 1))}>
                     <IconPlus size={14} stroke={2} />
                   </button>
                 </span>
               </div>
-              <button class="go" disabled={!canGenerate} title={canGenerate ? `${countText(stepwise, count)}${autoMask ? ' и маски по объекту' : ''}` : undefined} onClick={() => void generate()}>
+              <button class="go" disabled={!canGenerate} title={canGenerate ? L(`${countText(stepwise, count)}${autoMask ? ' и маски по объекту' : ''}`, `${countText(stepwise, count)}${autoMask ? ' and object masks' : ''}`) : undefined} onClick={() => void generate()}>
                 <span class="go-text">
-                  <b>{redoPatch ? 'Поправить' : 'Сгенерировать'}</b>
-                  <small>{blocked || (prompt.trim() ? `${target} · ${cost} ${plural(cost, 'генерация', 'генерации', 'генераций')}` : target)}</small>
+                  <b>{redoPatch ? L('Поправить', 'Revise') : L('Сгенерировать', 'Generate')}</b>
+                  <small>{blocked || (prompt.trim() ? `${target} · ${cost} ${plural(cost, ['генерация', 'генерации', 'генераций'], ['generation', 'generations'])}` : target)}</small>
                 </span>
                 <kbd>⌘↵</kbd>
               </button>
@@ -1910,13 +1902,13 @@ export function App() {
       {dialog === 'new' && (
         <div class="modal-backdrop" onClick={() => setDialog(null)}>
           <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="new-title" onClick={(e) => e.stopPropagation()}>
-            <h2 id="new-title">Новый холст</h2>
+            <h2 id="new-title">{L('Новый холст', 'New canvas')}</h2>
             <NewCanvasForm
               onError={fail}
               onCreated={() => setDialog(null)}
               extra={
                 <button type="button" onClick={() => setDialog(null)}>
-                  Отмена
+                  {L('Отмена', 'Cancel')}
                 </button>
               }
             />
@@ -2015,16 +2007,15 @@ function OptCheck(props: { label: string; title: string; checked: boolean; onCha
 function SegmentBanner(props: { segment: StateDto['segment']; onError: (err: unknown) => void }) {
   const { segment } = props;
   const install = () => post('/api/segment/install').catch(props.onError);
-  if (segment.status === 'downloading') return <div class="stage-banner">Скачиваю модель… {Math.round((segment.progress ?? 0) * 100)}%</div>;
-  if (segment.status === 'loading') return <div class="stage-banner">Загружаю модель…</div>;
+  if (segment.status === 'downloading') return <div class="stage-banner">{L('Скачиваю модель…', 'Downloading model…')} {Math.round((segment.progress ?? 0) * 100)}%</div>;
+  if (segment.status === 'loading') return <div class="stage-banner">{L('Загружаю модель…', 'Loading model…')}</div>;
   return (
     <div class={segment.status === 'error' ? 'stage-banner error' : 'stage-banner'}>
-      {segment.status === 'error' ? short(segment.error ?? 'Ошибка', 80) : 'Нужна модель выделения, 272 МБ'}
+      {segment.status === 'error' ? short(segment.error ?? L('Ошибка', 'Error'), 80) : L('Нужна модель выделения, 272 МБ', 'Object selection model needed, 272 MB')}
       <Help>
-        Объекты выделяет SAM 2.1 от Meta — прямо на компьютере, без интернета и без генераций. Модель скачивается один раз в папку
-        данных приложения.
+        {L('Объекты выделяет SAM 2.1 от Meta — прямо на компьютере, без интернета и без генераций. Модель скачивается один раз в папку данных приложения.', 'Objects are selected by SAM 2.1 from Meta — right on your computer, offline and without generations. The model is downloaded once into the app data folder.')}
       </Help>
-      <button onClick={install}>{segment.status === 'error' ? 'Повторить' : 'Скачать'}</button>
+      <button onClick={install}>{segment.status === 'error' ? L('Повторить', 'Retry') : L('Скачать', 'Download')}</button>
     </div>
   );
 }
@@ -2339,7 +2330,7 @@ function LayersPanel(props: {
           <div
             class="layer-row"
             style={{ paddingLeft: `${gutter + depth * 18}px` }}
-            title={o.lost ? 'После правки слой не нашёлся: маска прежняя' : 'Работать в слое; Shift — к выделению; двойной щелчок — переименовать; перетащить — порядок'}
+            title={o.lost ? L('После правки слой не нашёлся: маска прежняя', 'The layer was not found after the edit: the mask is unchanged') : L('Работать в слое; Shift — к выделению; двойной щелчок — переименовать; перетащить — порядок', 'Work in the layer; Shift — add to selection; double-click — rename; drag — reorder')}
             onPointerDown={node && editing !== o.id ? (e) => startDrag(e, o.id) : undefined}
             onClick={(e) => {
               if (dragged.current || e.detail > 1) return;
@@ -2355,8 +2346,8 @@ function LayersPanel(props: {
               {shown && (
                 <button
                   class="thumb mask"
-                  title={o.visible ? 'Маска: править кистью' : 'Слой скрыт'}
-                  aria-label="Маска слоя"
+                  title={o.visible ? L('Маска: править кистью', 'Mask: edit with the brush') : L('Слой скрыт', 'Layer is hidden')}
+                  aria-label={L('Маска слоя', 'Layer mask')}
                   aria-pressed={masking}
                   disabled={!o.visible}
                   onClick={(e) => {
@@ -2369,27 +2360,27 @@ function LayersPanel(props: {
               )}
             </span>
             {nameOrField(o.id, o.name, (name) => props.onRename(o, name))}
-            {busy && <IconLoader2 size={15} stroke={STROKE} class="spin layer-badge" aria-label="Идёт генерация" />}
-            {failed && !busy && <IconAlertTriangle size={15} stroke={STROKE} class="layer-badge error" aria-label="Генерация с ошибкой" />}
-            {o.freed && <IconPhoto size={14} stroke={STROKE} class="layer-badge" aria-label="Под ним уже нет его самого: вырезан или дорисован фон" />}
+            {busy && <IconLoader2 size={15} stroke={STROKE} class="spin layer-badge" aria-label={L('Идёт генерация', 'Generating')} />}
+            {failed && !busy && <IconAlertTriangle size={15} stroke={STROKE} class="layer-badge error" aria-label={L('Генерация с ошибкой', 'Generation failed')} />}
+            {o.freed && <IconPhoto size={14} stroke={STROKE} class="layer-badge" aria-label={L('Под ним уже нет его самого: вырезан или дорисован фон', 'It is no longer under itself: cut out, or the background is filled')} />}
             <MenuButton
               class="layer-icon layer-more"
-              title="Действия со слоем"
+              title={L('Действия со слоем', 'Layer actions')}
               label={<IconDots size={16} stroke={STROKE} />}
               items={[
-                { icon: IconPencil, label: 'Переименовать', hint: 'двойной щелчок', run: () => (props.onEnter(o), setEditing(o.id)) },
+                { icon: IconPencil, label: L('Переименовать', 'Rename'), hint: L('двойной щелчок', 'double-click'), run: () => (props.onEnter(o), setEditing(o.id)) },
                 ...(o.kind !== 'fill'
-                  ? [{ icon: IconBucketDroplet, label: 'Дорисовать фон под ним', hint: 'генерация', disabled: filling, title: 'В слоях, где под ним дыра, — их версиями; где только фон — новым слоем внизу', run: () => props.onFill(o) }]
+                  ? [{ icon: IconBucketDroplet, label: L('Дорисовать фон под ним', 'Fill background under it'), hint: L('генерация', 'generation'), disabled: filling, title: L('В слоях, где под ним дыра, — их версиями; где только фон — новым слоем внизу', 'In layers with a hole under it — as their versions; where there is only background — as a new layer at the bottom'), run: () => props.onFill(o) }]
                   : []),
-                { icon: IconArrowBarToDown, label: 'Влить в фон', disabled: !o.visible, title: 'То, что от него видно, — в исходник', run: () => props.onMergeDown(o) },
+                { icon: IconArrowBarToDown, label: L('Влить в фон', 'Merge into background'), disabled: !o.visible, title: L('То, что от него видно, — в исходник', 'What is visible of it goes into the original'), run: () => props.onMergeDown(o) },
                 'sep',
-                { icon: IconTrash, label: o.freed ? 'Убрать с холста' : 'Удалить слой', hint: '⌘Z вернёт', danger: true, run: () => props.onDelete(o) },
+                { icon: IconTrash, label: o.freed ? L('Убрать с холста', 'Remove from canvas') : L('Удалить слой', 'Delete layer'), hint: L('⌘Z вернёт', '⌘Z brings it back'), danger: true, run: () => props.onDelete(o) },
               ]}
             />
             <button
               class="layer-icon"
-              title={o.hidden ? 'Показать слой' : 'Скрыть слой'}
-              aria-label="Показывать слой"
+              title={o.hidden ? L('Показать слой', 'Show layer') : L('Скрыть слой', 'Hide layer')}
+              aria-label={L('Показывать слой', 'Show layer')}
               aria-pressed={!o.hidden}
               onClick={(e) => {
                 e.stopPropagation();
@@ -2402,14 +2393,14 @@ function LayersPanel(props: {
           </div>
           {asking === o.id && (
             <div class="layer-ask">
-              Под слоем то же самое: фона нет
+              {L('Под слоем то же самое: фона нет', 'Same thing under the layer: no background')}
               <button
                 onClick={() => {
                   setAsking(null);
                   props.onFill(o);
                 }}
               >
-                Дорисовать фон
+                {L('Дорисовать фон', 'Fill background')}
               </button>
               <button
                 onClick={() => {
@@ -2417,7 +2408,7 @@ function LayersPanel(props: {
                   props.onHidden(o, true);
                 }}
               >
-                Скрыть
+                {L('Скрыть', 'Hide')}
               </button>
             </div>
           )}
@@ -2444,7 +2435,7 @@ function LayersPanel(props: {
           <div
             class="layer-row"
             style={{ paddingLeft: `${depth * 18}px` }}
-            title="Группа: её слои в выделение, новый слой ляжет в неё; двойной щелчок — переименовать; перетащить — порядок"
+            title={L('Группа: её слои в выделение, новый слой ляжет в неё; двойной щелчок — переименовать; перетащить — порядок', 'Group: its layers go into the selection, a new layer goes into it; double-click — rename; drag — reorder')}
             onPointerDown={editing !== g.id ? (e) => startDrag(e, g.id) : undefined}
             onClick={(e) => {
               if (dragged.current || e.detail > 1) return;
@@ -2454,8 +2445,8 @@ function LayersPanel(props: {
           >
             <button
               class="layer-fold"
-              title={open ? 'Свернуть' : 'Развернуть'}
-              aria-label={open ? 'Свернуть группу' : 'Развернуть группу'}
+              title={open ? L('Свернуть', 'Collapse') : L('Развернуть', 'Expand')}
+              aria-label={open ? L('Свернуть группу', 'Collapse group') : L('Развернуть группу', 'Expand group')}
               aria-expanded={open}
               onClick={(e) => {
                 e.stopPropagation();
@@ -2471,19 +2462,19 @@ function LayersPanel(props: {
             {!open && <span class="layer-count">{size}</span>}
             <MenuButton
               class="layer-icon layer-more"
-              title="Действия с группой"
+              title={L('Действия с группой', 'Group actions')}
               label={<IconDots size={16} stroke={STROKE} />}
               items={[
-                { icon: IconPencil, label: 'Переименовать', hint: 'двойной щелчок', run: () => setEditing(g.id) },
-                { icon: IconStackPop, label: 'Разгруппировать', hint: '⇧⌘G', title: 'Слои из неё — на её место', run: () => props.onUngroup(g) },
+                { icon: IconPencil, label: L('Переименовать', 'Rename'), hint: L('двойной щелчок', 'double-click'), run: () => setEditing(g.id) },
+                { icon: IconStackPop, label: L('Разгруппировать', 'Ungroup'), hint: '⇧⌘G', title: L('Слои из неё — на её место', 'Its layers take its place'), run: () => props.onUngroup(g) },
                 'sep',
-                { icon: IconTrash, label: 'Удалить со слоями', hint: '⌘Z вернёт', danger: true, run: () => props.onDeleteGroup(g) },
+                { icon: IconTrash, label: L('Удалить со слоями', 'Delete with layers'), hint: L('⌘Z вернёт', '⌘Z brings it back'), danger: true, run: () => props.onDeleteGroup(g) },
               ]}
             />
             <button
               class="layer-icon"
-              title={g.hidden ? 'Показать группу' : 'Скрыть группу'}
-              aria-label="Показывать группу"
+              title={g.hidden ? L('Показать группу', 'Show group') : L('Скрыть группу', 'Hide group')}
+              aria-label={L('Показывать группу', 'Show group')}
               aria-pressed={!g.hidden}
               onClick={(e) => {
                 e.stopPropagation();
@@ -2504,29 +2495,23 @@ function LayersPanel(props: {
   return (
     <section class="panel layers-panel">
       <h2 class="panel-head">
-        Слои
+        {L('Слои', 'Layers')}
         <Help>
-          Слой — кусок картинки со своими пикселями поверх остального. Щелчок по слою здесь или палочкой на холсте — работа в нём:
-          палочка ищет только в нём, генерация ложится его версией; его версии — в ленте под холстом. Щелчок по маске рядом — кисть
-          правит её, щелчок по слою — снова его пиксели. Фон внизу — работа вне слоёв:
-          генерация ляжет новым слоем. ⌘J — копия выделенного новым слоем, ⌘⇧J — вырезать. Shift-щелчок — несколько слоёв: ⌘G их
-          группирует, ⌘E объединяет. Группа: щелчок — её слои в выделение, новый слой ляжет в неё; стрелка сворачивает, глаз скрывает
-          всё, что в ней, ⇧⌘G разгруппировывает. Перетащите слой или группу выше, ниже или в группу. «\» — исходник всей картинки,
-          пока держите.
+          {L('Слой — кусок картинки со своими пикселями поверх остального. Щелчок по слою здесь или палочкой на холсте — работа в нём: палочка ищет только в нём, генерация ложится его версией; его версии — в ленте под холстом. Щелчок по маске рядом — кисть правит её, щелчок по слою — снова его пиксели. Фон внизу — работа вне слоёв: генерация ляжет новым слоем. ⌘J — копия выделенного новым слоем, ⌘⇧J — вырезать. Shift-щелчок — несколько слоёв: ⌘G их группирует, ⌘E объединяет. Группа: щелчок — её слои в выделение, новый слой ляжет в неё; стрелка сворачивает, глаз скрывает всё, что в ней, ⇧⌘G разгруппировывает. Перетащите слой или группу выше, ниже или в группу. «\\» — исходник всей картинки, пока держите.', 'A layer is a piece of the picture with its own pixels on top of the rest. Click a layer here, or click it with the wand on the canvas, to work in it: the wand searches only inside it, and a generation becomes its version; its versions are in the strip under the canvas. Click the mask next to it to edit the mask with the brush; click the layer to get back to its pixels. Background at the bottom — work outside layers: a generation becomes a new layer. ⌘J copies the selection to a new layer, ⌘⇧J cuts it. Shift-click selects several layers: ⌘G groups them, ⌘E merges them. Group: a click puts its layers into the selection, and a new layer goes into it; the arrow collapses it, the eye hides everything in it, ⇧⌘G ungroups. Drag a layer or a group above, below or into a group. “\\” shows the original of the whole picture while held.')}
         </Help>
         <span class="grow" />
-        <button class="ghost small head-button" title="Сгруппировать выбранное (⌘G)" onClick={props.onGroup}>
+        <button class="ghost small head-button" title={L('Сгруппировать выбранное (⌘G)', 'Group selected (⌘G)')} onClick={props.onGroup}>
           <IconFolderPlus size={15} stroke={STROKE} aria-hidden="true" />
-          Группа
+          {L('Группа', 'Group')}
         </button>
         <MenuButton
           class="ghost icon head-more"
-          title="Ещё"
+          title={L('Ещё', 'More')}
           label={<IconDots size={16} stroke={STROKE} />}
           items={[
-            { icon: IconLayersUnion, label: 'Объединить выбранные', hint: '⌘E', run: props.onMerge },
+            { icon: IconLayersUnion, label: L('Объединить выбранные', 'Merge selected'), hint: '⌘E', run: props.onMerge },
             'sep',
-            { icon: IconArrowBarToDown, label: 'Свести все слои', title: 'Всё видимое — в исходник, слои уходят; ⌘Z вернёт', run: props.onFlatten },
+            { icon: IconArrowBarToDown, label: L('Свести все слои', 'Flatten All Layers'), title: L('Всё видимое — в исходник, слои уходят; ⌘Z вернёт', 'Everything visible goes into the original, layers go away; ⌘Z brings them back'), run: props.onFlatten },
           ]}
         />
       </h2>
@@ -2535,14 +2520,14 @@ function LayersPanel(props: {
           const error = j.status === 'error';
           return (
             <li class={['layer', 'pending', error ? 'error' : '', props.activeJob === j.id ? 'active' : ''].filter(Boolean).join(' ')} key={j.id}>
-              <div class="layer-row" style={{ paddingLeft: `${gutter}px` }} title={error ? j.error : 'Генерация нового слоя'} onClick={() => props.onSelectJob(j)}>
+              <div class="layer-row" style={{ paddingLeft: `${gutter}px` }} title={error ? j.error : L('Генерация нового слоя', 'Generating a new layer')} onClick={() => props.onSelectJob(j)}>
                 <Thumb icon={error ? IconAlertTriangle : IconLoader2} spin={!error} />
-                <span class="layer-name">{j.fillFor ? `Фон под «${props.objects.find((o) => o.id === j.fillFor)?.name ?? '…'}»` : j.prompt}</span>
-                <span class="layer-count">{error ? 'ошибка' : clock(Date.now() - Date.parse(j.createdAt))}</span>
+                <span class="layer-name">{j.fillFor ? L(`Фон под «${props.objects.find((o) => o.id === j.fillFor)?.name ?? '…'}»`, `Background under “${props.objects.find((o) => o.id === j.fillFor)?.name ?? '…'}”`) : j.prompt}</span>
+                <span class="layer-count">{error ? L('ошибка', 'error') : clock(Date.now() - Date.parse(j.createdAt))}</span>
                 <button
                   class="layer-icon"
-                  title={error ? 'Убрать' : 'Отменить генерацию'}
-                  aria-label={error ? 'Убрать' : 'Отменить генерацию'}
+                  title={error ? L('Убрать', 'Dismiss') : L('Отменить генерацию', 'Cancel generation')}
+                  aria-label={error ? L('Убрать', 'Dismiss') : L('Отменить генерацию', 'Cancel generation')}
                   onClick={(e) => {
                     e.stopPropagation();
                     props.onJob(j, 'discard');
@@ -2561,9 +2546,9 @@ function LayersPanel(props: {
             .filter(Boolean)
             .join(' ')}
         >
-          <div class="layer-row" style={{ paddingLeft: `${gutter}px` }} title="Работать на фоне: правка — новым слоем" onClick={props.onBackground}>
+          <div class="layer-row" style={{ paddingLeft: `${gutter}px` }} title={L('Работать на фоне: правка — новым слоем', 'Work on the background: an edit becomes a new layer')} onClick={props.onBackground}>
             <Thumb src={`/api/doc/base/${props.doc.levels - 1}/0/0.jpg?doc=${props.doc.id}&base=${props.doc.baseState}`} />
-            <span class="layer-name">Фон</span>
+            <span class="layer-name">{L('Фон', 'Background')}</span>
           </div>
         </li>
       </ol>
@@ -2630,11 +2615,11 @@ function VersionsBand(props: {
       {controls && i === 0 && (
         <span class="vt-ctl">
           {j.chain && (
-            <button title="Остановить: готовые шаги останутся версиями" aria-label="Остановить" onClick={() => props.onJob(j, 'stop')}>
+            <button title={L('Остановить: готовые шаги останутся версиями', 'Stop: finished steps stay as versions')} aria-label={L('Остановить', 'Stop')} onClick={() => props.onJob(j, 'stop')}>
               <IconPlayerStop size={13} stroke={2} />
             </button>
           )}
-          <button title="Отменить: готовое останется версиями" aria-label="Отменить" onClick={() => props.onJob(j, 'discard')}>
+          <button title={L('Отменить: готовое останется версиями', 'Cancel: finished ones stay as versions')} aria-label={L('Отменить', 'Cancel')} onClick={() => props.onJob(j, 'discard')}>
             <IconX size={13} stroke={2} />
           </button>
         </span>
@@ -2651,50 +2636,50 @@ function VersionsBand(props: {
     head = (
       <>
         <strong>
-          {n} {plural(n, 'слой', 'слоя', 'слоёв')}
+          {n} {plural(n, ['слой', 'слоя', 'слоёв'], ['layer', 'layers'])}
         </strong>
         <span class="band-meta">{props.picked.map((x) => x.name).join(', ')}</span>
         <span class="grow" />
-        <button class="bbtn" title="В новую группу (⌘G)" onClick={props.onGroup}>
+        <button class="bbtn" title={L('В новую группу (⌘G)', 'Into a new group (⌘G)')} onClick={props.onGroup}>
           <IconFolderPlus size={15} stroke={STROKE} aria-hidden="true" />
-          Сгруппировать
+          {L('Сгруппировать', 'Group')}
         </button>
-        <button class="bbtn" title="Одним слоем из того, что сейчас видно; версии уйдут (⌘E)" onClick={props.onMerge}>
+        <button class="bbtn" title={L('Одним слоем из того, что сейчас видно; версии уйдут (⌘E)', 'One layer from what is visible now; versions go away (⌘E)')} onClick={props.onMerge}>
           <IconLayersUnion size={15} stroke={STROKE} aria-hidden="true" />
-          Объединить
+          {L('Объединить', 'Merge')}
         </button>
       </>
     );
   } else if (props.job) {
     const j = props.job;
     const error = j.status === 'error';
-    const name = j.fillFor ? `Фон под «${props.objects.find((x) => x.id === j.fillFor)?.name ?? '…'}»` : j.prompt;
+    const name = j.fillFor ? L(`Фон под «${props.objects.find((x) => x.id === j.fillFor)?.name ?? '…'}»`, `Background under “${props.objects.find((x) => x.id === j.fillFor)?.name ?? '…'}”`) : j.prompt;
     head = (
       <>
         <strong>{short(name, 48)}</strong>
-        <span class="band-meta">новый слой · {error ? 'ошибка' : `${jobStatus(j)}, ${since(j)}`}</span>
+        <span class="band-meta">{L('новый слой ·', 'new layer ·')} {error ? L('ошибка', 'error') : `${jobStatus(j)}, ${since(j)}`}</span>
         <span class="grow" />
         {error ? (
           <>
             <button class="bbtn" onClick={() => props.onJob(j, j.inside ? 'more' : 'retry')}>
               <IconRefresh size={15} stroke={STROKE} aria-hidden="true" />
-              Повторить
+              {L('Повторить', 'Retry')}
             </button>
-            <button class="bicon" title="Убрать" aria-label="Убрать" onClick={() => props.onJob(j, 'discard')}>
+            <button class="bicon" title={L('Убрать', 'Dismiss')} aria-label={L('Убрать', 'Dismiss')} onClick={() => props.onJob(j, 'discard')}>
               <IconTrash size={16} stroke={STROKE} />
             </button>
           </>
         ) : (
           <>
             {j.chain && (
-              <button class="bbtn" title="Готовые шаги останутся версиями" onClick={() => props.onJob(j, 'stop')}>
+              <button class="bbtn" title={L('Готовые шаги останутся версиями', 'Finished steps stay as versions')} onClick={() => props.onJob(j, 'stop')}>
                 <IconPlayerStop size={15} stroke={STROKE} aria-hidden="true" />
-                Остановить
+                {L('Остановить', 'Stop')}
               </button>
             )}
-            <button class="bbtn" title="Готовые варианты останутся версиями" onClick={() => props.onJob(j, 'discard')}>
+            <button class="bbtn" title={L('Готовые варианты останутся версиями', 'Finished variants stay as versions')} onClick={() => props.onJob(j, 'discard')}>
               <IconX size={15} stroke={STROKE} aria-hidden="true" />
-              Отменить
+              {L('Отменить', 'Cancel')}
             </button>
           </>
         )}
@@ -2704,7 +2689,7 @@ function VersionsBand(props: {
       <span class="vt err on">
         <span class="vt-cover">
           <IconAlertTriangle size={18} stroke={STROKE} aria-hidden="true" />
-          <span>ошибка</span>
+          <span>{L('ошибка', 'error')}</span>
         </span>
       </span>
     ) : (
@@ -2728,15 +2713,15 @@ function VersionsBand(props: {
       <>
         <strong>{g.name}</strong>
         <span class="band-meta">
-          группа · {n} {plural(n, 'слой', 'слоя', 'слоёв')}
-          {g.hidden ? ' · скрыта' : ''}
+          {L('группа ·', 'group ·')} {n} {plural(n, ['слой', 'слоя', 'слоёв'], ['layer', 'layers'])}
+          {g.hidden ? L(' · скрыта', ' · hidden') : ''}
         </span>
         <span class="grow" />
-        <button class="bbtn" title="Слои из неё — на её место (⇧⌘G)" onClick={() => props.onUngroup(g)}>
+        <button class="bbtn" title={L('Слои из неё — на её место (⇧⌘G)', 'Its layers take its place (⇧⌘G)')} onClick={() => props.onUngroup(g)}>
           <IconStackPop size={15} stroke={STROKE} aria-hidden="true" />
-          Разгруппировать
+          {L('Разгруппировать', 'Ungroup')}
         </button>
-        <button class="bicon" title="Удалить группу со слоями; ⌘Z вернёт" aria-label="Удалить группу со слоями" onClick={() => props.onDeleteGroup(g)}>
+        <button class="bicon" title={L('Удалить группу со слоями; ⌘Z вернёт', 'Delete the group with its layers; ⌘Z brings it back')} aria-label={L('Удалить группу со слоями', 'Delete the group with its layers')} onClick={() => props.onDeleteGroup(g)}>
           <IconTrash size={16} stroke={STROKE} />
         </button>
       </>
@@ -2758,9 +2743,9 @@ function VersionsBand(props: {
     const off = !o.visible;
     const n = current ? o.versions.indexOf(current.id) + 1 : 0;
     const meta = [
-      current ? `версия ${n} из ${o.versions.length}` : 'исходник',
+      current ? L(`версия ${n} из ${o.versions.length}`, `version ${n} of ${o.versions.length}`) : L('исходник', 'original'),
       current?.model && modelInfo(current.model).label,
-      off && (o.hidden ? 'скрыт' : 'группа скрыта'),
+      off && (o.hidden ? L('скрыт', 'hidden') : L('группа скрыта', 'group is hidden')),
     ].filter(Boolean);
     const vtile = (owner: ObjectDto, key: string, p: PatchDto | undefined, label: string, patch: string | null, title: string) => {
       const on = (owner.current ?? null) === patch;
@@ -2784,14 +2769,14 @@ function VersionsBand(props: {
           )}
           <span class="vt-n">{label}</span>
           {p && weak.has(p.id) && (
-            <span class="vt-weak" title="Модель почти ничего не изменила">
-              мало
+            <span class="vt-weak" title={L('Модель почти ничего не изменила', 'The model barely changed anything')}>
+              {L('мало', 'low')}
             </span>
           )}
           {p && masking.has(p.id) && (
-            <span class="vt-cover dim" title="Модель рисует маску по объекту">
+            <span class="vt-cover dim" title={L('Модель рисует маску по объекту', 'The model is drawing an object mask')}>
               <IconLoader2 size={18} stroke={STROKE} class="spin" aria-hidden="true" />
-              <span>маска</span>
+              <span>{L('маска', 'mask')}</span>
             </span>
           )}
         </button>
@@ -2804,47 +2789,47 @@ function VersionsBand(props: {
         <span class="grow" />
         {err ? (
           <>
-            <button class="bbtn" disabled={off} title={off ? 'Слой скрыт' : undefined} onClick={() => props.onJob(err, err.inside ? 'more' : 'retry')}>
+            <button class="bbtn" disabled={off} title={off ? L('Слой скрыт', 'Layer is hidden') : undefined} onClick={() => props.onJob(err, err.inside ? 'more' : 'retry')}>
               <IconRefresh size={15} stroke={STROKE} aria-hidden="true" />
-              Повторить
+              {L('Повторить', 'Retry')}
             </button>
-            <button class="bicon" title="Убрать" aria-label="Убрать" onClick={() => props.onJob(err, 'discard')}>
+            <button class="bicon" title={L('Убрать', 'Dismiss')} aria-label={L('Убрать', 'Dismiss')} onClick={() => props.onJob(err, 'discard')}>
               <IconTrash size={16} stroke={STROKE} />
             </button>
           </>
         ) : (
           <>
-            <button class={props.focused ? 'bicon on' : 'bicon'} title={props.focused ? 'Вся картинка (F)' : 'К куску (F)'} aria-label="К куску" onClick={props.onFocus}>
+            <button class={props.focused ? 'bicon on' : 'bicon'} title={props.focused ? L('Вся картинка (F)', 'Whole picture (F)') : L('К куску (F)', 'Zoom to crop (F)')} aria-label={L('К куску', 'Zoom to crop')} onClick={props.onFocus}>
               {props.focused ? <IconZoomOut size={16} stroke={STROKE} /> : <IconZoomIn size={16} stroke={STROKE} />}
             </button>
             {shown && (
               <MenuButton
                 class={props.maskLayer === o.id ? 'bbtn on' : 'bbtn'}
-                title={off ? 'Слой скрыт' : 'Маска того, что видно'}
+                title={off ? L('Слой скрыт', 'Layer is hidden') : L('Маска того, что видно', 'Mask of what is visible')}
                 disabled={off}
                 label={
                   <>
                     <IconMask size={15} stroke={STROKE} aria-hidden="true" />
-                    Маска
+                    {L('Маска', 'Mask')}
                     <IconChevronDown size={14} stroke={2} aria-hidden="true" />
                   </>
                 }
                 items={[
-                  { icon: IconSparkles, label: 'По объекту', hint: 'генерация', disabled: masking.has(shown.id), title: 'Маску рисует модель из правки', run: () => props.onObjectMask(shown) },
+                  { icon: IconSparkles, label: L('По объекту', 'By object'), hint: L('генерация', 'generation'), disabled: masking.has(shown.id), title: L('Маску рисует модель из правки', 'The mask is drawn by the model from the edit panel'), run: () => props.onObjectMask(shown) },
                   ...(current
-                    ? [{ icon: IconArrowsMaximize, label: 'По правке', hint: 'без генерации', title: 'Добавить к маске то, что модель нарисовала за её краем', run: () => props.onExpand(current) }]
+                    ? [{ icon: IconArrowsMaximize, label: L('По правке', 'By edit'), hint: L('без генерации', 'no generation'), title: L('Добавить к маске то, что модель нарисовала за её краем', 'Add to the mask what the model drew beyond its edge'), run: () => props.onExpand(current) }]
                     : []),
                 ]}
               />
             )}
             {current && (
-              <button class="bbtn" disabled={off} title={off ? 'Слой скрыт' : 'Задача этой версии — в поле правки'} onClick={() => props.onRedo(current)}>
+              <button class="bbtn" disabled={off} title={off ? L('Слой скрыт', 'Layer is hidden') : L('Задача этой версии — в поле правки', 'Put this version’s task into the edit field')} onClick={() => props.onRedo(current)}>
                 <IconPencil size={15} stroke={STROKE} aria-hidden="true" />
-                Поправить задачу
+                {L('Поправить задачу', 'Revise task')}
               </button>
             )}
             {current && (
-              <button class="bicon" title="Удалить версию; ⌘Z вернёт" aria-label="Удалить версию" onClick={() => props.onDeleteVersion(current)}>
+              <button class="bicon" title={L('Удалить версию; ⌘Z вернёт', 'Delete version; ⌘Z brings it back')} aria-label={L('Удалить версию', 'Delete version')} onClick={() => props.onDeleteVersion(current)}>
                 <IconTrash size={16} stroke={STROKE} />
               </button>
             )}
@@ -2856,7 +2841,7 @@ function VersionsBand(props: {
     const moreCount = current?.directed !== undefined ? props.steps : props.variants;
     tiles = (
       <>
-        {vtile(o, 'src', source, 'исх', null, source ? 'Исходник слоя: копия того, что было видно' : 'Исходник: то, что под слоем')}
+        {vtile(o, 'src', source, L('исх', 'orig'), null, source ? L('Исходник слоя: копия того, что было видно', 'Layer original: a copy of what was visible') : L('Исходник: то, что под слоем', 'Original: what is under the layer'))}
         {o.versions.map((id, i) => {
           const p = patches.get(id);
           return vtile(o, id, p, String(i + 1), id, p?.prompt ?? '');
@@ -2866,40 +2851,40 @@ function VersionsBand(props: {
           <button key={j.id} class={j === err ? 'vt err on' : 'vt err'} title={j.error} onClick={() => props.onError(j === err ? null : j.id)}>
             <span class="vt-cover">
               <IconAlertTriangle size={18} stroke={STROKE} aria-hidden="true" />
-              <span>ошибка</span>
+              <span>{L('ошибка', 'error')}</span>
             </span>
           </button>
         ))}
         {more && (
           <button
             class="vt add"
-            title={`Ещё ${countText(current.directed !== undefined, moreCount)} с задачей версии ${n}`}
-            aria-label="Ещё варианты"
+            title={L(`Ещё ${countText(current.directed !== undefined, moreCount)} с задачей версии ${n}`, `Another ${countText(current.directed !== undefined, moreCount)} with the task of version ${n}`)}
+            aria-label={L('Ещё варианты', 'More variants')}
             onClick={() => props.onMore(current)}
           >
             <IconPlus size={18} stroke={STROKE} aria-hidden="true" />
-            <span>Ещё</span>
+            <span>{L('Ещё', 'More')}</span>
           </button>
         )}
         {/* Заплатка фона из проектов, где фон дорисовывали под слоем отдельно */}
         {fill && (
           <>
-            <span class="vt-sep">фон</span>
-            {fill.versions.map((id, i) => vtile(fill, id, patches.get(id), String(i + 1), id, 'Вариант фона под слоем'))}
+            <span class="vt-sep">{L('фон', 'background')}</span>
+            {fill.versions.map((id, i) => vtile(fill, id, patches.get(id), String(i + 1), id, L('Вариант фона под слоем', 'Background variant under the layer')))}
           </>
         )}
       </>
     );
     const fillLines = fillJobs.map((j) => (
       <p class="band-line" key={j.id}>
-        {j.status === 'error' ? <span class="err">Фон под ним: {j.error}</span> : <span>Фон под ним: {`${jobStatus(j)}, ${since(j)}`}</span>}
+        {j.status === 'error' ? <span class="err">{L('Фон под ним:', 'Background under it:')} {j.error}</span> : <span>{L('Фон под ним:', 'Background under it:')} {`${jobStatus(j)}, ${since(j)}`}</span>}
         {j.status === 'error' && (
           <button class="link" onClick={() => props.onJob(j, j.inside ? 'more' : 'retry')}>
-            Повторить
+            {L('Повторить', 'Retry')}
           </button>
         )}
         <button class="link" onClick={() => props.onJob(j, 'discard')}>
-          {j.status === 'error' ? 'Убрать' : 'Отменить'}
+          {j.status === 'error' ? L('Убрать', 'Dismiss') : L('Отменить', 'Cancel')}
         </button>
       </p>
     ));
@@ -2912,9 +2897,9 @@ function VersionsBand(props: {
         </>
       );
     } else if (current) {
-      const tabs: [BandTab, string, string][] = [['task', 'Задача', current.prompt]];
-      if (current.directed) tabs.push(['directed', 'Директор', current.directed]);
-      if (current.critique) tabs.push(['critique', current.critique.done ? 'Критик: готово' : 'Критик', current.critique.text]);
+      const tabs: [BandTab, string, string][] = [['task', L('Задача', 'Task'), current.prompt]];
+      if (current.directed) tabs.push(['directed', L('Директор', 'Director'), current.directed]);
+      if (current.critique) tabs.push(['critique', current.critique.done ? L('Критик: готово', 'Critic: done') : L('Критик', 'Critic'), current.critique.text]);
       const shownTab = tabs.find((t) => t[0] === tab) ?? tabs[0]!;
       text = (
         <>
@@ -2931,8 +2916,8 @@ function VersionsBand(props: {
           <p class="band-para">{shownTab[2]}</p>
           {shownTab[0] === 'task' && weak.has(current.id) && (
             <p class="band-para warn">
-              Модель почти ничего не изменила
-              <Help>Опишите, что должно получиться, а не что исправить, или выделите область поменьше.</Help>
+              {L('Модель почти ничего не изменила', 'The model barely changed anything')}
+              <Help>{L('Опишите, что должно получиться, а не что исправить, или выделите область поменьше.', 'Describe what should appear, not what to fix, or select a smaller area.')}</Help>
             </p>
           )}
         </>
@@ -2948,8 +2933,8 @@ function VersionsBand(props: {
       .slice(0, 16);
     head = (
       <>
-        <strong>Фон</strong>
-        <span class="band-meta">{recent.length ? 'недавние версии' : 'исходник'}</span>
+        <strong>{L('Фон', 'Background')}</strong>
+        <span class="band-meta">{recent.length ? L('недавние версии', 'recent versions') : L('исходник', 'original')}</span>
       </>
     );
     tiles = recent.map((p) => {
@@ -2963,9 +2948,9 @@ function VersionsBand(props: {
   }
 
   return (
-    <section class={props.folded ? 'band folded' : 'band'} aria-label="Версии">
+    <section class={props.folded ? 'band folded' : 'band'} aria-label={L('Версии', 'Versions')}>
       <div class="band-head">
-        <button class="bicon band-fold" title={props.folded ? 'Развернуть ленту' : 'Свернуть ленту'} aria-label={props.folded ? 'Развернуть ленту' : 'Свернуть ленту'} onClick={props.onFold}>
+        <button class="bicon band-fold" title={props.folded ? L('Развернуть ленту', 'Expand strip') : L('Свернуть ленту', 'Collapse strip')} aria-label={props.folded ? L('Развернуть ленту', 'Expand strip') : L('Свернуть ленту', 'Collapse strip')} onClick={props.onFold}>
           {props.folded ? <IconChevronRight size={15} stroke={2} /> : <IconChevronDown size={15} stroke={2} />}
         </button>
         {head}
@@ -3000,7 +2985,7 @@ function RenameField(props: { value: string; onDone: (name: string | null) => vo
       ref={ref}
       class="object-name"
       defaultValue={props.value}
-      aria-label="Имя объекта"
+      aria-label={L('Имя объекта', 'Object name')}
       onKeyDown={(e) => {
         if (e.key === 'Enter') {
           e.preventDefault();
@@ -3140,14 +3125,14 @@ function ModelPicker(props: {
   const ref = useRef<HTMLButtonElement>(null);
   const { advice } = props;
   const warn = !props.locked && (typeof advice === 'string' || !!(advice && advice.tooSmall));
-  const res = props.model === 'chatgpt' ? '1,6 Мп' : props.size === 'auto' ? 'авто' : props.size;
+  const res = props.model === 'chatgpt' ? L('1,6 Мп', '1.6 MP') : props.size === 'auto' ? L('авто', 'auto') : props.size;
   const title = props.locked
-    ? 'Модель и разрешение — как у версии'
+    ? L('Модель и разрешение — как у версии', 'Model and resolution — same as the version')
     : typeof advice === 'string'
       ? advice
       : advice
-        ? `Кусок ${advice.frame.rect.width}×${advice.frame.rect.height} → ответ ${advice.output.width}×${advice.output.height}`
-        : 'Модель и разрешение';
+        ? L(`Кусок ${advice.frame.rect.width}×${advice.frame.rect.height} → ответ ${advice.output.width}×${advice.output.height}`, `Crop ${advice.frame.rect.width}×${advice.frame.rect.height} → output ${advice.output.width}×${advice.output.height}`)
+        : L('Модель и разрешение', 'Model and resolution');
   const Glyph = warn ? IconAlertTriangle : IconAdjustmentsHorizontal;
   return (
     <>
@@ -3156,32 +3141,32 @@ function ModelPicker(props: {
         <span>
           {modelInfo(props.model).short}
           {props.locked ? '' : ` · ${res}`}
-          {warn ? ' · мало' : ''}
+          {warn ? L(' · мало', ' · low') : ''}
         </span>
         {props.locked ? <IconLock size={14} stroke={STROKE} aria-hidden="true" /> : <IconChevronDown size={14} stroke={2} aria-hidden="true" />}
       </button>
       {open && ref.current && (
         <Popover anchor={ref.current} class="settings-pop" onClose={() => setOpen(false)}>
-          <div class="pop-label">Модель</div>
+          <div class="pop-label">{L('Модель', 'Model')}</div>
           {MODELS.map((m) => (
             <button key={m.id} class={props.model === m.id ? 'radio on' : 'radio'} role="radio" aria-checked={props.model === m.id} onClick={() => props.onModel(m.id)}>
               <span class="radio-dot" />
               <span class="radio-text">
                 {m.label}
-                <small>{needsKey(m.id) && !props.hasKey ? 'нужен ключ laozhang.ai' : m.via}</small>
+                <small>{needsKey(m.id) && !props.hasKey ? L('нужен ключ laozhang.ai', 'laozhang.ai key needed') : m.via}</small>
               </span>
             </button>
           ))}
           {props.model === 'chatgpt' ? (
-            <p class="pop-note">Разрешение ответа ChatGPT выбирает сам: около 1,6 Мп</p>
+            <p class="pop-note">{L('Разрешение ответа ChatGPT выбирает сам: около 1,6 Мп', 'ChatGPT picks the output resolution itself: about 1.6 MP')}</p>
           ) : (
             <>
-              <div class="pop-label">Разрешение</div>
+              <div class="pop-label">{L('Разрешение', 'Resolution')}</div>
               <div class="pop-row">
                 <Seg
-                  label="Разрешение"
+                  label={L('Разрешение', 'Resolution')}
                   value={props.size}
-                  options={SIZES.map((s) => ({ value: s, text: s === 'auto' ? 'Авто' : s, title: s === 'auto' ? 'Авто, до 2K' : s === '4K' ? '4K, 4–5 минут' : s }))}
+                  options={SIZES.map((s) => ({ value: s, text: s === 'auto' ? L('Авто', 'Auto') : s, title: s === 'auto' ? L('Авто, до 2K', 'Auto, up to 2K') : s === '4K' ? L('4K, 4–5 минут', '4K, 4–5 minutes') : s }))}
                   onChange={props.onSize}
                 />
               </div>
@@ -3244,7 +3229,7 @@ function Help(props: { children: ComponentChildren }) {
       <button
         type="button"
         class={open ? 'help-toggle active' : 'help-toggle'}
-        aria-label="Подсказка"
+        aria-label={L('Подсказка', 'Hint')}
         aria-expanded={open}
         onClick={(e) => {
           e.preventDefault();
@@ -3270,11 +3255,11 @@ function Help(props: { children: ComponentChildren }) {
 function SizeHint(props: { advice: SizeAdvice; auto: boolean; sizes: string[]; onSize: (size: SizeChoice) => void }) {
   const { frame, imageSize, output, scale, enough } = props.advice;
   const piece = `${frame.rect.width}×${frame.rect.height}`;
-  const label = props.auto ? `авто (${imageSize})` : imageSize;
-  const slow = (size: string) => (size === '4K' ? ', но идёт 4–5 минут' : '');
+  const label = props.auto ? L(`авто (${imageSize})`, `auto (${imageSize})`) : imageSize;
+  const slow = (size: string) => (size === '4K' ? L(', но идёт 4–5 минут', ', but takes 4–5 minutes') : '');
   const pick = (size: string) => (
     <button class="small" onClick={() => props.onSize(size as SizeChoice)}>
-      Поставить {size}
+      {L('Поставить', 'Use')} {size}
     </button>
   );
   if (props.advice.tooSmall) {
@@ -3282,14 +3267,14 @@ function SizeHint(props: { advice: SizeAdvice; auto: boolean; sizes: string[]; o
     return (
       <div class="size-hint warn">
         <p>
-          Мало разрешения: детали упадут в {scale.toFixed(1).replace('.', ',')} раза
+          {L('Мало разрешения: детали упадут в', 'Not enough resolution: detail drops')} {decimal(scale, 1)} {L('раза', 'times')}
           <Help>
-            Кусок с контекстом {piece}, а {label} вернёт {output.width}×{output.height}.{' '}
+            {L('Кусок с контекстом', 'The crop with context is')} {piece}{L(', а', ', and')} {label} {L('вернёт', 'returns')} {output.width}×{output.height}.{' '}
             {!better
-              ? 'Это наибольшее разрешение модели: выделите область поменьше или правьте её по частям.'
+              ? L('Это наибольшее разрешение модели: выделите область поменьше или правьте её по частям.', 'This is the highest resolution of the model: select a smaller area or edit it in parts.')
               : props.advice.beyond
-                ? `Даже ${better} будет мало${slow(better)}: лучше выделить область поменьше.`
-                : `Хватит ${better}${slow(better)}.`}
+                ? L(`Даже ${better} будет мало${slow(better)}: лучше выделить область поменьше.`, `Even ${better} will not be enough${slow(better)}: better select a smaller area.`)
+                : L(`Хватит ${better}${slow(better)}.`, `${better} is enough${slow(better)}.`)}
           </Help>
         </p>
         {better && pick(better)}
@@ -3300,9 +3285,9 @@ function SizeHint(props: { advice: SizeAdvice; auto: boolean; sizes: string[]; o
     return (
       <div class="size-hint warn">
         <p>
-          С запасом: хватит {enough}
+          {L(`С запасом: хватит ${enough}`, `More than needed: ${enough} is enough`)}
           <Help>
-            Кусок {piece}. {label} не добавит деталей — ответ всё равно уменьшится до размера куска{imageSize === '4K' ? ', а ждать его 4–5 минут' : ''}.
+            {L('Кусок', 'The crop is')} {piece}. {label} {L('не добавит деталей — ответ всё равно уменьшится до размера куска', 'won’t add detail — the output is downscaled to the crop size anyway')}{imageSize === '4K' ? L(', а ждать его 4–5 минут', ', and takes 4–5 minutes') : ''}.
           </Help>
         </p>
         {pick(enough)}
@@ -3310,7 +3295,7 @@ function SizeHint(props: { advice: SizeAdvice; auto: boolean; sizes: string[]; o
     );
   }
   return (
-    <p class="hint size-hint" title="Кусок с контекстом → ответ модели">
+    <p class="hint size-hint" title={L('Кусок с контекстом → ответ модели', 'Crop with context → model output')}>
       {piece} → {output.width}×{output.height}, {label}
     </p>
   );
@@ -3331,8 +3316,8 @@ function StyleDialog(props: { style: string; onClose: () => void; onSave: (style
     <div class="modal-backdrop" onClick={props.onClose}>
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="style-title" onClick={(e) => e.stopPropagation()}>
         <h2 id="style-title">
-          Стиль документа
-          <Help>Добавляется к каждой задаче для модели и директора. Сохраняется в проекте .caaa, в картинку — нет.</Help>
+          {L('Стиль документа', 'Document style')}
+          <Help>{L('Добавляется к каждой задаче для модели и директора. Сохраняется в проекте .caaa, в картинку — нет.', 'Added to every task for the model and the director. Saved in the .caaa project, not in the image.')}</Help>
         </h2>
         <form
           onSubmit={(e) => {
@@ -3351,16 +3336,16 @@ function StyleDialog(props: { style: string; onClose: () => void; onSave: (style
           <textarea
             ref={field}
             rows={5}
-            placeholder="Например: книжная иллюстрация, тёплый вечерний свет"
+            placeholder={L('Например: книжная иллюстрация, тёплый вечерний свет', 'For example: book illustration, warm evening light')}
             value={value}
             onInput={(e) => setValue(e.currentTarget.value)}
           />
           <div class="row">
             <button class="primary" type="submit" disabled={value.trim() === props.style.trim()} title="⌘↵">
-              Сохранить
+              {L('Сохранить', 'Save')}
             </button>
             <button type="button" onClick={props.onClose}>
-              Отмена
+              {L('Отмена', 'Cancel')}
             </button>
           </div>
         </form>
@@ -3378,7 +3363,19 @@ function SettingsDialog(props: {
 }) {
   const [value, setValue] = useState('');
   const [saving, setSaving] = useState(false);
+  const [language, setLanguage] = useState<{ choice: LangChoice; system: Lang } | null>(null);
   const mac = navigator.userAgent.includes('Mac');
+  useEffect(() => {
+    fetch('/api/lang')
+      .then((r) => r.json() as Promise<{ choice: LangChoice; system: Lang }>)
+      .then(setLanguage, props.onError);
+  }, []);
+  // Подписи интерфейса считаются при загрузке, поэтому другой язык — перезагрузкой окна
+  const chooseLang = (choice: LangChoice) =>
+    post<{ lang: Lang; choice: LangChoice; system: Lang }>('/api/lang', { choice }).then((res) => {
+      setLanguage(res);
+      if (res.lang !== lang()) location.reload();
+    }, props.onError);
   const run = async (action: () => Promise<unknown>, text: string) => {
     setSaving(true);
     try {
@@ -3394,15 +3391,28 @@ function SettingsDialog(props: {
   return (
     <div class="modal-backdrop" onClick={props.onClose}>
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" onClick={(e) => e.stopPropagation()}>
-        <h2 id="settings-title">Настройки</h2>
-        <h3>Ключ laozhang.ai</h3>
+        <h2 id="settings-title">{L('Настройки', 'Settings')}</h2>
+        <h3>{L('Язык', 'Language')}</h3>
+        {language && (
+          <Seg
+            label={L('Язык', 'Language')}
+            value={language.choice}
+            options={[
+              { value: 'system', text: `${L('Как в системе', 'System')} · ${LANG_NAMES[language.system]}`, title: L('Язык системы', 'System language') },
+              { value: 'en', text: LANG_NAMES.en, title: LANG_NAMES.en },
+              { value: 'ru', text: LANG_NAMES.ru, title: LANG_NAMES.ru },
+            ]}
+            onChange={(choice) => void chooseLang(choice)}
+          />
+        )}
+        <h3>{L('Ключ laozhang.ai', 'laozhang.ai key')}</h3>
         <p>
-          {props.hasKey ? 'Ключ сохранён.' : 'Нужен для Nano Banana. Он есть в личном кабинете laozhang.ai.'}
+          {props.hasKey ? L('Ключ сохранён.', 'Key saved.') : L('Нужен для Nano Banana. Он есть в личном кабинете laozhang.ai.', 'Needed for Nano Banana. You can find it in your laozhang.ai dashboard.')}
         </p>
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            void run(() => post('/api/settings/key', { key: value }), 'Ключ сохранён');
+            void run(() => post('/api/settings/key', { key: value }), L('Ключ сохранён', 'Key saved'));
           }}
         >
           <input
@@ -3410,40 +3420,40 @@ function SettingsDialog(props: {
             autoFocus
             autoComplete="off"
             spellcheck={false}
-            placeholder={props.hasKey ? 'Новый ключ' : 'Ключ'}
+            placeholder={props.hasKey ? L('Новый ключ', 'New key') : L('Ключ', 'Key')}
             value={value}
             onInput={(e) => setValue(e.currentTarget.value)}
           />
-          <p class="hint">{mac ? 'Хранится в Связке ключей macOS' : 'Хранится на этом компьютере зашифрованным'} и уходит только в laozhang.ai.</p>
+          <p class="hint">{mac ? L('Хранится в Связке ключей macOS', 'Stored in the macOS Keychain') : L('Хранится на этом компьютере зашифрованным', 'Stored encrypted on this computer')} {L('и уходит только в laozhang.ai.', 'and is sent only to laozhang.ai.')}</p>
           <div class="row">
             <button class="primary" type="submit" disabled={!value.trim() || saving}>
-              Сохранить ключ
+              {L('Сохранить ключ', 'Save key')}
             </button>
             <button type="button" onClick={props.onClose}>
-              Закрыть
+              {L('Закрыть', 'Close')}
             </button>
             {props.hasKey && (
               <button
                 type="button"
                 class="danger"
                 disabled={saving}
-                onClick={() => void run(() => post('/api/settings/key/clear'), 'Ключ удалён')}
+                onClick={() => void run(() => post('/api/settings/key/clear'), L('Ключ удалён', 'Key deleted'))}
               >
-                Удалить ключ
+                {L('Удалить ключ', 'Delete key')}
               </button>
             )}
           </div>
         </form>
-        <h3>ChatGPT Images по подписке</h3>
+        <h3>{L('ChatGPT Images по подписке', 'ChatGPT Images on your subscription')}</h3>
         {props.codex ? (
           <>
-            <p>Картинки и директор идут через Codex по подписке ChatGPT, ключ не нужен.</p>
+            <p>{L('Картинки и директор идут через Codex по подписке ChatGPT, ключ не нужен.', 'Images and the director go through Codex on your ChatGPT subscription; no key needed.')}</p>
             <p class="hint">
-              Codex: <code>{props.codex}</code>. Если пишет, что вход не выполнен, войдите в Codex в приложении ChatGPT.
+              Codex: <code>{props.codex}</code>{L('. Если пишет, что вход не выполнен, войдите в Codex в приложении ChatGPT.', '. If it says you are not signed in, sign in to Codex in the ChatGPT app.')}
             </p>
           </>
         ) : (
-          <p>Не найден Codex. Установите приложение ChatGPT (Codex в нём есть) или Codex CLI и войдите в ChatGPT.</p>
+          <p>{L('Не найден Codex. Установите приложение ChatGPT (Codex в нём есть) или Codex CLI и войдите в ChatGPT.', 'Codex not found. Install the ChatGPT app (it includes Codex) or Codex CLI and sign in to ChatGPT.')}</p>
         )}
       </div>
     </div>
@@ -3456,7 +3466,7 @@ function NewCanvasForm(props: { onError: (err: unknown) => void; onCreated?: () 
   const [color, setColor] = useState('#ffffff');
   const [creating, setCreating] = useState(false);
   // Пресет узнаётся по размеру в любой ориентации: «Повернуть» его не сбрасывает
-  const preset = CANVAS_PRESETS.find((p) => (p.width === width && p.height === height) || (p.width === height && p.height === width));
+  const preset = canvasPresets().find((p) => (p.width === width && p.height === height) || (p.width === height && p.height === width));
   const valid = [width, height].every((v) => Number.isInteger(v) && v >= 16 && v <= 30000);
   const megapixels = (width * height) / 1e6;
   return (
@@ -3471,8 +3481,8 @@ function NewCanvasForm(props: { onError: (err: unknown) => void; onCreated?: () 
           .finally(() => setCreating(false));
       }}
     >
-      <div class="presets" role="radiogroup" aria-label="Размер">
-        {CANVAS_PRESETS.map((p) => {
+      <div class="presets" role="radiogroup" aria-label={L('Размер', 'Size')}>
+        {canvasPresets().map((p) => {
           const scale = 22 / Math.max(p.width, p.height);
           const turned = preset === p && p.width !== width;
           const w = turned ? p.height : p.width;
@@ -3502,14 +3512,14 @@ function NewCanvasForm(props: { onError: (err: unknown) => void; onCreated?: () 
       </div>
       <div class="size-row">
         <label>
-          Ширина
+          {L('Ширина', 'Width')}
           <input type="number" min={16} max={30000} value={width} onInput={(e) => setWidth(Number(e.currentTarget.value))} />
         </label>
         <button
           type="button"
           class="icon swap"
-          title="Повернуть: поменять ширину и высоту"
-          aria-label="Поменять ширину и высоту"
+          title={L('Повернуть: поменять ширину и высоту', 'Rotate: swap width and height')}
+          aria-label={L('Поменять ширину и высоту', 'Swap width and height')}
           onClick={() => {
             setWidth(height);
             setHeight(width);
@@ -3518,18 +3528,18 @@ function NewCanvasForm(props: { onError: (err: unknown) => void; onCreated?: () 
           <IconArrowsExchange size={16} stroke={STROKE} />
         </button>
         <label>
-          Высота
+          {L('Высота', 'Height')}
           <input type="number" min={16} max={30000} value={height} onInput={(e) => setHeight(Number(e.currentTarget.value))} />
         </label>
         <label>
-          Фон
+          {L('Фон', 'Background')}
           <input type="color" value={color} onInput={(e) => setColor(e.currentTarget.value)} />
         </label>
       </div>
-      <p class="hint">{valid ? `${megapixels.toFixed(1).replace('.', ',')} Мп${preset?.dpi ? `, для печати ${preset.dpi} dpi` : ''}` : 'Каждая сторона — от 16 до 30 000 пикселей'}</p>
+      <p class="hint">{valid ? L(`${megapixels.toFixed(1).replace('.', ',')} Мп${preset?.dpi ? `, для печати ${preset.dpi} dpi` : ''}`, `${megapixels.toFixed(1)} MP${preset?.dpi ? `, ${preset.dpi} dpi for print` : ''}`) : L('Каждая сторона — от 16 до 30 000 пикселей', 'Each side — 16 to 30,000 pixels')}</p>
       <div class="row">
         <button type="submit" class="primary" disabled={!valid || creating}>
-          Создать холст
+          {L('Создать холст', 'Create canvas')}
         </button>
         {props.extra}
       </div>
@@ -3544,14 +3554,14 @@ function StartScreen(props: { recent: RecentDto[]; onOpen: () => void; onOpenRec
         <section class="start-open">
           <header class="start-head">
             <div>
-              <h1>Откройте картинку</h1>
-              <p class="hint">PNG, JPEG, WebP, TIFF или проект .caaa</p>
+              <h1>{L('Откройте картинку', 'Open an image')}</h1>
+              <p class="hint">{L('PNG, JPEG, WebP, TIFF или проект .caaa', 'PNG, JPEG, WebP, TIFF or a .caaa project')}</p>
             </div>
             <button class="primary" onClick={props.onOpen}>
-              Открыть…
+              {L('Открыть…', 'Open…')}
             </button>
           </header>
-          <h2>Недавние</h2>
+          <h2>{L('Недавние', 'Recent')}</h2>
           {props.recent.length ? (
             <ul class="recent">
               {props.recent.map((r) => (
@@ -3569,11 +3579,11 @@ function StartScreen(props: { recent: RecentDto[]; onOpen: () => void; onOpenRec
               ))}
             </ul>
           ) : (
-            <p class="hint">Пока пусто</p>
+            <p class="hint">{L('Пока пусто', 'Nothing yet')}</p>
           )}
         </section>
         <section class="start-new">
-          <h1>Или новый холст</h1>
+          <h1>{L('Или новый холст', 'Or a new canvas')}</h1>
           <NewCanvasForm onError={props.onError} />
         </section>
       </div>

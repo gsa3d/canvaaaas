@@ -3,6 +3,7 @@
 // и этот текст, и слова художника; интерфейс показывает оба, задача художника не меняется.
 // Он же критик: после каждого шага смотрит, что получилось, и говорит, что исправить на следующем, или что правка готова.
 import type { InputImage } from './types.ts';
+import { L } from '../shared/i18n.ts';
 
 export interface DirectorRequest {
   /** Задача художника, как он её написал */
@@ -95,7 +96,7 @@ export function directorPrompt(req: Omit<DirectorRequest, 'images' | 'signal'>):
 export function parseDirector(message: string): string {
   const tagged = /<task>([\s\S]*?)<\/task>/i.exec(message)?.[1] ?? message.replace(/<\/?task>/gi, '');
   const text = tagged.replace(/\s+/g, ' ').trim();
-  if (!text) throw new Error('директор ответил пустым текстом');
+  if (!text) throw new Error(L('директор ответил пустым текстом', 'the director returned empty text'));
   return text;
 }
 
@@ -151,7 +152,7 @@ export function parseCritic(message: string): { done: boolean; text: string } {
     .map((line) => line.replace(/\s+/g, ' ').trim())
     .filter(Boolean)
     .join('\n');
-  if (!text) throw new Error('критик ответил пустым текстом');
+  if (!text) throw new Error(L('критик ответил пустым текстом', 'the critic returned empty text'));
   return { done: false, text };
 }
 
@@ -169,7 +170,7 @@ export function mockDirector(opts: { delayMs?: number; doneAt?: number } = {}): 
   const reviews: CriticRequest[] = [];
   const wait = async (signal?: AbortSignal) => {
     if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
-    if (signal?.aborted) throw new Error('Директор отменён');
+    if (signal?.aborted) throw new Error(L('Директор отменён', 'Director canceled'));
   };
   return {
     id: 'mock-director',

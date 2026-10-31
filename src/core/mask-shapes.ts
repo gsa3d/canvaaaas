@@ -4,6 +4,7 @@ import sharp from 'sharp';
 import { shapesBBox, type MaskShape } from '../shared/api.ts';
 import { intersect, type Rect } from './frame.ts';
 import type { Bitmap } from './segment.ts';
+import { L } from '../shared/i18n.ts';
 
 export type { MaskShape };
 
@@ -22,7 +23,7 @@ function shapeSvg(shape: MaskShape, i: number): string {
     case 'stroke':
       return strokeSvg(shape, fill, i);
     case 'mask':
-      throw new Error('Маску объекта SVG не нарисовать');
+      throw new Error(L('Маску объекта SVG не нарисовать', 'Cannot draw an object mask as SVG'));
   }
 }
 
@@ -82,7 +83,7 @@ export async function applyShapes(mask: Uint8Array, rect: Rect, shapes: MaskShap
       continue;
     }
     await flush();
-    if (!lookup) throw new Error('Маска объекта недоступна: выделите его заново');
+    if (!lookup) throw new Error(L('Маска объекта недоступна: выделите его заново', 'Object mask is unavailable: select it again'));
     applyBitmap(out, rect, lookup(shape.id), !!shape.erase);
   }
   await flush();

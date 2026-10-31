@@ -10,6 +10,7 @@ import { area, clipBitmap, clipOut, clipScaled, overlap } from '../core/objects.
 import { levels, rasterize, Segmenter, type Backend, type Bitmap, type Candidate, type Embedding, type SegmentPrompt } from '../core/segment.ts';
 import { installModel, modelFiles, modelInstalled } from '../core/segment-model.ts';
 import { OUTSIDE_LAYER, type MaskResult, type PickRequest, type PickResult, type RectDto, type SegmentDto, type SegmentPoint } from '../shared/api.ts';
+import { L } from '../shared/i18n.ts';
 
 const EMBEDDINGS_KEPT = 4;
 const MASKS_KEPT = 300;
@@ -115,13 +116,13 @@ export class Segmentation {
       })
       .catch((err: unknown) => {
         this.status = 'error';
-        this.error = `Не удалось скачать модель: ${message(err)}`;
+        this.error = L(`Не удалось скачать модель: ${message(err)}`, `Could not download the model: ${message(err)}`);
         this.changed();
       });
   }
 
   private segmenter(): Promise<Segmenter> {
-    if (!modelInstalled()) return Promise.reject(new Error('Модель выделения объектов не скачана'));
+    if (!modelInstalled()) return Promise.reject(new Error(L('Модель выделения объектов не скачана', 'Object selection model is not downloaded')));
     if (!this.model) {
       this.status = 'loading';
       this.changed();
@@ -137,7 +138,7 @@ export class Segmentation {
         (err: unknown) => {
           this.model = null;
           this.status = 'error';
-          this.error = `Модель не загрузилась: ${message(err)}`;
+          this.error = L(`Модель не загрузилась: ${message(err)}`, `Model failed to load: ${message(err)}`);
           this.changed();
           throw err;
         },
@@ -184,7 +185,7 @@ export class Segmentation {
     const w = Math.max(view.width, min);
     const h = Math.max(view.height, min);
     const r = grow({ x: cx - w / 2, y: cy - h / 2, width: w, height: h }, 0, doc);
-    if (r.width < 16 || r.height < 16) throw new Error('Вид за краем холста');
+    if (r.width < 16 || r.height < 16) throw new Error(L('Вид за краем холста', 'View is outside the canvas'));
     return r;
   }
 
@@ -223,7 +224,7 @@ export class Segmentation {
   async pick(doc: CanvasDocument, req: PickRequest, selection?: Bitmap, scope?: Scope): Promise<Omit<PickResult, 'owner' | 'enter'>> {
     const points = req.points ?? [];
     const box = req.box && intersect(req.box, { x: 0, y: 0, width: doc.width, height: doc.height });
-    if (!points.length && !box?.width) throw new Error('Нет подсказки для выделения');
+    if (!points.length && !box?.width) throw new Error(L('Нет подсказки для выделения', 'No hint for selection'));
     // Точки прежнего вида (Shift и Alt после прокрутки) тоже должны попасть в участок
     let crop = this.viewRect(doc, req.view);
     const need = [...points.map((p) => ({ x: Math.floor(p.x), y: Math.floor(p.y), width: 1, height: 1 })), ...(box?.width ? [box] : [])].reduce(union);
@@ -240,7 +241,7 @@ export class Segmentation {
       const bitmap = rasterize(c, 1, bounds);
       return bitmap ? [{ bitmap, best: i === lv.best }] : [];
     });
-    if (!found.length) throw new Error('Здесь объект не нашёлся');
+    if (!found.length) throw new Error(L('Здесь объект не нашёлся', 'No object found here'));
     if (req.snap) {
       const snapped = this.snap(doc, found.map((f) => f.bitmap));
       found = found.map((f, i) => ({ ...f, bitmap: snapped[i]! }));
@@ -321,7 +322,7 @@ export class Segmentation {
 
   private stored(id: string): StoredMask {
     const m = this.masks.get(id);
-    if (!m) throw new Error('Выделение устарело: выделите объект заново');
+    if (!m) throw new Error(L('Выделение устарело: выделите объект заново', 'Selection is outdated: select the object again'));
     return m;
   }
 

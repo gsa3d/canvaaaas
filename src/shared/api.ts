@@ -1,3 +1,4 @@
+import { L } from './i18n.ts';
 // Типы, общие для сервера и интерфейса: что лежит в /api/state и что шлёт интерфейс.
 // Только типы — сюда нельзя импортировать ничего из Node.
 
@@ -436,12 +437,12 @@ export type AppCommand =
 export const COMMAND_EVENT = 'canvaaaas-command';
 
 /** Пресеты нового холста; dpi записывается в файл, чтобы печать шла в нужном размере */
-export const CANVAS_PRESETS: { name: string; width: number; height: number; dpi?: number }[] = [
+export const canvasPresets = (): { name: string; width: number; height: number; dpi?: number }[] => [
   { name: 'Full HD', width: 1920, height: 1080 },
   { name: '4K', width: 3840, height: 2160 },
   { name: '8K', width: 7680, height: 4320 },
-  { name: 'Квадрат', width: 4096, height: 4096 },
-  { name: 'Большой 4:3', width: 8000, height: 6000 },
+  { name: L('Квадрат', 'Square'), width: 4096, height: 4096 },
+  { name: L('Большой 4:3', 'Large 4:3'), width: 8000, height: 6000 },
   { name: 'A4', width: 2480, height: 3508, dpi: 300 },
   { name: 'A3', width: 3508, height: 4961, dpi: 300 },
   { name: 'A2', width: 4961, height: 7016, dpi: 300 },

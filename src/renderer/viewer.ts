@@ -6,6 +6,7 @@ import OpenSeadragon from 'openseadragon';
 import { API_HEADER, type DocDto, type JobDto, type MaskEditResult, type MaskShape, type RectDto, type SketchStroke } from '../shared/api.ts';
 import { post } from './api.ts';
 import { MaskPreview, type MaskEditView } from './mask-edit.ts';
+import { L } from '../shared/i18n.ts';
 
 export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'sketch' | 'object' | 'move';
 
@@ -1144,8 +1145,8 @@ export class CanvasView {
       const color = job.status === 'error' ? ERROR : ACCENT;
       frame(r, this.labels.get(job.id) ?? '', color, 1, [6, 4]);
     }
-    if (this.edit?.view.kind === 'layer') frame(this.edit.view.rect, 'Маска слоя', ACCENT, 2, [6, 4]);
-    if (this.modelFrame && !maskMode) frame(this.modelFrame, 'Видит модель', MODEL_FRAME, 1, [3, 3]);
+    if (this.edit?.view.kind === 'layer') frame(this.edit.view.rect, L('Маска слоя', 'Layer mask'), ACCENT, 2, [6, 4]);
+    if (this.modelFrame && !maskMode) frame(this.modelFrame, L('Видит модель', 'Model sees'), MODEL_FRAME, 1, [3, 3]);
     // С «Сдвинуть» видно, что можно сдвинуть
     if (this.activeTool() === 'move' && !maskMode) {
       ctx.strokeStyle = ACCENT;

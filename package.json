@@ -2,7 +2,16 @@
   "name": "canvaaaas",
   "version": "0.1.0",
   "private": true,
-  "description": "Локальный редактор больших иллюстраций: перерисовка выделенных областей через Nano Banana",
+  "description": "Local editor for large illustrations: select an area, describe the change, and a generative model redraws just that area (Nano Banana or ChatGPT Images)",
+  "license": "MIT",
+  "homepage": "https://github.com/gsa3d/canvaaaas#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gsa3d/canvaaaas.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gsa3d/canvaaaas/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.18"
@@ -17,7 +26,9 @@
     "test": "vitest run",
     "app:mac": "npm run build && electron-builder --mac",
     "app:win": "npm run build && electron-builder --win",
-    "install:mac": "npm run app:mac && node --disable-warning=ExperimentalWarning scripts/install-mac.ts"
+    "install:mac": "npm run app:mac && node --disable-warning=ExperimentalWarning scripts/install-mac.ts",
+    "dist:mac": "npm run build && electron-builder --mac dmg zip --publish never",
+    "dist:win": "node --disable-warning=ExperimentalWarning scripts/dist-win.ts"
   },
   "dependencies": {
     "onnxruntime-node": "^1.31.1",
@@ -58,8 +69,8 @@
     "fileAssociations": [
       {
         "ext": "caaa",
-        "name": "Проект canvaaaas",
-        "description": "Проект canvaaaas",
+        "name": "canvaaaas project",
+        "description": "canvaaaas project",
         "role": "Editor",
         "rank": "Owner"
       }
@@ -74,7 +85,9 @@
         "dist/**",
         "package.json",
         "!node_modules/onnxruntime-node/bin/napi-v6/{linux,win32}/**"
-      ]
+      ],
+      "identity": null,
+      "minimumSystemVersion": "12.0"
     },
     "win": {
       "target": [
@@ -84,17 +97,24 @@
       "files": [
         "dist/**",
         "package.json",
-        "!node_modules/onnxruntime-node/bin/napi-v6/{linux,darwin}/**"
+        "!node_modules/onnxruntime-node/bin/napi-v6/{linux,darwin}/**",
+        "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**"
       ]
     },
     "nsis": {
       "oneClick": true,
       "perMachine": false,
-      "shortcutName": "canvaaaas"
+      "shortcutName": "canvaaaas",
+      "artifactName": "${productName}-${version}-windows-x64-setup.${ext}"
     },
     "electronLanguages": [
-      "ru",
-      "en"
-    ]
+      "en",
+      "ru"
+    ],
+    "afterPack": "scripts/after-pack.cjs",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "dmg": {
+      "title": "canvaaaas ${version}"
+    }
   }
 }

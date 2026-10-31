@@ -7,6 +7,7 @@ import { rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import sharp from 'sharp';
 import type { RawImage } from './edit-region.ts';
+import { L } from '../shared/i18n.ts';
 
 export type ImageFormat = 'png' | 'jpeg' | 'webp' | 'tiff';
 
@@ -75,24 +76,24 @@ export async function inspectImage(path: string): Promise<ImageFile> {
   const reasons: string[] = [];
   const format = meta.format;
   const writable = format === 'png' || format === 'jpeg' || format === 'webp' || format === 'tiff';
-  if (!writable) reasons.push(`формат ${String(meta.format).toUpperCase()} canvaaaas не записывает`);
-  if (format === 'tiff') reasons.push('в TIFF могут быть слои Photoshop, которых canvaaaas не видит');
-  if ((meta.pages ?? 1) > 1) reasons.push('в файле несколько кадров или страниц');
-  if (meta.depth && meta.depth !== 'uchar' && meta.depth !== 'char') reasons.push('в файле больше 8 бит на канал');
-  if (meta.space === 'cmyk') reasons.push('файл в CMYK');
+  if (!writable) reasons.push(L(`формат ${String(meta.format).toUpperCase()} canvaaaas не записывает`, `canvaaaas cannot write ${String(meta.format).toUpperCase()} files`));
+  if (format === 'tiff') reasons.push(L('в TIFF могут быть слои Photoshop, которых canvaaaas не видит', 'a TIFF may contain Photoshop layers that canvaaaas does not see'));
+  if ((meta.pages ?? 1) > 1) reasons.push(L('в файле несколько кадров или страниц', 'the file has several frames or pages'));
+  if (meta.depth && meta.depth !== 'uchar' && meta.depth !== 'char') reasons.push(L('в файле больше 8 бит на канал', 'the file has more than 8 bits per channel'));
+  if (meta.space === 'cmyk') reasons.push(L('файл в CMYK', 'the file is CMYK'));
   if (meta.icc) {
     const profile = iccDescription(meta.icc);
-    if (!/srgb/i.test(profile)) reasons.push(profile ? `цветовой профиль «${profile}», а холст в sRGB` : 'неизвестный цветовой профиль');
+    if (!/srgb/i.test(profile)) reasons.push(profile ? L(`цветовой профиль «${profile}», а холст в sRGB`, `the color profile is “${profile}”, but the canvas is sRGB`) : L('неизвестный цветовой профиль', 'unknown color profile'));
   }
   if (meta.hasAlpha && !(await sharp(path, { limitInputPixels: false }).stats()).isOpaque) {
-    reasons.push('в файле есть прозрачность, а холст непрозрачный');
+    reasons.push(L('в файле есть прозрачность, а холст непрозрачный', 'the file has transparency, but the canvas is opaque'));
   }
   return {
     path,
     format: writable ? format : 'png',
     density: meta.density,
     chromaSubsampling: meta.chromaSubsampling,
-    blocker: reasons.length ? `Перезаписать «${basename(path)}» без потерь нельзя: ${reasons.join('; ')}.` : undefined,
+    blocker: reasons.length ? L(`Перезаписать «${basename(path)}» без потерь нельзя: ${reasons.join('; ')}.`, `“${basename(path)}” cannot be overwritten without loss: ${reasons.join('; ')}.`) : undefined,
     size: info.size,
     mtimeMs: info.mtimeMs,
   };

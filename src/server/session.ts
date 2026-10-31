@@ -72,6 +72,7 @@ import {
   type SketchStroke,
   type StateDto,
 } from '../shared/api.ts';
+import { L, lang, LANG_CHOICES, resolveLang, setLang, type Lang, type LangChoice } from '../shared/i18n.ts';
 
 const MAX_RUNNING_JOBS = 2;
 const MAX_VARIANTS_PER_JOB = 8;
@@ -81,7 +82,8 @@ const REFERENCE_SIZE = 1536;
 /** Картинки для правки маски в браузере — не больше этого по большей стороне */
 const EDIT_PREVIEW_MAX = 2560;
 /** Задача модели, когда объект отделяют: на его месте — то, что вокруг */
-const FILL_TASK = 'Пустое место: продолжить то, что вокруг (землю, стены, фон), как будто здесь ничего не стояло. Нового предмета не рисовать.';
+const fillTask = () =>
+  L('Пустое место: продолжить то, что вокруг (землю, стены, фон), как будто здесь ничего не стояло. Нового предмета не рисовать.', 'Empty space: continue what is around it (ground, walls, background) as if nothing stood here. Do not draw a new object.');
 /** Слой отделённого объекта берёт пиксели чуть шире маски, чтобы контур не обрезался, и гаснет к краю на столько же */
 const LIFT_GROW = 2;
 /** Подсветка слоя под курсором — не больше этого по большей стороне, как у объекта под курсором */
@@ -235,6 +237,8 @@ export interface SessionOptions {
   host?: Host;
   recent?: RecentFiles;
   prefs?: Prefs;
+  /** Язык системы; в настройках можно выбрать другой */
+  systemLang?: Lang;
 }
 
 /** Во что записывается документ: картинка или проект .caaa со слоями */
@@ -294,6 +298,8 @@ export class Session {
   private aroundCache: { key: string; below: Buffer; above: Buffer } | null = null;
   /** Холст, по которому построены превью замены слоя (rev документа) */
   private previewRev: number | undefined;
+  /** Язык системы: интерфейс на нём, если в настройках не выбран другой */
+  private readonly systemLang: Lang;
   /** Какие ответы умеет каждая модель — не меняется */
   private outputs: StateDto['models'] | undefined;
 
@@ -303,6 +309,8 @@ export class Session {
     this.host = opts.host ?? null;
     this.recent = opts.recent ?? null;
     this.prefs = opts.prefs ?? null;
+    this.systemLang = opts.systemLang ?? lang();
+    setLang(resolveLang(this.preferences().lang, this.systemLang));
     this.segmentation = new Segmentation(() => this.changed());
   }
 
@@ -355,7 +363,7 @@ export class Session {
 
   private async apiKey(): Promise<string> {
     const key = await this.keys.get();
-    if (!key) throw new Error('Нет ключа laozhang.ai: добавьте его в настройках (⌘,)');
+    if (!key) throw new Error(L('Нет ключа laozhang.ai: добавьте его в настройках (⌘,)', 'No laozhang.ai key: add it in Settings (⌘,)'));
     return key;
   }
 
@@ -536,7 +544,7 @@ export class Session {
 
   async openPath(path: string): Promise<boolean> {
     if (!(await this.confirmClose())) return false;
-    this.setActivity(`Открываю ${basename(path)}…`);
+    this.setActivity(L(`Открываю ${basename(path)}…`, `Opening ${basename(path)}…`));
     try {
       if (isProjectPath(path)) {
         const info = await stat(path);
@@ -556,11 +564,11 @@ export class Session {
 
   async openRecent(id: string): Promise<boolean> {
     const entry = this.recent?.get(id);
-    if (!entry) throw new Error('Этого файла уже нет в списке недавних');
+    if (!entry) throw new Error(L('Этого файла уже нет в списке недавних', 'This file is no longer in the recent list'));
     if (!existsSync(entry.path)) {
       await this.recent?.remove(id);
       this.changed();
-      throw new Error(`Файл не найден: ${entry.path}`);
+      throw new Error(L(`Файл не найден: ${entry.path}`, `File not found: ${entry.path}`));
     }
     return this.openPath(entry.path);
   }
@@ -571,13 +579,27 @@ export class Session {
   }
 
   recentThumb(id: string): string {
-    if (!this.recent?.get(id)) throw new Error('Нет такого файла в списке недавних');
+    if (!this.recent?.get(id)) throw new Error(L('Нет такого файла в списке недавних', 'No such file in the recent list'));
     return this.recent.thumbPath(id);
   }
 
   /** Настройки интерфейса: модель, разрешение, кисть и прочее, что окно помнит между запусками */
   preferences(): Record<string, unknown> {
     return this.prefs?.all() ?? { ...this.prefsInMemory };
+  }
+
+  /** Язык интерфейса и выбор в настройках */
+  language(): { lang: Lang; choice: LangChoice; system: Lang } {
+    const choice = this.preferences().lang;
+    return { lang: lang(), choice: choice === 'en' || choice === 'ru' ? choice : 'system', system: this.systemLang };
+  }
+
+  /** Сменить язык: меню и тексты сервера — сразу, окно перезагружается само */
+  async setLanguage(choice: LangChoice): Promise<void> {
+    if (!LANG_CHOICES.includes(choice)) throw new Error(L('Нет такого языка', 'No such language'));
+    await this.setPreference('lang', choice);
+    setLang(resolveLang(choice, this.systemLang));
+    this.changed();
   }
 
   async setPreference(key: string, value: unknown): Promise<void> {
@@ -599,7 +621,7 @@ export class Session {
 
   async newDocument(width: number, height: number, color: [number, number, number], density?: number): Promise<boolean> {
     if (!(await this.confirmClose())) return false;
-    this.replaceDoc(CanvasDocument.blank(width, height, color, `Холст ${width}×${height}`), null, density);
+    this.replaceDoc(CanvasDocument.blank(width, height, color, L(`Холст ${width}×${height}`, `Canvas ${width}×${height}`)), null, density);
     return true;
   }
 
@@ -631,20 +653,20 @@ export class Session {
   private async askClose(host: Host): Promise<boolean> {
     const doc = this.requireDoc();
     const jobs = this.jobs.length;
-    const lost = jobs ? `${jobs} ${jobs === 1 ? 'правка' : jobs < 5 ? 'правки' : 'правок'} в очереди` : '';
+    const lost = jobs ? L(`${jobs} ${jobs === 1 ? 'правка' : jobs < 5 ? 'правки' : 'правок'} в очереди`, `${jobs} ${jobs === 1 ? 'edit' : 'edits'} in the queue`) : '';
     if (this.dirty) {
       const answer = await host.ask({
-        message: `Сохранить изменения в «${doc.name}»?`,
-        detail: `Если не сохранить, все изменения после последнего сохранения пропадут насовсем.${lost ? ` ${lost[0]!.toUpperCase()}${lost.slice(1)} пропадут в любом случае.` : ''}`,
-        buttons: ['Сохранить', 'Не сохранять', 'Отмена'],
+        message: L(`Сохранить изменения в «${doc.name}»?`, `Save changes to “${doc.name}”?`),
+        detail: L(`Если не сохранить, все изменения после последнего сохранения пропадут насовсем.${lost ? ` ${lost[0]!.toUpperCase()}${lost.slice(1)} пропадут в любом случае.` : ''}`, `If you don’t save, all changes since the last save will be lost for good.${lost ? ` ${lost[0]!.toUpperCase()}${lost.slice(1)} will be lost anyway.` : ''}`),
+        buttons: [L('Сохранить', 'Save'), L('Не сохранять', 'Don’t Save'), L('Отмена', 'Cancel')],
       });
       if (answer === 0) return (await this.save()) !== null;
       return answer === 1;
     }
     const answer = await host.ask({
-      message: `Закрыть «${doc.name}»? У вас ${lost}.`,
-      detail: 'Непринятые варианты пропадут, идущие генерации остановятся.',
-      buttons: ['Закрыть', 'Отмена'],
+      message: L(`Закрыть «${doc.name}»? У вас ${lost}.`, `Close “${doc.name}”? You have ${lost}.`),
+      detail: L('Непринятые варианты пропадут, идущие генерации остановятся.', 'Unaccepted variants will be lost, running generations will stop.'),
+      buttons: [L('Закрыть', 'Close'), L('Отмена', 'Cancel')],
     });
     return answer === 0;
   }
@@ -660,10 +682,10 @@ export class Session {
     if (file?.format === PROJECT_EXTENSION) return this.overwrite(file);
     if ((doc.patches.length || doc.objects.length) && !this.flattened && this.host) {
       const answer = await this.host.ask({
-        message: 'Сохранить слои?',
+        message: L('Сохранить слои?', 'Save layers?'),
         detail:
-          'Слои и их версии останутся, только если сохранить документ в формате canvaaaas (.caaa): после повторного открытия их можно будет переключать, скрывать и править. В картинке видимое сольётся с холстом.',
-        buttons: ['Сохранить в .caaa…', file && !file.blocker ? `Записать в «${doc.name}»` : 'Сохранить картинкой…', 'Отмена'],
+          L('Слои и их версии останутся, только если сохранить документ в формате canvaaaas (.caaa): после повторного открытия их можно будет переключать, скрывать и править. В картинке видимое сольётся с холстом.', 'Layers and their versions are kept only if you save the document as a canvaaaas project (.caaa): after reopening you can switch, hide and edit them. In an image, everything visible is merged into the canvas.'),
+        buttons: [L('Сохранить в .caaa…', 'Save as .caaa…'), file && !file.blocker ? L(`Записать в «${doc.name}»`, `Write to “${doc.name}”`) : L('Сохранить картинкой…', 'Save as Image…'), L('Отмена', 'Cancel')],
       });
       if (answer === 0) return this.saveAs({ kind: 'project' });
       if (answer !== 1) return null;
@@ -677,11 +699,11 @@ export class Session {
     const doc = this.requireDoc();
     const now = await stat(file.path).catch(() => null);
     if (now && (now.size !== file.size || now.mtimeMs !== file.mtimeMs)) {
-      if (!this.host) throw new Error(`Файл «${doc.name}» изменила другая программа: сохраните под другим именем`);
+      if (!this.host) throw new Error(L(`Файл «${doc.name}» изменила другая программа: сохраните под другим именем`, `“${doc.name}” was changed by another program: save it under a different name`));
       const answer = await this.host.ask({
-        message: `Файл «${doc.name}» изменила другая программа`,
-        detail: 'Если перезаписать его, эти изменения пропадут.',
-        buttons: ['Перезаписать', 'Сохранить как…', 'Отмена'],
+        message: L(`Файл «${doc.name}» изменила другая программа`, `“${doc.name}” was changed by another program`),
+        detail: L('Если перезаписать его, эти изменения пропадут.', 'If you overwrite it, those changes will be lost.'),
+        buttons: [L('Перезаписать', 'Overwrite'), L('Сохранить как…', 'Save As…'), L('Отмена', 'Cancel')],
       });
       if (answer === 1) return this.saveAs();
       if (answer !== 0) return null;
@@ -744,7 +766,7 @@ export class Session {
       format = 'png';
       path += '.png';
     }
-    this.setActivity(`Экспортирую ${basename(path)}…`);
+    this.setActivity(L(`Экспортирую ${basename(path)}…`, `Exporting ${basename(path)}…`));
     try {
       await writeFileAtomic(path, await encodeImage(doc.snapshot(), format, { density: this.density }));
     } finally {
@@ -755,7 +777,7 @@ export class Session {
 
   private async write(path: string, format: SaveFormat, chromaSubsampling?: string): Promise<void> {
     const doc = this.requireDoc();
-    this.setActivity(`Сохраняю ${basename(path)}…`);
+    this.setActivity(L(`Сохраняю ${basename(path)}…`, `Saving ${basename(path)}…`));
     try {
       const key = doc.contentKey;
       const layers = doc.layersKey;
@@ -795,7 +817,7 @@ export class Session {
   }
 
   private requireHost(): Host {
-    if (!this.host) throw new Error('Окна выбора файла есть только в приложении canvaaaas');
+    if (!this.host) throw new Error(L('Окна выбора файла есть только в приложении canvaaaas', 'File dialogs are only available in the canvaaaas app'));
     return this.host;
   }
 
@@ -840,7 +862,7 @@ export class Session {
   removePatch(patchId: string): Promise<void> {
     return this.serialDoc((doc) => {
       const patch = doc.patch(patchId);
-      if (patch.lifted) throw new Error('Исходник не удалить: удалите слой');
+      if (patch.lifted) throw new Error(L('Исходник не удалить: удалите слой', 'The original cannot be deleted: delete the layer'));
       const owner = patch.object ? doc.objects.find((o) => o.id === patch.object) : undefined;
       doc.batch(() => {
         if (owner?.current === patchId) {
@@ -864,7 +886,7 @@ export class Session {
       const patch = doc.patch(patchId);
       doc.bakeMask(patchId);
       const { mask, changed } = await applyShapesRegion(patch.mask, patch.rect, shapes);
-      if (this.doc !== doc) throw new Error('Документ уже закрыт');
+      if (this.doc !== doc) throw new Error(L('Документ уже закрыт', 'The document is already closed'));
       if (changed) {
         doc.batch(() => {
           doc.setPatchMask(patchId, mask, changed);
@@ -906,14 +928,14 @@ export class Session {
     const png = async (data: Uint8Array, channels: 1 | 4) => ({ data: await scaled(data, channels).png({ compressionLevel: 2 }).toBuffer(), type: 'image/png', version });
     if (part === 'layer') return jpeg(rgb());
     if (part === 'mask') return png(mask, 1);
-    if (part !== 'below' && part !== 'above') throw new Error('Нет такой картинки');
+    if (part !== 'below' && part !== 'above') throw new Error(L('Нет такой картинки', 'No such image'));
     const key = `${doc.id}:${skip}:${rect.x},${rect.y},${rect.width},${rect.height}:${doc.layersKey}`;
     if (this.aroundCache?.key !== key) this.aroundCache = { key, ...doc.regionAround(rect, skip) };
     return part === 'below' ? jpeg(this.aroundCache.below) : png(this.aroundCache.above, 4);
   }
 
   private requireDoc(): CanvasDocument {
-    if (!this.doc) throw new Error('Документ не открыт');
+    if (!this.doc) throw new Error(L('Документ не открыт', 'No document open'));
     return this.doc;
   }
 
@@ -944,28 +966,28 @@ export class Session {
 
   referenceThumb(id: string): Buffer {
     const ref = this.references.get(id);
-    if (!ref) throw new Error('Нет такого референса');
+    if (!ref) throw new Error(L('Нет такого референса', 'No such reference'));
     return ref.thumb;
   }
 
   // ——— Задачи ———
 
   createJob(req: CreateJobRequest): string {
-    if (!req.prompt.trim()) throw new Error('Пустой промпт');
+    if (!req.prompt.trim()) throw new Error(L('Пустой промпт', 'Empty prompt'));
     const { shapes, bitmaps } = this.resolveShapes(req.shapes);
     const area = shapesBBox(shapes);
-    if (!area) throw new Error('Нет выделения');
+    if (!area) throw new Error(L('Нет выделения', 'No selection'));
     const { object } = req;
     if (object) {
       const o = this.requireDoc().objects.find((x) => x.id === object);
-      if (!o) throw new Error('Слоя уже нет: выберите другой');
-      if (!this.requireDoc().visibility()(o)) throw new Error(`Слой «${o.name}» скрыт: покажите его`);
+      if (!o) throw new Error(L('Слоя уже нет: выберите другой', 'The layer is gone: choose another one'));
+      if (!this.requireDoc().visibility()(o)) throw new Error(L(`Слой «${o.name}» скрыт: покажите его`, `Layer “${o.name}” is hidden: show it`));
     }
     const refIds = req.refs ?? [];
-    if (refIds.length > MAX_REFERENCES) throw new Error(`Не больше ${MAX_REFERENCES} референсов на правку`);
+    if (refIds.length > MAX_REFERENCES) throw new Error(L(`Не больше ${MAX_REFERENCES} референсов на правку`, `No more than ${MAX_REFERENCES} references per edit`));
     const references = refIds.map((id) => {
       const ref = this.references.get(id);
-      if (!ref) throw new Error('Референс не найден — добавьте картинку заново');
+      if (!ref) throw new Error(L('Референс не найден — добавьте картинку заново', 'Reference not found — add the image again'));
       return ref.image;
     });
     return this.enqueue({
@@ -1006,7 +1028,7 @@ export class Session {
   patchVariants(patchId: string, req: PatchVariantsRequest): string {
     const doc = this.requireDoc();
     const patch = doc.patch(patchId);
-    if (patch.lifted) throw new Error('Исходник перерисовывают правкой: выделите слой и напишите задачу');
+    if (patch.lifted) throw new Error(L('Исходник перерисовывают правкой: выделите слой и напишите задачу', 'The original is redrawn with an edit: select the layer and write a task'));
     // Модель снова видит прежнюю версию слоя; у правки части слоя перерисовывается только сама правка поверх неё
     const base = patch.base && doc.hasPatch(patch.base) ? patch.base : undefined;
     // Маска, правленная рукой, — прозрачность версии (растушёвка 0): новым вариантам — что видно больше чем наполовину,
@@ -1017,7 +1039,7 @@ export class Session {
     const owner = patch.object ? doc.objects.find((o) => o.id === patch.object) : undefined;
     const whole = !patch.part || (!!owner && overlap(owner, { rect: patch.rect, mask: patch.part }) === area(owner));
     const box = maskBBox(mask, patch.rect.width, patch.rect.height);
-    if (!box) throw new Error('Маска версии пустая: верните кистью то, что нужно перерисовать');
+    if (!box) throw new Error(L('Маска версии пустая: верните кистью то, что нужно перерисовать', 'The version mask is empty: bring back with the brush what should be redrawn'));
     return this.enqueue({
       prompt: req.prompt?.trim() || patch.prompt,
       hide: req.hide ?? patch.hide ?? false,
@@ -1095,14 +1117,14 @@ export class Session {
 
   private job(jobId: string): Job {
     const job = this.jobs.find((j) => j.id === jobId);
-    if (!job) throw new Error('Нет такой задачи');
+    if (!job) throw new Error(L('Нет такой задачи', 'No such job'));
     return job;
   }
 
   /** Задача с готовым куском и маской */
   private readyJob(jobId: string): Job & { prep: PreparedEdit; mask: Uint8Array; alpha: Float32Array } {
     const job = this.job(jobId);
-    if (!job.prep || !job.mask || !job.alpha) throw new Error('Задача ещё не подготовлена');
+    if (!job.prep || !job.mask || !job.alpha) throw new Error(L('Задача ещё не подготовлена', 'The job is not prepared yet'));
     return job as Job & { prep: PreparedEdit; mask: Uint8Array; alpha: Float32Array };
   }
 
@@ -1121,7 +1143,7 @@ export class Session {
     this.changed();
     try {
       const doc = this.doc;
-      if (!doc || doc.id !== job.docId) throw new Error('Документ уже закрыт');
+      if (!doc || doc.id !== job.docId) throw new Error(L('Документ уже закрыт', 'The document is already closed'));
       // Версию могли удалить, пока задача ждала очереди: тогда варианты — просто новые версии
       const { from } = job;
       const current = from && doc.hasPatch(from.patchId) ? doc.patch(from.patchId) : null;
@@ -1180,10 +1202,10 @@ export class Session {
       { x: job.area.x - 2, y: job.area.y - 2, width: job.area.width + 4, height: job.area.height + 4 },
       { x: 0, y: 0, width: doc.width, height: doc.height },
     );
-    if (!area.width || !area.height) throw new Error('Выделение за пределами холста');
+    if (!area.width || !area.height) throw new Error(L('Выделение за пределами холста', 'Selection is outside the canvas'));
     const lookup: MaskLookup = (id) => {
       const b = job.bitmaps.get(id);
-      if (!b) throw new Error('Маска объекта потерялась: выделите его заново');
+      if (!b) throw new Error(L('Маска объекта потерялась: выделите его заново', 'Object mask was lost: select it again'));
       return b;
     };
     const region = await applyShapes(new Uint8Array(area.width * area.height), area, job.shapes, lookup);
@@ -1198,7 +1220,7 @@ export class Session {
    */
   private async generate(job: Job, count: number, jump = false): Promise<void> {
     const prep = job.prep;
-    if (!prep) throw new Error('Задача ещё не подготовлена');
+    if (!prep) throw new Error(L('Задача ещё не подготовлена', 'The job is not prepared yet'));
     if (job.director) return this.refine(job, prep, count);
     const provider = this.provider(job.model);
     const task = { prompt: job.prompt, hide: job.hide };
@@ -1319,7 +1341,7 @@ export class Session {
     } catch (err) {
       if (!signal.aborted) {
         if (step) Object.assign(step, { status: 'error', error: message(err) });
-        job.error = step && steps > 1 ? `Шаг ${made}: ${message(err)}` : message(err);
+        job.error = step && steps > 1 ? L(`Шаг ${made}: ${message(err)}`, `Step ${made}: ${message(err)}`) : message(err);
       }
     } finally {
       // Остановленный шаг не нужен: это всегда последний вариант
@@ -1328,7 +1350,7 @@ export class Session {
       this.changed();
       await Promise.all(masks);
       job.status = job.variants.some((v) => v.status === 'done') ? 'done' : 'error';
-      if (job.status === 'error') job.error ??= 'Шаги остановлены';
+      if (job.status === 'error') job.error ??= L('Шаги остановлены', 'Steps stopped');
       this.changed();
     }
   }
@@ -1338,7 +1360,7 @@ export class Session {
     const { directed, mustFix, signal } = opts;
     const cached = v.critique;
     if (cached && cached.maskRev === job.maskRev && !(mustFix && cached.done)) return cached;
-    if (!v.gen || !job.alpha || !job.mask) throw new Error('Вариант не готов');
+    if (!v.gen || !job.alpha || !job.mask) throw new Error(L('Вариант не готов', 'Variant is not ready'));
     job.reviewing = true;
     this.changed();
     try {
@@ -1362,7 +1384,7 @@ export class Session {
       if (v.patch && this.doc?.hasPatch(v.patch)) this.doc.patch(v.patch).critique = { done: res.done, text: res.text };
       return v.critique;
     } catch (err) {
-      throw new Error(`Критик: ${message(err)}`);
+      throw new Error(L(`Критик: ${message(err)}`, `Critic: ${message(err)}`));
     } finally {
       job.reviewing = false;
       this.changed();
@@ -1396,7 +1418,7 @@ export class Session {
       job.directed = { key, text: res.text };
       return res.text;
     } catch (err) {
-      throw new Error(`Директор: ${message(err)}`);
+      throw new Error(L(`Директор: ${message(err)}`, `Director: ${message(err)}`));
     } finally {
       job.directing = false;
       this.changed();
@@ -1412,10 +1434,10 @@ export class Session {
       job.status === 'queued' ||
       !!job.chain ||
       job.variants.some((v) => v.status === 'running' || v.masking);
-    if (busy) throw new Error('Задача ещё идёт');
+    if (busy) throw new Error(L('Задача ещё идёт', 'The job is still running'));
     if (!job.prep) return this.retry(jobId, change);
     const n = Math.min(Math.max(Math.round(count), 1), MAX_VARIANTS_PER_JOB - job.variants.length);
-    if (n <= 0) throw new Error(`Не больше ${MAX_VARIANTS_PER_JOB} вариантов на правку`);
+    if (n <= 0) throw new Error(L(`Не больше ${MAX_VARIANTS_PER_JOB} вариантов на правку`, `No more than ${MAX_VARIANTS_PER_JOB} variants per edit`));
     const jump = redo(job, change);
     if (jump) job.picked = false;
     try {
@@ -1428,7 +1450,7 @@ export class Session {
   /** Задача с ошибкой: начать заново с подготовки куска, можно с поправкой задачи */
   retry(jobId: string, change: RedoChange = {}): void {
     const job = this.job(jobId);
-    if (job.status !== 'error') throw new Error('Повторить можно только задачу с ошибкой');
+    if (job.status !== 'error') throw new Error(L('Повторить можно только задачу с ошибкой', 'Only a failed job can be retried'));
     redo(job, change);
     job.abort = new AbortController();
     Object.assign(job, { status: 'queued', error: undefined, prep: undefined, mask: undefined, alpha: undefined, variants: [], selected: 0, picked: false });
@@ -1483,7 +1505,7 @@ export class Session {
       const existing = job.object ? doc.objects.find((o) => o.id === job.object) : undefined;
       const freed = job.fillFor ? doc.objects.find((o) => o.id === job.fillFor) : undefined;
       // Фон, под которым нет других слоёв, — новым слоем в самом низу, с именем того, под кем он
-      const owner = existing ?? { ...this.layerFromJob(doc, job), ...(freed ? { name: `Фон под «${freed.name}»` } : {}) };
+      const owner = existing ?? { ...this.layerFromJob(doc, job), ...(freed ? { name: L(`Фон под «${freed.name}»`, `Background under “${freed.name}”`) } : {}) };
       const edited = trim({ rect: job.prep.frame.inside, mask: job.mask });
       // Правка части слоя ложится поверх версии, которую модель видела: остальной слой остаётся от неё.
       // Весь слой в выделении — версия его заменяет: прежняя в неё не копируется, но помнится для «Ещё вариантов»
@@ -1536,7 +1558,7 @@ export class Session {
   /** Новый слой из выделения задачи: имя — задача */
   private layerFromJob(doc: CanvasDocument, job: Job & { prep?: PreparedEdit }): DocObject {
     const bitmap = trim({ rect: job.prep!.frame.inside, mask: job.prep!.insideMask });
-    if (!bitmap) throw new Error('Выделение пустое');
+    if (!bitmap) throw new Error(L('Выделение пустое', 'Selection is empty'));
     return { id: randomUUID(), name: layerName(job.prompt), ...bitmap, createdAt: new Date().toISOString(), version: doc.nextObjectVersion(), edit: true };
   }
 
@@ -1565,7 +1587,7 @@ export class Session {
       const obj = doc.object(objectId);
       if (patchId !== null) {
         const p = doc.patch(patchId);
-        if (p.object !== objectId || p.lifted) throw new Error('Это не версия этого слоя');
+        if (p.object !== objectId || p.lifted) throw new Error(L('Это не версия этого слоя', 'This is not a version of this layer'));
       }
       if ((obj.current ?? null) === patchId) return;
       doc.setObjects(doc.objects.map((o) => (o.id === objectId ? { ...o, current: patchId ?? undefined } : o)));
@@ -1595,7 +1617,7 @@ export class Session {
   moveLayer(id: string, into: string | null, over: string | null): Promise<void> {
     return this.serialDoc((doc) => {
       const tree = buildTree(doc.objects, doc.groups);
-      if (!locate(tree, id)) throw new Error('Нет такого слоя');
+      if (!locate(tree, id)) throw new Error(L('Нет такого слоя', 'No such layer'));
       if (!moveNode(tree, id, into, over)) return;
       const next = flatten(tree);
       doc.setObjects(next.objects, next.groups);
@@ -1634,7 +1656,7 @@ export class Session {
   renameGroup(groupId: string, name: string): Promise<void> {
     return this.serialDoc((doc) => {
       const trimmed = name.trim();
-      if (!trimmed) throw new Error('Пустое имя');
+      if (!trimmed) throw new Error(L('Пустое имя', 'Empty name'));
       if (doc.group(groupId).name === trimmed) return;
       doc.setObjects(doc.objects, doc.groups.map((g) => (g.id === groupId ? { ...g, name: trimmed } : g)));
       this.changed();
@@ -1678,7 +1700,7 @@ export class Session {
       const rgb = Buffer.alloc(width * height * 3);
       for (let i = 0; i < width * height; i++) p.layer.copy(rgb, i * 3, i * 4, i * 4 + 3);
       const rect = intersect(p.rect, { x: 0, y: 0, width: doc.width, height: doc.height });
-      if (rect.width !== width || rect.height !== height) throw new Error('Версия выходит за край холста');
+      if (rect.width !== width || rect.height !== height) throw new Error(L('Версия выходит за край холста', 'The version extends beyond the canvas'));
       const base = p.base && p.part && doc.hasPatch(p.base) ? doc.patch(p.base) : undefined;
       const under = base ? doc.regionReplaced(p.rect, p.id, base.rect, base.layer) : doc.regionWithout(p.rect, p.id);
       const closed = { left: rect.x > 0, top: rect.y > 0, right: rect.x + width < doc.width, bottom: rect.y + height < doc.height };
@@ -1719,16 +1741,16 @@ export class Session {
       p.layer.copy(rgb, i * 3, i * 4, i * 4 + 3);
       seen[i] = p.layer[i * 4 + 3]! >= MASK_THRESHOLD ? 255 : 0;
     }
-    if (!seen.includes(255)) throw new Error('Версию не видно: маска пустая');
+    if (!seen.includes(255)) throw new Error(L('Версию не видно: маска пустая', 'The version is not visible: the mask is empty'));
     const provider = this.maskProvider(model);
     const req = await objectMaskRequest(rgb, seen, width, height, provider);
     this.generations++;
     this.changed();
     const res = await provider.generate({ ...req.generate, signal });
     const found = alignMask(await readObjectMask(res.image, req), rgb, width, height).mask;
-    if (!found.includes(255)) throw new Error('Модель не нашла объект');
+    if (!found.includes(255)) throw new Error(L('Модель не нашла объект', 'The model did not find the object'));
     await this.serialDoc((d) => {
-      if (d !== doc || !d.hasPatch(patchId) || d.patch(patchId).maskVersion !== maskVersion) throw new Error('Маску поменяли, пока модель её рисовала');
+      if (d !== doc || !d.hasPatch(patchId) || d.patch(patchId).maskVersion !== maskVersion) throw new Error(L('Маску поменяли, пока модель её рисовала', 'The mask was changed while the model was drawing it'));
       const grown = dilate({ rect, mask: found }, LIFT_GROW, rect);
       const binary = new Uint8Array(n);
       for (let y = 0; y < grown.rect.height; y++) {
@@ -1765,7 +1787,7 @@ export class Session {
   saveObject(input: MaskShape[], name?: string, group?: string): Promise<string> {
     return this.serialDoc(async (doc) => {
       const bitmap = await this.selectionBitmap(doc, input);
-      if (this.doc !== doc) throw new Error('Документ уже закрыт');
+      if (this.doc !== doc) throw new Error(L('Документ уже закрыт', 'The document is already closed'));
       const obj: DocObject = {
         id: randomUUID(),
         name: name?.trim() || nextLayerName(doc),
@@ -1790,7 +1812,7 @@ export class Session {
   cutObject(input: MaskShape[], name?: string, group?: string): Promise<string> {
     return this.serialDoc(async (doc) => {
       const hole = await this.selectionBitmap(doc, input);
-      if (this.doc !== doc) throw new Error('Документ уже закрыт');
+      if (this.doc !== doc) throw new Error(L('Документ уже закрыт', 'The document is already closed'));
       const obj: DocObject = { id: randomUUID(), name: name?.trim() || nextLayerName(doc), ...hole, createdAt: new Date().toISOString(), version: doc.nextObjectVersion(), freed: true, hole };
       // Чей каждый пиксель дыры: верхней видимой версии слоя, где он непрозрачен, иначе фона
       const order = doc.drawOrder().filter((p) => p.object).reverse();
@@ -1842,7 +1864,7 @@ export class Session {
   renameObject(id: string, name: string): Promise<void> {
     return this.serialDoc((doc) => {
       const trimmed = name.trim();
-      if (!trimmed) throw new Error('Пустое имя');
+      if (!trimmed) throw new Error(L('Пустое имя', 'Empty name'));
       if (doc.object(id).name === trimmed) return;
       doc.setObjects(doc.objects.map((o) => (o.id === id ? { ...o, name: trimmed } : o)));
       this.changed();
@@ -1873,7 +1895,7 @@ export class Session {
   mergeIntoBase(objectId: string): Promise<void> {
     return this.serialDoc((doc) => {
       const obj = doc.object(objectId);
-      if (!doc.visibility()(obj)) throw new Error(`Слой «${obj.name}» скрыт: покажите его или удалите`);
+      if (!doc.visibility()(obj)) throw new Error(L(`Слой «${obj.name}» скрыт: покажите его или удалите`, `Layer “${obj.name}” is hidden: show it or delete it`));
       // Слой, его части (из старых проектов) и заплатки фона под ними
       const group = new Set([objectId, ...descendants(doc.objects, objectId).map((o) => o.id)]);
       for (const f of doc.objects) if (f.kind === 'fill' && f.under && group.has(f.under)) group.add(f.id);
@@ -1883,7 +1905,7 @@ export class Session {
       const under = order.slice(0, Math.max(0, top)).filter((p) => !(p.object && group.has(p.object)) && mine.some((m) => layersOverlap(p, m)));
       if (under.length) {
         const names = [...new Set(under.flatMap((p) => (p.object ? [doc.object(p.object).name] : [])))].map((n) => `«${n}»`);
-        throw new Error(names.length ? `Под слоем видны ${names.join(', ')}: сначала влейте их или объедините с ним` : 'Под слоем видны другие правки');
+        throw new Error(names.length ? L(`Под слоем видны ${names.join(', ')}: сначала влейте их или объедините с ним`, `${names.join(', ')} are visible under the layer: merge them into the background or with it first`) : L('Под слоем видны другие правки', 'Other edits are visible under the layer'));
       }
       doc.batch(() => {
         if (mine.length) {
@@ -1911,14 +1933,14 @@ export class Session {
     return this.serialDoc((doc) => {
       const visible = doc.visibility();
       const picked = [...new Set(ids)].map((id) => doc.object(id)).filter((o) => o.kind !== 'fill' && visible(o));
-      if (picked.length < 2) throw new Error('Объединяют два видимых слоя или больше');
+      if (picked.length < 2) throw new Error(L('Объединяют два видимых слоя или больше', 'Merging needs two or more visible layers'));
       const group = new Set(picked.flatMap((o) => [o.id, ...descendants(doc.objects, o.id).map((d) => d.id)]));
       const mine = doc.drawOrder().filter((p) => p.object && group.has(p.object));
-      if (!mine.length) throw new Error('В этих слоях нечего объединять: у них нет своих пикселей');
+      if (!mine.length) throw new Error(L('В этих слоях нечего объединять: у них нет своих пикселей', 'Nothing to merge in these layers: they have no pixels of their own'));
       let acc: MaskedLayer = mine[0]!;
       for (const p of mine.slice(1)) acc = layerOver(acc, p);
       const shape = trim({ rect: acc.rect, mask: acc.mask });
-      if (!shape) throw new Error('В этих слоях нечего объединять');
+      if (!shape) throw new Error(L('В этих слоях нечего объединять', 'Nothing to merge in these layers'));
       // Верхний — тот, чья версия рисуется последней; его место и имя
       const top = doc.object(mine.at(-1)!.object!);
       const topId = top.parent && group.has(top.parent) ? picked.find((o) => o.id === top.parent)?.id ?? top.id : top.id;
@@ -1944,7 +1966,7 @@ export class Session {
   /** Свести все слои: то, что видно, становится исходником, слои (и скрытые) и их версии уходят. Одним шагом ⌘Z */
   flattenLayers(): Promise<void> {
     return this.serialDoc((doc) => {
-      if (!doc.objects.length && !doc.patches.length) throw new Error('Слоёв нет: сводить нечего');
+      if (!doc.objects.length && !doc.patches.length) throw new Error(L('Слоёв нет: сводить нечего', 'No layers: nothing to flatten'));
       const order = doc.drawOrder();
       doc.batch(() => {
         if (order.length) {
@@ -1967,8 +1989,8 @@ export class Session {
   fillUnder(objectId: string, req: DetachRequest): string[] {
     const doc = this.requireDoc();
     const obj = doc.object(objectId);
-    if (obj.kind === 'fill') throw new Error('Это и есть фон');
-    if (this.jobs.some((j) => j.fillFor === objectId && j.status !== 'done' && j.status !== 'error')) throw new Error('Фон под этим слоем уже рисуется');
+    if (obj.kind === 'fill') throw new Error(L('Это и есть фон', 'This is the background'));
+    if (this.jobs.some((j) => j.fillFor === objectId && j.status !== 'done' && j.status !== 'error')) throw new Error(L('Фон под этим слоем уже рисуется', 'The background under this layer is already being drawn'));
     const place = obj.hole ?? obj;
     const region = dilate(place, fillGrow(place.rect), { x: 0, y: 0, width: doc.width, height: doc.height });
     // Чья каждая точка под слоем: верхнего из слоёв под ним, чья маска её накрывает, иначе фона
@@ -2008,7 +2030,7 @@ export class Session {
       const id = `fill:${randomUUID()}`;
       return [
         this.enqueue({
-          prompt: FILL_TASK,
+          prompt: fillTask(),
           hide: true,
           model: req.model,
           size: req.size,
@@ -2035,8 +2057,8 @@ export class Session {
   moveObject(objectId: string, dx: number, dy: number): Promise<{ rev: number }> {
     return this.serialDoc((doc) => {
       const obj = doc.object(objectId);
-      if (obj.kind === 'fill') throw new Error('Заплатка фона лежит на месте: сдвигают её слой');
-      if (!liftedLayer(doc, objectId) && !obj.current) throw new Error('В слое нечего сдвигать: у него нет своих пикселей');
+      if (obj.kind === 'fill') throw new Error(L('Заплатка фона лежит на месте: сдвигают её слой', 'A background patch stays in place: move its layer'));
+      if (!liftedLayer(doc, objectId) && !obj.current) throw new Error(L('В слое нечего сдвигать: у него нет своих пикселей', 'Nothing to move in the layer: it has no pixels of its own'));
       const moved = new Set([objectId, ...descendants(doc.objects, objectId).map((o) => o.id)]);
       const patches = doc.patches.filter((p) => p.object && moved.has(p.object));
       const all = patches.map((p) => p.rect).reduce(union);
@@ -2143,10 +2165,10 @@ export class Session {
     const { shapes, bitmaps } = this.resolveShapes(input);
     const box = shapesBBox(shapes);
     const area = box && intersect(box, { x: 0, y: 0, width: doc.width, height: doc.height });
-    if (!area?.width || !area.height) throw new Error('Нет выделения');
+    if (!area?.width || !area.height) throw new Error(L('Нет выделения', 'No selection'));
     const mask = await applyShapes(new Uint8Array(area.width * area.height), area, shapes, (id) => bitmaps.get(id)!);
     const bitmap = trim({ rect: area, mask });
-    if (!bitmap) throw new Error('Выделение пустое');
+    if (!bitmap) throw new Error(L('Выделение пустое', 'Selection is empty'));
     return bitmap;
   }
 
@@ -2155,7 +2177,7 @@ export class Session {
     const doc = this.requireDoc();
     const px = Math.max(-200, Math.min(200, Math.round(req.px)));
     const b = changeEdge(await this.selectionBitmap(doc, req.shapes), px, { x: 0, y: 0, width: doc.width, height: doc.height });
-    if (!b) throw new Error('Выделение сузилось в ничто');
+    if (!b) throw new Error(L('Выделение сузилось в ничто', 'Selection shrank to nothing'));
     return this.segmentation.keep(b);
   }
 
@@ -2184,16 +2206,16 @@ function onTop(doc: CanvasDocument, obj: DocObject, group: string | undefined): 
 function nextGroupName(doc: CanvasDocument): string {
   const used = new Set(doc.groups.map((g) => g.name));
   let n = doc.groups.length + 1;
-  while (used.has(`Группа ${n}`)) n++;
-  return `Группа ${n}`;
+  while (used.has(L(`Группа ${n}`, `Group ${n}`))) n++;
+  return L(`Группа ${n}`, `Group ${n}`);
 }
 
 /** «Слой N» со следующим свободным номером */
 function nextLayerName(doc: CanvasDocument): string {
   const used = new Set(doc.objects.map((o) => o.name));
   let n = doc.objects.filter((o) => o.kind !== 'fill').length + 1;
-  while (used.has(`Слой ${n}`)) n++;
-  return `Слой ${n}`;
+  while (used.has(L(`Слой ${n}`, `Layer ${n}`))) n++;
+  return L(`Слой ${n}`, `Layer ${n}`);
 }
 
 /** Точка холста внутри маски */

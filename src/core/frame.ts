@@ -1,3 +1,4 @@
+import { L } from '../shared/i18n.ts';
 // Рамка куска, который уходит в модель: выделение + контекстный запас,
 // растянутые до ближайших поддерживаемых пропорций модели, и разрешение ответа, которого куску хватает.
 // Без Node: тот же расчёт делает интерфейс, чтобы подсказать про разрешение ещё до генерации.
@@ -44,7 +45,7 @@ export interface Frame {
 
 export function parseRatio(ratio: string): number {
   const [w, h] = ratio.split(':').map(Number);
-  if (!w || !h) throw new Error(`Непонятные пропорции: ${ratio}`);
+  if (!w || !h) throw new Error(L(`Непонятные пропорции: ${ratio}`, `Unknown aspect ratio: ${ratio}`));
   return w / h;
 }
 
@@ -85,7 +86,7 @@ export function computeFrame(bbox: Rect, canvas: Size, opts: FrameOptions): Fram
     const cost = width * height + 4 * padded;
     if (!best || cost < best.cost) best = { rect, inside, aspectRatio, cost };
   }
-  if (!best) throw new Error('У модели нет ни одной пропорции');
+  if (!best) throw new Error(L('У модели нет ни одной пропорции', 'The model has no aspect ratios'));
   const { cost: _cost, ...frame } = best;
   return frame;
 }
@@ -103,7 +104,7 @@ export function fittingSize(model: ModelOutputs, aspectRatio: string, frame: Siz
 export function chooseImageSize(model: ModelOutputs, aspectRatio: string, frame: Size, requested: string, maxAuto = AUTO_SIZE_CAP): string {
   if (requested !== 'auto') {
     if (!model.imageSizes.includes(requested)) {
-      throw new Error(`Разрешение ${requested} не поддерживается, есть: ${model.imageSizes.join(', ')}`);
+      throw new Error(L(`Разрешение ${requested} не поддерживается, есть: ${model.imageSizes.join(', ')}`, `Resolution ${requested} is not supported; available: ${model.imageSizes.join(', ')}`));
     }
     return requested;
   }

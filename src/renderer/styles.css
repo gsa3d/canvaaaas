@@ -2180,3 +2180,7 @@ input.object-name {
   padding: 2px 6px;
   font: inherit;
 }
+
+.modal .seg {
+  align-self: flex-start;
+}

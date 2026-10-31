@@ -12,6 +12,7 @@ import { homedir, tmpdir } from 'node:os';
 import { delimiter, extname, join } from 'node:path';
 import { criticPrompt, directorPrompt, parseCritic, parseDirector, type PromptDirector } from './director.ts';
 import { ProviderError, type GenerateRequest, type GenerateResult, type ImageProvider, type InputImage, type Size } from './types.ts';
+import { L, locale } from '../shared/i18n.ts';
 
 /** Площадь ответа: 1254×1254, 1448×1086, 1484×1060 — модель держит её и подстраивает стороны под пропорции */
 const OUTPUT_AREA = 1254 * 1254;
@@ -70,7 +71,7 @@ export function codexHomeDir(env: NodeJS.ProcessEnv = process.env): string {
 function requireCodex(path: string | undefined): string {
   const bin = path ?? findCodex();
   if (!bin) {
-    throw new ProviderError('Не найден Codex CLI, через который идёт ChatGPT по подписке. Установите приложение ChatGPT (в нём есть Codex) или Codex CLI.');
+    throw new ProviderError(L('Не найден Codex CLI, через который идёт ChatGPT по подписке. Установите приложение ChatGPT (в нём есть Codex) или Codex CLI.', 'Codex CLI, which runs ChatGPT on your subscription, was not found. Install the ChatGPT app (it includes Codex) or Codex CLI.'));
   }
   return bin;
 }
@@ -96,7 +97,7 @@ async function writeImages(dir: string, images: InputImage[]): Promise<string[]>
 
 function ratioOf(aspectRatio: string): number {
   const [w, h] = aspectRatio.split(':').map(Number);
-  if (!w || !h) throw new Error(`Непонятные пропорции: ${aspectRatio}`);
+  if (!w || !h) throw new Error(L(`Непонятные пропорции: ${aspectRatio}`, `Unknown aspect ratio: ${aspectRatio}`));
   return w / h;
 }
 
@@ -106,7 +107,7 @@ function limiter(max: number) {
   const queue: (() => void)[] = [];
   return async <T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
     while (active >= max) {
-      if (signal?.aborted) throw new ProviderError('Генерация отменена');
+      if (signal?.aborted) throw new ProviderError(L('Генерация отменена', 'Generation canceled'));
       await new Promise<void>((resolve, reject) => {
         const go = () => {
           signal?.removeEventListener('abort', stop);
@@ -114,7 +115,7 @@ function limiter(max: number) {
         };
         const stop = () => {
           queue.splice(queue.indexOf(go), 1);
-          reject(new ProviderError('Генерация отменена'));
+          reject(new ProviderError(L('Генерация отменена', 'Generation canceled')));
         };
         queue.push(go);
         signal?.addEventListener('abort', stop, { once: true });
@@ -309,7 +310,7 @@ function mimeOf(path: string): string {
 function formatReset(value: unknown): string | null {
   const ms = typeof value === 'number' ? (value < 1e12 ? value * 1000 : value) : typeof value === 'string' ? Date.parse(value) : NaN;
   if (!Number.isFinite(ms)) return null;
-  return new Date(ms).toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+  return new Date(ms).toLocaleString(locale(), { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
 }
 
 export function describeFailure(failure: unknown): string {
@@ -318,7 +319,7 @@ export function describeFailure(failure: unknown): string {
   const kind = o.type ?? o.kind;
   if (kind === 'usageLimitExceeded' || 'resetsAt' in o) {
     const at = formatReset(o.resetsAt);
-    return `исчерпан лимит картинок по подписке ChatGPT${at ? `, он обновится ${at}` : ''}`;
+    return L(`исчерпан лимит картинок по подписке ChatGPT${at ? `, он обновится ${at}` : ''}`, `ChatGPT subscription image limit reached${at ? `; it resets ${at}` : ''}`);
   }
   const text = o.message ?? o.error ?? o.reason;
   return typeof text === 'string' ? text : JSON.stringify(failure).slice(0, 300);
@@ -340,7 +341,7 @@ export function chatgptCodex(opts: ChatgptCodexOptions = {}): ImageProvider {
   const limit = limiter(opts.parallel ?? 2);
   const model = 'chatgpt-images';
   const outputSize = (aspectRatio: string, imageSize: string): Size => {
-    if (imageSize !== CHATGPT_SIZE || !ASPECT_RATIOS.includes(aspectRatio)) throw new Error(`ChatGPT Images не поддерживает ${aspectRatio} ${imageSize}`);
+    if (imageSize !== CHATGPT_SIZE || !ASPECT_RATIOS.includes(aspectRatio)) throw new Error(L(`ChatGPT Images не поддерживает ${aspectRatio} ${imageSize}`, `ChatGPT Images does not support ${aspectRatio} ${imageSize}`));
     const r = ratioOf(aspectRatio);
     return { width: Math.round(Math.sqrt(OUTPUT_AREA * r)), height: Math.round(Math.sqrt(OUTPUT_AREA / r)) };
   };
@@ -385,9 +386,9 @@ export function chatgptCodex(opts: ChatgptCodexOptions = {}): ImageProvider {
           try {
             run = await runCodex(bin, args, agentPrompt(prompt, paths), { cwd: dir, env: codexEnv(codexHome), signal: req.signal, timeoutMs });
           } catch (err) {
-            throw new ProviderError(`Не удалось запустить Codex (${bin}): ${err instanceof Error ? err.message : String(err)}`);
+            throw new ProviderError(L(`Не удалось запустить Codex (${bin}): ${err instanceof Error ? err.message : String(err)}`, `Could not start Codex (${bin}): ${err instanceof Error ? err.message : String(err)}`));
           }
-          if (run.aborted) throw new ProviderError('Генерация отменена');
+          if (run.aborted) throw new ProviderError(L('Генерация отменена', 'Generation canceled'));
           const elapsedMs = Date.now() - started.getTime();
 
           const rolloutPath = run.threadId ? await findRollout(codexHome, run.threadId, started) : null;
@@ -407,14 +408,14 @@ export function chatgptCodex(opts: ChatgptCodexOptions = {}): ImageProvider {
             };
           }
 
-          if (run.timedOut) throw new ProviderError(`ChatGPT не ответил за ${Math.round(timeoutMs / 60_000)} мин`, { retryable: true });
+          if (run.timedOut) throw new ProviderError(L(`ChatGPT не ответил за ${Math.round(timeoutMs / 60_000)} мин`, `ChatGPT did not respond within ${Math.round(timeoutMs / 60_000)} min`), { retryable: true });
           const reasons = [...rollout.failures.map(describeFailure), ...run.errors.map(clean), ...run.messages.map(clean).filter((m) => !/^done\.?$/i.test(m))];
-          const said = reasons.join(' — ') || lastLines(run.stderr) || `codex завершился с кодом ${run.code}`;
+          const said = reasons.join(' — ') || lastLines(run.stderr) || L(`codex завершился с кодом ${run.code}`, `codex exited with code ${run.code}`);
           // Инструмент картинок отработал и сам сказал, что не так, — значит, вход в порядке
           if (!rollout.failures.length && (LOGIN_HINT.test(said) || LOGIN_HINT.test(run.stderr))) {
-            throw new ProviderError(`Codex не вошёл в ChatGPT: войдите в Codex в приложении ChatGPT или в Терминале командой «${bin} login». (${said})`);
+            throw new ProviderError(L(`Codex не вошёл в ChatGPT: войдите в Codex в приложении ChatGPT или в Терминале командой «${bin} login». (${said})`, `Codex is not signed in to ChatGPT: sign in to Codex in the ChatGPT app or in Terminal with “${bin} login”. (${said})`));
           }
-          throw new ProviderError(`ChatGPT не вернул картинку: ${said}`, { retryable: rollout.failures.length === 0 });
+          throw new ProviderError(L(`ChatGPT не вернул картинку: ${said}`, `ChatGPT did not return an image: ${said}`), { retryable: rollout.failures.length === 0 });
         } finally {
           await rm(dir, { recursive: true, force: true });
         }
@@ -458,18 +459,18 @@ export function chatgptDirector(opts: ChatgptCodexOptions = {}): PromptDirector 
         try {
           run = await runCodex(bin, args, prompt, { cwd: dir, env: codexEnv(codexHome), signal, timeoutMs });
         } catch (err) {
-          throw new ProviderError(`Не удалось запустить Codex (${bin}): ${err instanceof Error ? err.message : String(err)}`);
+          throw new ProviderError(L(`Не удалось запустить Codex (${bin}): ${err instanceof Error ? err.message : String(err)}`, `Could not start Codex (${bin}): ${err instanceof Error ? err.message : String(err)}`));
         }
-        if (run.aborted) throw new ProviderError('Генерация отменена');
-        if (run.timedOut) throw new ProviderError(`ChatGPT не ответил за ${Math.round(timeoutMs / 60_000)} мин`, { retryable: true });
+        if (run.aborted) throw new ProviderError(L('Генерация отменена', 'Generation canceled'));
+        if (run.timedOut) throw new ProviderError(L(`ChatGPT не ответил за ${Math.round(timeoutMs / 60_000)} мин`, `ChatGPT did not respond within ${Math.round(timeoutMs / 60_000)} min`), { retryable: true });
         // Ошибки бывают и у удачного ответа (переподключение): ответ агента главнее
         const message = run.messages.at(-1);
         if (message) return { message, elapsedMs: Date.now() - started };
-        const said = run.errors.map(clean).join(' — ') || lastLines(run.stderr) || `codex завершился с кодом ${run.code}`;
+        const said = run.errors.map(clean).join(' — ') || lastLines(run.stderr) || L(`codex завершился с кодом ${run.code}`, `codex exited with code ${run.code}`);
         if (LOGIN_HINT.test(said) || LOGIN_HINT.test(run.stderr)) {
-          throw new ProviderError(`Codex не вошёл в ChatGPT: войдите в Codex в приложении ChatGPT или в Терминале командой «${bin} login». (${said})`);
+          throw new ProviderError(L(`Codex не вошёл в ChatGPT: войдите в Codex в приложении ChatGPT или в Терминале командой «${bin} login». (${said})`, `Codex is not signed in to ChatGPT: sign in to Codex in the ChatGPT app or in Terminal with “${bin} login”. (${said})`));
         }
-        throw new ProviderError(`ChatGPT не ответил: ${said}`, { retryable: true });
+        throw new ProviderError(L(`ChatGPT не ответил: ${said}`, `ChatGPT did not respond: ${said}`), { retryable: true });
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

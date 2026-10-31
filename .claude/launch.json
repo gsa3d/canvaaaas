@@ -14,6 +14,19 @@
       "port": 5173
     },
     {
+      "name": "canvaaaas-mock-en",
+      "runtimeExecutable": "/usr/bin/env",
+      "runtimeArgs": [
+        "CANVAAAAS_PROVIDER=mock",
+        "CANVAAAAS_LANG=en",
+        "CANVAAAAS_OPEN=work/step1/big.png",
+        "npm",
+        "run",
+        "dev"
+      ],
+      "port": 5173
+    },
+    {
       "name": "canvaaaas-start",
       "runtimeExecutable": "/usr/bin/env",
       "runtimeArgs": [

@@ -5,6 +5,7 @@ import sharp from 'sharp';
 import type { GenerateRequest, InputImage, Size } from '../providers/types.ts';
 import { chooseImageSize, parseRatio, type ModelOutputs } from './frame.ts';
 import { highlight, MASK_THRESHOLD } from './mask.ts';
+import { L } from '../shared/i18n.ts';
 
 /** Поля, которыми кусок дополняется до пропорций модели: серые, чтобы модель не приняла их за продолжение рисунка */
 const PAD = 128;
@@ -56,7 +57,7 @@ export async function objectMaskRequest(rgb: Uint8Array, seen: Uint8Array, width
     const frame = width / height < r ? { width: Math.round(height * r), height } : { width, height: Math.round(width / r) };
     if (!best || frame.width * frame.height < best.frame.width * best.frame.height) best = { aspectRatio, frame };
   }
-  if (!best) throw new Error('У модели нет ни одной пропорции');
+  if (!best) throw new Error(L('У модели нет ни одной пропорции', 'The model has no aspect ratios'));
   const { aspectRatio, frame } = best;
   const at = { x: Math.floor((frame.width - width) / 2), y: Math.floor((frame.height - height) / 2) };
   const padded = frame.width !== width || frame.height !== height;
@@ -146,7 +147,7 @@ export function alignMask(mask: Uint8Array, rgb: Uint8Array, width: number, heig
     return out;
   };
   const { dx, dy } = best(border);
-  if (Math.abs(dx) === reach || Math.abs(dy) === reach) throw new Error('Модель сдвинула картинку, и маска не легла на рисунок: попробуйте ещё раз');
+  if (Math.abs(dx) === reach || Math.abs(dy) === reach) throw new Error(L('Модель сдвинула картинку, и маска не легла на рисунок: попробуйте ещё раз', 'The model shifted the image and the mask does not fit the drawing: try again'));
   // Половины края по обе стороны от его середины: каждой — свой сдвиг
   let cx = 0;
   let cy = 0;
@@ -181,7 +182,7 @@ export function alignMask(mask: Uint8Array, rgb: Uint8Array, width: number, heig
     stretched(border.filter((i) => column(i) < cx), border.filter((i) => column(i) >= cx), 'dx', column) ||
     stretched(border.filter((i) => row(i) < cy), border.filter((i) => row(i) >= cy), 'dy', row)
   ) {
-    throw new Error('Модель растянула картинку, и маска не легла на рисунок: попробуйте ещё раз');
+    throw new Error(L('Модель растянула картинку, и маска не легла на рисунок: попробуйте ещё раз', 'The model stretched the image and the mask does not fit the drawing: try again'));
   }
   if (!dx && !dy) return { mask, dx, dy };
   const out = new Uint8Array(n);

@@ -10,8 +10,12 @@ import { chatgptCodex } from '../providers/chatgpt-codex.ts';
 import { laozhangGemini, type GeminiModel } from '../providers/laozhang-gemini.ts';
 import { mockProvider } from '../providers/mock.ts';
 import type { ImageProvider } from '../providers/types.ts';
+import { L, setLang } from '../shared/i18n.ts';
+import { systemLang } from '../core/system-lang.ts';
 
-const HELP = `Правка области большой картинки через Nano Banana или ChatGPT Images.
+setLang(systemLang());
+
+const HELP = L(`Правка области большой картинки через Nano Banana или ChatGPT Images.
 
   --image <файл>        исходная картинка (обязательно)
   --mask <файл>         маска того же размера: белое — перерисовать (обязательно)
@@ -30,7 +34,26 @@ const HELP = `Правка области большой картинки чер
                         laozhang — Nano Banana по ключу (по умолчанию); chatgpt — ChatGPT Images
                         по подписке через Codex CLI, вошедший в ChatGPT; mock — без сети, для проверки
   --dry-run             только посчитать кусок и сохранить то, что уйдёт в модель
-`;
+`, `Edit a region of a large image with Nano Banana or ChatGPT Images.
+
+  --image <file>        source image (required)
+  --mask <file>         mask of the same size: white = redraw (required)
+  --prompt <text>       what to do with the region (required)
+  --out <file.png>      where to save the result (required)
+  --style <text>        document style
+  --variants <N>        number of variants (default 2)
+  --model flash|pro     Nano Banana 2 or Nano Banana Pro (default flash)
+  --size auto|1K|2K|4K  Nano Banana output resolution (default auto); ChatGPT picks its own
+  --context <ratio>     context margin around the selection (default 0.3)
+  --context-min <px>    minimum context margin (default 128)
+  --feather <px>        feather inside the mask (default 24)
+  --guide pair|overlay|blank  how to show the region to the model (default pair)
+  --work <dir>          where to put intermediate files (default <out>.work)
+  --provider laozhang|chatgpt|mock
+                        laozhang — Nano Banana with an API key (default); chatgpt — ChatGPT Images
+                        on your ChatGPT subscription via a signed-in Codex CLI; mock — offline, for testing
+  --dry-run             only compute the crop and save what would be sent to the model
+`);
 
 function fail(message: string): never {
   console.error(message);
@@ -62,18 +85,18 @@ async function main(): Promise<void> {
     console.log(HELP);
     return;
   }
-  if (!a.image || !a.mask || !a.prompt || !a.out) fail(`Не хватает аргументов.\n\n${HELP}`);
-  if (a.model !== 'flash' && a.model !== 'pro') fail('--model: flash или pro');
-  if (!['pair', 'overlay', 'blank'].includes(a.guide)) fail('--guide: pair, overlay или blank');
+  if (!a.image || !a.mask || !a.prompt || !a.out) fail(L(`Не хватает аргументов.\n\n${HELP}`, `Not enough arguments.\n\n${HELP}`));
+  if (a.model !== 'flash' && a.model !== 'pro') fail(L('--model: flash или pro', '--model: flash or pro'));
+  if (!['pair', 'overlay', 'blank'].includes(a.guide)) fail(L('--guide: pair, overlay или blank', '--guide: pair, overlay or blank'));
   const variants = Number(a.variants);
-  if (!Number.isInteger(variants) || variants < 1 || variants > 8) fail('--variants: от 1 до 8');
+  if (!Number.isInteger(variants) || variants < 1 || variants > 8) fail(L('--variants: от 1 до 8', '--variants: 1 to 8'));
 
   let provider: ImageProvider;
   if (a.provider === 'mock') provider = mockProvider();
   else if (a.provider === 'laozhang')
     provider = withLedger(laozhangGemini({ model: a.model as GeminiModel, apiKey: getLaozhangKey }), 'edit-region');
   else if (a.provider === 'chatgpt') provider = withLedger(chatgptCodex(), 'edit-region');
-  else fail('--provider: laozhang, chatgpt или mock');
+  else fail(L('--provider: laozhang, chatgpt или mock', '--provider: laozhang, chatgpt or mock'));
 
   const outExt = extname(a.out) || '.png';
   const outBase = join(dirname(a.out), basename(a.out, outExt));
@@ -94,17 +117,17 @@ async function main(): Promise<void> {
     guide: a.guide as Guide,
   });
   const { rect } = prep.frame;
-  console.log(`Холст ${prep.canvas.width}×${prep.canvas.height}, выделение ${prep.bbox.width}×${prep.bbox.height} в (${prep.bbox.x}, ${prep.bbox.y})`);
+  console.log(L(`Холст ${prep.canvas.width}×${prep.canvas.height}, выделение ${prep.bbox.width}×${prep.bbox.height} в (${prep.bbox.x}, ${prep.bbox.y})`, `Canvas ${prep.canvas.width}×${prep.canvas.height}, selection ${prep.bbox.width}×${prep.bbox.height} at (${prep.bbox.x}, ${prep.bbox.y})`));
   console.log(
-    `Кусок ${rect.width}×${rect.height} в (${rect.x}, ${rect.y}), пропорции ${prep.frame.aspectRatio}, ` +
-      `модель ${provider.model} отдаст ${prep.modelSize.width}×${prep.modelSize.height} (${prep.imageSize}), масштаб ×${prep.scale.toFixed(2)}`,
+    L(`Кусок ${rect.width}×${rect.height} в (${rect.x}, ${rect.y}), пропорции ${prep.frame.aspectRatio}, `, `Crop ${rect.width}×${rect.height} at (${rect.x}, ${rect.y}), aspect ${prep.frame.aspectRatio}, `) +
+      L(`модель ${provider.model} отдаст ${prep.modelSize.width}×${prep.modelSize.height} (${prep.imageSize}), масштаб ×${prep.scale.toFixed(2)}`, `model ${provider.model} returns ${prep.modelSize.width}×${prep.modelSize.height} (${prep.imageSize}), scale ×${prep.scale.toFixed(2)}`),
   );
   for (const w of prep.warnings) console.log(`⚠ ${w}`);
 
   await writeFile(join(workDir, 'prompt.txt'), prep.prompt);
   await Promise.all(prep.images.map((img, i) => writeFile(join(workDir, `input-${i + 1}.jpg`), img.data)));
   if (a['dry-run']) {
-    console.log(`Dry run: в модель ушло бы ${prep.images.length} картинки, они и промпт — в ${workDir}`);
+    console.log(L(`Dry run: в модель ушло бы ${prep.images.length} картинки, они и промпт — в ${workDir}`, `Dry run: ${prep.images.length} images would go to the model; they and the prompt are in ${workDir}`));
     return;
   }
 
@@ -122,9 +145,9 @@ async function main(): Promise<void> {
     await writeFile(join(workDir, `patch-v${o.index + 1}.png`), o.patch);
     const s = o.stats;
     console.log(
-      `Вариант ${o.index + 1} → ${name}: ответ ${s.modelOutput.width}×${s.modelOutput.height} за ${(o.generated.elapsedMs / 1000).toFixed(1)} с; ` +
-        `внутри маски изменено ${s.insideChangedPct.toFixed(1)}%, вне маски ${s.outsideChangedPct.toFixed(1)}% пикселей (MAE ${s.outsideMae.toFixed(1)}, PSNR ${s.outsidePsnr.toFixed(1)} дБ), ` +
-        `сдвиг ${s.shift.dx}, ${s.shift.dy} px`,
+      L(`Вариант ${o.index + 1} → ${name}: ответ ${s.modelOutput.width}×${s.modelOutput.height} за ${(o.generated.elapsedMs / 1000).toFixed(1)} с; `, `Variant ${o.index + 1} → ${name}: output ${s.modelOutput.width}×${s.modelOutput.height} in ${(o.generated.elapsedMs / 1000).toFixed(1)} s; `) +
+        L(`внутри маски изменено ${s.insideChangedPct.toFixed(1)}%, вне маски ${s.outsideChangedPct.toFixed(1)}% пикселей (MAE ${s.outsideMae.toFixed(1)}, PSNR ${s.outsidePsnr.toFixed(1)} дБ), `, `changed ${s.insideChangedPct.toFixed(1)}% inside the mask, ${s.outsideChangedPct.toFixed(1)}% of pixels outside (MAE ${s.outsideMae.toFixed(1)}, PSNR ${s.outsidePsnr.toFixed(1)} dB), `) +
+        L(`сдвиг ${s.shift.dx}, ${s.shift.dy} px`, `shift ${s.shift.dx}, ${s.shift.dy} px`),
     );
     summary.push({ variant: o.index + 1, file: name, elapsedMs: o.generated.elapsedMs, text: o.generated.text, patchRect: o.patchRect, ...s });
   }
@@ -155,7 +178,7 @@ async function main(): Promise<void> {
   if (a.provider !== 'mock') {
     const today = new Date().toISOString().slice(0, 10);
     const n = (await readLedger()).filter((e) => e.at.startsWith(today)).length;
-    console.log(`Генераций сегодня: ${n}`);
+    console.log(L(`Генераций сегодня: ${n}`, `Generations today: ${n}`));
   }
   if (outcomes.some((o) => !o.ok)) process.exitCode = 1;
 }

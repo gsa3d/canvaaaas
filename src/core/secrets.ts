@@ -6,6 +6,7 @@ import { execFile, spawn } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { promisify } from 'node:util';
+import { L } from '../shared/i18n.ts';
 
 const execFileAsync = promisify(execFile);
 const SECURITY = '/usr/bin/security';
@@ -22,7 +23,7 @@ export interface KeyStore {
 
 export function validateKey(raw: string): string {
   const key = raw.trim();
-  if (key.length < 10 || key.length > 400 || /\s/.test(key)) throw new Error('Это не похоже на ключ: без пробелов, от 10 символов');
+  if (key.length < 10 || key.length > 400 || /\s/.test(key)) throw new Error(L('Это не похоже на ключ: без пробелов, от 10 символов', 'This does not look like a key: no spaces, at least 10 characters'));
   return key;
 }
 
@@ -44,7 +45,7 @@ export function keychainStore(service = KEYCHAIN_SERVICE): KeyStore {
           stdio: ['pipe', 'ignore', 'ignore'],
         });
         child.on('error', reject);
-        child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error('Не удалось сохранить ключ в Связку ключей'))));
+        child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(L('Не удалось сохранить ключ в Связку ключей', 'Could not save the key to the Keychain')))));
         child.stdin.end(`${key}\n${key}\n`);
       });
     },
@@ -73,7 +74,7 @@ export function encryptedFileStore(file: string, crypto: Encryptor): KeyStore {
     },
     async set(raw) {
       const key = validateKey(raw);
-      if (!crypto.available()) throw new Error('Система не даёт зашифровать ключ на этом компьютере');
+      if (!crypto.available()) throw new Error(L('Система не даёт зашифровать ключ на этом компьютере', 'The system cannot encrypt the key on this computer'));
       await mkdir(dirname(file), { recursive: true });
       await writeFile(file, crypto.encrypt(key), { mode: 0o600 });
     },
@@ -88,7 +89,7 @@ export function envOnlyStore(): KeyStore {
   return {
     get: async () => null,
     set: async () => {
-      throw new Error('Здесь ключ задаётся переменной окружения LAOZHANG_API_KEY');
+      throw new Error(L('Здесь ключ задаётся переменной окружения LAOZHANG_API_KEY', 'Here the key is set by the LAOZHANG_API_KEY environment variable'));
     },
     clear: async () => undefined,
   };
@@ -114,7 +115,7 @@ export async function getLaozhangKey(): Promise<string> {
   if (key) return key;
   throw new Error(
     process.platform === 'darwin'
-      ? `Нет ключа laozhang.ai. Добавьте его в приложении или командой: security add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w`
-      : 'Нет ключа laozhang.ai. Задайте переменную окружения LAOZHANG_API_KEY',
+      ? L(`Нет ключа laozhang.ai. Добавьте его в приложении или командой: security add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w`, `No laozhang.ai key. Add it in the app or with: security add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w`)
+      : L('Нет ключа laozhang.ai. Задайте переменную окружения LAOZHANG_API_KEY', 'No laozhang.ai key. Set the LAOZHANG_API_KEY environment variable'),
   );
 }

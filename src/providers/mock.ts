@@ -4,6 +4,7 @@
 // mask: маска «объекта» — того, что на первой картинке тёмное: белым, остальное чёрным (как «Маска по объекту»).
 import sharp from 'sharp';
 import type { GenerateRequest, GenerateResult, ImageProvider, Size } from './types.ts';
+import { L } from '../shared/i18n.ts';
 
 export interface MockProvider extends ImageProvider {
   readonly calls: GenerateRequest[];
@@ -37,7 +38,7 @@ export function mockProvider(opts: MockOptions = {}): MockProvider {
     outputSize(aspectRatio: string, imageSize: string): Size {
       const s = sizes[aspectRatio];
       const f = factor[imageSize];
-      if (!s || !f) throw new Error(`mock: нет размера ${aspectRatio} ${imageSize}`);
+      if (!s || !f) throw new Error(L(`mock: нет размера ${aspectRatio} ${imageSize}`, `mock: no size ${aspectRatio} ${imageSize}`));
       return { width: s.width * f, height: s.height * f };
     },
 
@@ -45,10 +46,10 @@ export function mockProvider(opts: MockOptions = {}): MockProvider {
       calls.push(req);
       const started = Date.now();
       const input = req.images[0];
-      if (!input) throw new Error('mock: нет входной картинки');
+      if (!input) throw new Error(L('mock: нет входной картинки', 'mock: no input image'));
       const { width, height } = this.outputSize(req.aspectRatio, req.imageSize);
       if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
-      if (req.signal?.aborted) throw new Error('Генерация отменена');
+      if (req.signal?.aborted) throw new Error(L('Генерация отменена', 'Generation canceled'));
 
       let image: Buffer;
       if (opts.mode === 'blob') {

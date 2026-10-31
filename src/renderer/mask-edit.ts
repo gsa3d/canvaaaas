@@ -5,6 +5,7 @@
 // показ: пиксели холста считает сервер.
 import { featherAlpha, MASK_THRESHOLD } from '../core/mask.ts';
 import { API_HEADER, type MaskEditResult, type MaskShape, type RectDto } from '../shared/api.ts';
+import { L } from '../shared/i18n.ts';
 
 export interface MaskEditView {
   kind: 'layer' | 'job';
@@ -79,7 +80,7 @@ async function fetchImage(url: string): Promise<{ bitmap: ImageBitmap; version: 
   const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `Ошибка ${res.status}`);
+    throw new Error(body?.error ?? L(`Ошибка ${res.status}`, `Error ${res.status}`));
   }
   const bitmap = await createImageBitmap(await res.blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
   return { bitmap, version: Number(res.headers.get(`${API_HEADER}-version`)) };
@@ -181,7 +182,7 @@ export class MaskPreview {
       want.layer ? fetchImage(v.layer) : null,
       want.mask ? fetchImage(v.mask) : null,
     ]).catch((err: unknown) => {
-      console.warn('Превью маски:', err);
+      console.warn(L('Превью маски:', 'Mask preview:'), err);
       this.failed = true;
       return null;
     });

@@ -15,6 +15,7 @@ import { encryptedFileStore, keychainStore, withEnv } from '../core/secrets.ts';
 import { COMMAND_EVENT, type AppCommand } from '../shared/api.ts';
 import { startServer } from '../server/app.ts';
 import { Session, type Host } from '../server/session.ts';
+import { L, lang, langOf } from '../shared/i18n.ts';
 
 // Самопроверка — со своим профилем: так она идёт и рядом с открытым canvaaaas и не будит его окно
 if (process.argv.includes('--smoke')) app.setPath('userData', join(tmpdir(), `canvaaaas-smoke-${process.pid}`));
@@ -35,7 +36,7 @@ function fileArg(argv: string[]): string | undefined {
   return argv.slice(1).find((a) => !a.startsWith('-') && (isProjectPath(a) || formatOf(a)) && existsSync(a));
 }
 
-// Меню по-русски. Пункты шлют команду в окно; их сочетания клавиш только показываются
+// Меню на языке интерфейса. Пункты шлют команду в окно; их сочетания клавиш только показываются
 // (registerAccelerator: false), а нажатия обрабатывает интерфейс — так нигде нет двойного срабатывания.
 // «Отменить» и «Повторить» зарегистрированы по-настоящему: на macOS без них не работает отмена в полях ввода,
 // а холст, когда фокус не в поле, перехватывает эти клавиши раньше меню.
@@ -52,7 +53,7 @@ function buildMenu(win: BrowserWindow, session: Session): void {
     registerAccelerator: false,
     click: () => send(command),
   });
-  const settings = item('Настройки…', 'settings', 'CmdOrCtrl+,');
+  const settings = item(L('Настройки…', 'Settings…'), 'settings', 'CmdOrCtrl+,');
   const recent = session.recentFiles();
   const hasDoc = session.doc !== null;
   const template: MenuItemConstructorOptions[] = [
@@ -61,25 +62,25 @@ function buildMenu(win: BrowserWindow, session: Session): void {
           {
             label: 'canvaaaas',
             submenu: [
-              { role: 'about', label: 'О canvaaaas' },
+              { role: 'about', label: L('О canvaaaas', 'About canvaaaas') },
               { type: 'separator' },
               settings,
               { type: 'separator' },
-              { role: 'hide', label: 'Скрыть canvaaaas' },
-              { role: 'hideOthers', label: 'Скрыть остальные' },
-              { role: 'unhide', label: 'Показать все' },
+              { role: 'hide', label: L('Скрыть canvaaaas', 'Hide canvaaaas') },
+              { role: 'hideOthers', label: L('Скрыть остальные', 'Hide Others') },
+              { role: 'unhide', label: L('Показать все', 'Show All') },
               { type: 'separator' },
-              { role: 'quit', label: 'Завершить canvaaaas' },
+              { role: 'quit', label: L('Завершить canvaaaas', 'Quit canvaaaas') },
             ],
           } satisfies MenuItemConstructorOptions,
         ]
       : []),
     {
-      label: 'Файл',
+      label: L('Файл', 'File'),
       submenu: [
-        item('Открыть…', 'open', 'CmdOrCtrl+O'),
+        item(L('Открыть…', 'Open…'), 'open', 'CmdOrCtrl+O'),
         {
-          label: 'Открыть недавние',
+          label: L('Открыть недавние', 'Open Recent'),
           submenu: [
             ...(recent.length
               ? recent.map((e) => ({
@@ -88,67 +89,67 @@ function buildMenu(win: BrowserWindow, session: Session): void {
                   toolTip: e.path,
                   click: () => send(`open-recent:${e.id}`),
                 }))
-              : [{ label: 'Пока пусто', enabled: false }]),
+              : [{ label: L('Пока пусто', 'Nothing yet'), enabled: false }]),
             { type: 'separator' },
-            { label: 'Очистить список', enabled: recent.length > 0, click: () => void session.clearRecent() },
+            { label: L('Очистить список', 'Clear Menu'), enabled: recent.length > 0, click: () => void session.clearRecent() },
           ],
         },
-        item('Новый холст…', 'new', 'CmdOrCtrl+N'),
+        item(L('Новый холст…', 'New Canvas…'), 'new', 'CmdOrCtrl+N'),
         { type: 'separator' },
-        { ...item('Сохранить', 'save', 'CmdOrCtrl+S'), enabled: hasDoc },
-        { ...item('Сохранить как…', 'save-as', 'CmdOrCtrl+Shift+S'), enabled: hasDoc },
-        { ...item('Экспортировать картинку…', 'export', 'CmdOrCtrl+Shift+E'), enabled: hasDoc },
-        ...(mac ? [] : [{ type: 'separator' } as const, settings, { type: 'separator' } as const, { role: 'quit', label: 'Выход' } as const]),
+        { ...item(L('Сохранить', 'Save'), 'save', 'CmdOrCtrl+S'), enabled: hasDoc },
+        { ...item(L('Сохранить как…', 'Save As…'), 'save-as', 'CmdOrCtrl+Shift+S'), enabled: hasDoc },
+        { ...item(L('Экспортировать картинку…', 'Export Image…'), 'export', 'CmdOrCtrl+Shift+E'), enabled: hasDoc },
+        ...(mac ? [] : [{ type: 'separator' } as const, settings, { type: 'separator' } as const, { role: 'quit', label: L('Выход', 'Exit') } as const]),
       ],
     },
     {
-      label: 'Правка',
+      label: L('Правка', 'Edit'),
       submenu: [
-        { label: 'Отменить', accelerator: 'CmdOrCtrl+Z', click: () => send('undo') },
-        { label: 'Повторить', accelerator: 'Shift+CmdOrCtrl+Z', click: () => send('redo') },
+        { label: L('Отменить', 'Undo'), accelerator: 'CmdOrCtrl+Z', click: () => send('undo') },
+        { label: L('Повторить', 'Redo'), accelerator: 'Shift+CmdOrCtrl+Z', click: () => send('redo') },
         { type: 'separator' },
-        { role: 'cut', label: 'Вырезать' },
-        { role: 'copy', label: 'Копировать' },
-        { role: 'paste', label: 'Вставить' },
-        { role: 'selectAll', label: 'Выбрать всё' },
+        { role: 'cut', label: L('Вырезать', 'Cut') },
+        { role: 'copy', label: L('Копировать', 'Copy') },
+        { role: 'paste', label: L('Вставить', 'Paste') },
+        { role: 'selectAll', label: L('Выбрать всё', 'Select All') },
         { type: 'separator' },
-        { ...item('Снять выделение', 'deselect', 'CmdOrCtrl+D'), enabled: hasDoc },
+        { ...item(L('Снять выделение', 'Deselect'), 'deselect', 'CmdOrCtrl+D'), enabled: hasDoc },
       ],
     },
     {
-      label: 'Слой',
+      label: L('Слой', 'Layer'),
       submenu: [
-        { ...item('Слой из выделения', 'save-object', 'CmdOrCtrl+J'), enabled: hasDoc },
-        { ...item('Вырезать в слой', 'cut-object', 'CmdOrCtrl+Shift+J'), enabled: hasDoc },
+        { ...item(L('Слой из выделения', 'Layer via Copy'), 'save-object', 'CmdOrCtrl+J'), enabled: hasDoc },
+        { ...item(L('Вырезать в слой', 'Layer via Cut'), 'cut-object', 'CmdOrCtrl+Shift+J'), enabled: hasDoc },
         { type: 'separator' },
-        { ...item('Сгруппировать слои', 'group-layers', 'CmdOrCtrl+G'), enabled: hasDoc },
-        { ...item('Разгруппировать', 'ungroup', 'CmdOrCtrl+Shift+G'), enabled: hasDoc },
+        { ...item(L('Сгруппировать слои', 'Group Layers'), 'group-layers', 'CmdOrCtrl+G'), enabled: hasDoc },
+        { ...item(L('Разгруппировать', 'Ungroup'), 'ungroup', 'CmdOrCtrl+Shift+G'), enabled: hasDoc },
         { type: 'separator' },
-        { ...item('Объединить слои', 'merge-layers', 'CmdOrCtrl+E'), enabled: hasDoc },
-        { ...item('Влить в фон', 'merge-down'), enabled: hasDoc },
+        { ...item(L('Объединить слои', 'Merge Layers'), 'merge-layers', 'CmdOrCtrl+E'), enabled: hasDoc },
+        { ...item(L('Влить в фон', 'Merge into Background'), 'merge-down'), enabled: hasDoc },
         { type: 'separator' },
-        { ...item('Свести все слои', 'flatten'), enabled: hasDoc },
+        { ...item(L('Свести все слои', 'Flatten All Layers'), 'flatten'), enabled: hasDoc },
       ],
     },
     {
-      label: 'Вид',
+      label: L('Вид', 'View'),
       submenu: [
-        item('Вписать в окно', 'zoom-fit', 'CmdOrCtrl+0'),
-        item('Масштаб 100%', 'zoom-100', 'CmdOrCtrl+1'),
-        item('Масштаб 50%', 'zoom-50', 'CmdOrCtrl+2'),
-        item('Увеличить', 'zoom-in', 'CmdOrCtrl+='),
-        item('Уменьшить', 'zoom-out', 'CmdOrCtrl+-'),
+        item(L('Вписать в окно', 'Fit to Window'), 'zoom-fit', 'CmdOrCtrl+0'),
+        item(L('Масштаб 100%', 'Zoom 100%'), 'zoom-100', 'CmdOrCtrl+1'),
+        item(L('Масштаб 50%', 'Zoom 50%'), 'zoom-50', 'CmdOrCtrl+2'),
+        item(L('Увеличить', 'Zoom In'), 'zoom-in', 'CmdOrCtrl+='),
+        item(L('Уменьшить', 'Zoom Out'), 'zoom-out', 'CmdOrCtrl+-'),
         { type: 'separator' },
-        { role: 'togglefullscreen', label: 'Во весь экран' },
-        { role: 'reload', label: 'Перезагрузить окно' },
-        { role: 'toggleDevTools', label: 'Инструменты разработчика' },
+        { role: 'togglefullscreen', label: L('Во весь экран', 'Toggle Full Screen') },
+        { role: 'reload', label: L('Перезагрузить окно', 'Reload Window') },
+        { role: 'toggleDevTools', label: L('Инструменты разработчика', 'Developer Tools') },
       ],
     },
     {
-      label: 'Окно',
+      label: L('Окно', 'Window'),
       submenu: [
-        { role: 'minimize', label: 'Свернуть' },
-        { role: 'zoom', label: 'Изменить размер' },
+        { role: 'minimize', label: L('Свернуть', 'Minimize') },
+        { role: 'zoom', label: L('Изменить размер', 'Zoom') },
       ],
     },
   ];
@@ -171,7 +172,9 @@ app.whenReady().then(async () => {
   const smokeDir = smoke ? await mkdtemp(join(tmpdir(), 'canvaaaas-smoke-')) : null;
   const recent = await RecentFiles.load(smokeDir ?? app.getPath('userData'));
   const prefs = await Prefs.load(smokeDir ?? app.getPath('userData'));
-  const session = new Session(process.env.CANVAAAAS_PROVIDER === 'mock' ? 'mock' : 'laozhang', keys, { recent, prefs });
+  // Язык системы — первый в её списке; CANVAAAAS_LANG=en|ru — проверить другой
+  const systemLang = langOf(process.env.CANVAAAAS_LANG || app.getPreferredSystemLanguages()[0] || app.getLocale());
+  const session = new Session(process.env.CANVAAAAS_PROVIDER === 'mock' ? 'mock' : 'laozhang', keys, { recent, prefs, systemLang });
   await session.init();
   const server = await startServer({ session, port: 0, staticDir: join(app.getAppPath(), 'dist', 'renderer') });
 
@@ -189,7 +192,7 @@ app.whenReady().then(async () => {
   let menuKey = '';
   const sync = () => {
     if (win.isDestroyed()) return;
-    const key = JSON.stringify([session.doc !== null, session.recentFiles().map((e) => e.id)]);
+    const key = JSON.stringify([lang(), session.doc !== null, session.recentFiles().map((e) => e.id)]);
     if (key !== menuKey) {
       menuKey = key;
       buildMenu(win, session);
@@ -214,7 +217,7 @@ app.whenReady().then(async () => {
         closeConfirmed = true;
         win.close();
       })
-      .catch((err: unknown) => dialog.showErrorBox('Не удалось сохранить', err instanceof Error ? err.message : String(err)));
+      .catch((err: unknown) => dialog.showErrorBox(L('Не удалось сохранить', 'Could not save'), err instanceof Error ? err.message : String(err)));
   });
 
   // Окно живёт только на своём сервере; внешние ссылки — в браузере
@@ -265,24 +268,24 @@ app.whenReady().then(async () => {
       patch('b');
       win.close();
       await new Promise((r) => setTimeout(r, 300));
-      close = !win.isDestroyed() && asked.some((m) => m.startsWith('Сохранить изменения'));
+      close = !win.isDestroyed() && asked.some((m) => m.startsWith(L('Сохранить изменения', 'Save changes')));
     } catch (err) {
-      console.log(`SMOKE файлы: ${err instanceof Error ? err.message : String(err)}`);
+      console.log(L(`SMOKE файлы: ${err instanceof Error ? err.message : String(err)}`, `SMOKE files: ${err instanceof Error ? err.message : String(err)}`));
     }
     await rm(smokeDir, { recursive: true, force: true });
     // Выделение объектов: onnxruntime загрузился вместе с сервером; если веса скачаны — где считает кодировщик
-    let sam = 'модель не скачана';
+    let sam = L('модель не скачана', 'model not downloaded');
     if (modelInstalled()) {
       const { encoder, decoder } = modelFiles();
       sam = await Segmenter.load(encoder, decoder).then(
         (s) => s.backend,
-        (err: unknown) => `ошибка: ${err instanceof Error ? err.message : String(err)}`,
+        (err: unknown) => L(`ошибка: ${err instanceof Error ? err.message : String(err)}`, `error: ${err instanceof Error ? err.message : String(err)}`),
       );
     }
     const ok = check.ui && check.api && files && project && close;
     console.log(
-      `SMOKE ${ok ? 'OK' : 'FAIL'}: ${server.url}, интерфейс ${check.ui}, API ${check.api}, открытие и сохранение ${files}, ` +
-        `проект .caaa ${project}, вопрос при закрытии ${close}, ключ ${check.key ? 'есть' : 'нет'}, выделение объектов ${sam}`,
+      L(`SMOKE ${ok ? 'OK' : 'FAIL'}: ${server.url}, интерфейс ${check.ui}, API ${check.api}, открытие и сохранение ${files}, `, `SMOKE ${ok ? 'OK' : 'FAIL'}: ${server.url}, UI ${check.ui}, API ${check.api}, open and save ${files}, `) +
+        L(`проект .caaa ${project}, вопрос при закрытии ${close}, ключ ${check.key ? 'есть' : 'нет'}, выделение объектов ${sam}`, `.caaa project ${project}, prompt on close ${close}, key ${check.key ? 'yes' : 'no'}, object selection ${sam}`),
     );
     app.exit(ok ? 0 : 1);
     return;
@@ -291,7 +294,7 @@ app.whenReady().then(async () => {
   openFile = (path) => {
     if (win.isMinimized()) win.restore();
     win.focus();
-    session.openPath(path).catch((err: unknown) => dialog.showErrorBox('Не удалось открыть файл', err instanceof Error ? err.message : String(err)));
+    session.openPath(path).catch((err: unknown) => dialog.showErrorBox(L('Не удалось открыть файл', 'Could not open the file'), err instanceof Error ? err.message : String(err)));
   };
   const launched = fileArg(process.argv);
   for (const path of [...waitingFiles.splice(0), ...(launched ? [launched] : [])]) openFile(path);
@@ -306,7 +309,7 @@ app.whenReady().then(async () => {
   app.on('will-quit', () => void server.close());
 });
 
-const PROJECT_FILTER = { name: 'Проект canvaaaas', extensions: [PROJECT_EXTENSION] };
+const projectFilter = () => ({ name: L('Проект canvaaaas', 'canvaaaas project'), extensions: [PROJECT_EXTENSION] });
 const IMAGE_FILTERS = [
   { name: 'PNG', extensions: ['png'] },
   { name: 'JPEG', extensions: ['jpg', 'jpeg'] },
@@ -319,14 +322,14 @@ function nativeHost(win: BrowserWindow): Host {
     async chooseOpen() {
       const res = await dialog.showOpenDialog(win, {
         properties: ['openFile'],
-        filters: [{ name: 'Картинки и проекты canvaaaas', extensions: [...IMAGE_EXTENSIONS, PROJECT_EXTENSION] }],
+        filters: [{ name: L('Картинки и проекты canvaaaas', 'Images and canvaaaas projects'), extensions: [...IMAGE_EXTENSIONS, PROJECT_EXTENSION] }],
       });
       return res.canceled ? null : (res.filePaths[0] ?? null);
     },
     async chooseSave(defaultPath, { message, project = true } = {}) {
       // Первым — фильтр расширения из имени по умолчанию: Windows ставит выбранным первый
       const ext = extname(defaultPath).slice(1).toLowerCase();
-      const filters = [...(project ? [PROJECT_FILTER] : []), ...IMAGE_FILTERS].sort(
+      const filters = [...(project ? [projectFilter()] : []), ...IMAGE_FILTERS].sort(
         (a, b) => Number(b.extensions.includes(ext)) - Number(a.extensions.includes(ext)),
       );
       const res = await dialog.showSaveDialog(win, {

@@ -3,6 +3,7 @@
 // Перестановки считаются над деревом: buildTree → правка списков → flatten, поэтому слои группы всегда остаются подряд.
 // Части слоя и заплатки фона под ним (из старых проектов) — не узлы: они ездят со своим слоем.
 import type { DocGroup, DocObject } from './document.ts';
+import { L } from '../shared/i18n.ts';
 
 export type GroupNode = { kind: 'group'; group: DocGroup; children: LayerNode[] };
 /** Слой с тем, что ездит с ним (members — снизу вверх, сам он среди них), или группа; дети — сверху вниз */
@@ -144,10 +145,10 @@ export function moveNode(tree: LayerNode[], id: string, into: string | null, ove
     if (inside(node, into)) return false;
     const g = locate(tree, into);
     const group = g?.list[g.index];
-    if (group?.kind !== 'group') throw new Error('Нет такой группы');
+    if (group?.kind !== 'group') throw new Error(L('Нет такой группы', 'No such group'));
     target = group.children;
   }
-  if (over !== null && !target.some((n) => nodeId(n) === over)) throw new Error('Нет такого слоя в группе');
+  if (over !== null && !target.some((n) => nodeId(n) === over)) throw new Error(L('Нет такого слоя в группе', 'No such layer in the group'));
   // На своём месте: в той же группе прямо над тем же узлом
   const below = from.list[from.index + 1];
   if (from.list === target && (below ? nodeId(below) : null) === over) return false;
@@ -171,7 +172,7 @@ export function groupNodes(tree: LayerNode[], ids: string[], group: DocGroup): G
     }
   };
   collect(tree);
-  if (!picked.length) throw new Error('Нечего группировать: выберите слои');
+  if (!picked.length) throw new Error(L('Нечего группировать: выберите слои', 'Nothing to group: select layers'));
   const top = locate(tree, nodeId(picked[0]!))!;
   // Пустая, пока остальные не убраны с прежних мест: иначе их нашли бы и в ней
   const node: GroupNode = { kind: 'group', group: { ...group, group: top.parent ?? undefined }, children: [] };
@@ -188,7 +189,7 @@ export function groupNodes(tree: LayerNode[], ids: string[], group: DocGroup): G
 export function ungroupNode(tree: LayerNode[], id: string): void {
   const at = locate(tree, id);
   const node = at?.list[at.index];
-  if (node?.kind !== 'group') throw new Error('Нет такой группы');
+  if (node?.kind !== 'group') throw new Error(L('Нет такой группы', 'No such group'));
   at!.list.splice(at!.index, 1, ...node.children);
 }
 

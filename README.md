@@ -1,81 +1,108 @@
 # canvaaaas
 
-Локальный редактор больших иллюстраций по кускам: выделяете область, пишете промпт, и область перерисовывается через Nano Banana (Gemini image, прокси laozhang.ai) или ChatGPT Images по подписке ChatGPT. Всё вне выделения остаётся нетронутым.
+[Русская версия](README.ru.md)
 
-## Приложение
+A desktop editor for large illustrations, one piece at a time. Select an area, describe what should be there, and a generative model redraws just that area. Everything outside the selection stays byte-for-byte untouched.
 
-canvaaaas — обычное приложение: открывается из «Программ», Launchpad или Spotlight, без терминала. Ключ laozhang.ai вводится в самом приложении: «canvaaaas → Настройки…» (⌘,). На macOS он хранится в Связке ключей, на Windows — на этом компьютере в зашифрованном виде; обратно в окно приложения ключ не попадает.
+- **Big images.** 8000×6000 and larger: tiled canvas, all pixel work happens in the app, not in a browser canvas.
+- **Precise edits.** The model sees a crop around your selection, its answer is pasted back through your mask with a soft edge. Models that don't accept masks still edit only what you selected.
+- **Two image models.** Nano Banana 2 and Nano Banana Pro (Gemini image) with a [laozhang.ai](https://laozhang.ai) API key, or ChatGPT Images on your ChatGPT subscription through Codex — no API key.
+- **Layers and versions.** Every result is a version of a layer: switch between them, compare, hide, regroup, merge, edit a layer mask with a brush.
+- **Object selection.** The Wand selects objects with SAM 2.1, which runs locally on your computer.
+- **Director and critic.** Optionally, ChatGPT writes out a detailed task from your words and the picture, and the edit goes in steps: after each, a critic says what to fix.
+- **Sketch and references.** Draw a rough sketch of where things go; add up to three reference images per edit; set a style for the whole document.
 
-Собрать и положить в «Программы» (нужен Node.js 22.18 или новее):
+The interface is in English, or in Russian when your system language is Russian (switch it in Settings).
+
+## Download
+
+Get the latest version on the [Releases](https://github.com/gsa3d/canvaaaas/releases/latest) page.
+
+| System | File |
+| --- | --- |
+| macOS 12 or later, Apple Silicon (M1 and newer) | `canvaaaas-<version>-mac-arm64.dmg` |
+| Windows 10 or 11, 64-bit | `canvaaaas-<version>-windows-x64-setup.exe` |
+
+Intel Macs and Linux are not supported yet.
+
+### macOS
+
+1. Open the `.dmg` and drag **canvaaaas** to **Applications**.
+2. The app is not notarized by Apple, so on the first launch macOS refuses to open it. Either open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to canvaaaas, or run this in Terminal once:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/canvaaaas.app
+   ```
+
+### Windows
+
+Run the installer. It installs canvaaaas for your user only, no administrator rights needed. The installer is not code-signed, so Windows SmartScreen may show *Windows protected your PC*: click **More info → Run anyway**.
+
+## Setup
+
+canvaaaas needs at least one image model. Open **Settings** (⌘, on macOS, Ctrl+, on Windows).
+
+**Nano Banana 2 / Nano Banana Pro.** Create an API key at [laozhang.ai](https://laozhang.ai) and paste it into Settings. The key is stored in the macOS Keychain or, on Windows, encrypted for your user account; it is only ever sent to laozhang.ai. Each generation is billed by laozhang.ai.
+
+**ChatGPT Images.** No key: images are drawn by Codex signed in to your ChatGPT account, and generations count toward your ChatGPT plan limits. Install the [ChatGPT desktop app](https://chatgpt.com/download) (it includes Codex) or [Codex CLI](https://github.com/openai/codex) and sign in (`codex login`). Settings shows where canvaaaas found Codex. The Director and the critic also run through Codex.
+
+**Object selection.** The first time you use the Wand, canvaaaas offers to download the SAM 2.1 model (272 MB, once). It runs on your computer, offline and free.
+
+## How to use
+
+1. **Open** an image (⌘O): PNG, JPEG, WebP, TIFF or a canvaaaas project (`.caaa`). Or create a **New canvas** (⌘N).
+2. **Select** what to change: the Wand (W) picks an object under the click, or use the Rectangle (R), Lasso (L) or Brush (B). Shift adds to the selection, Alt subtracts. The dashed frame shows the crop the model will see.
+3. **Describe the result** in the edit panel — what should be there, not what to fix. Optionally add a **Sketch** (S), **References** (drag, paste or pick up to three images) and a document **Style**.
+4. Pick the model, resolution and number of variants, then **Generate** (⌘↵). The button says where the result will go and how many generations it costs.
+5. Each result becomes a **version** of a layer. Switch versions in the strip under the canvas (← →), hover a version to preview it, press F to zoom to the crop.
+6. Fix the edges: click the mask thumbnail next to a layer to hide or bring back parts with the brush, or use **Mask → By edit** to grow the mask over what the model drew beyond the selection. **Revise task** and **More** generate new versions of the same layer.
+7. **Save** (⌘S). A `.caaa` project keeps all layers and versions. Saving to an image merges what is visible; **Export Image** (⇧⌘E) writes a copy and keeps the project as is.
+
+More options in the edit panel:
+
+- **Director** — ChatGPT first writes out the task, and the edit goes in steps with a critic until it says the result is done.
+- **Object mask** — the model also draws a mask of the new object for every version, so the layer is exactly the object.
+- **From scratch** — the model gets the selected area filled with gray and draws it anew instead of reworking what was there.
+
+Useful keys: ⌘Z / ⇧⌘Z undo and redo, ⌘D deselect, ⌘J layer via copy, ⇧⌘J layer via cut, ⌘G group, ⌘E merge, H or Space to pan, ⌘0 fit to window, ⌘1 100%, hold `\` to see the original picture.
+
+### Prompt tips
+
+- Describe the result, not the problem: not "fix the broken rails", but "the rails on the bridge continue the track from the left, without a gap, with the same sleepers".
+- Select only the place that should change, with a small margin. When the crop is much larger than the model's output, it loses detail — the resolution hint in the edit panel warns about it.
+- For edits that need reasoning (perspective, matching details), try Nano Banana Pro: it is slower and pricier, but thinks better.
+
+### Saving
+
+The canvas inside canvaaaas is 8-bit sRGB without transparency. If the original file is different — has transparency, 16 bits per channel, a Display P3 or Adobe RGB profile, CMYK, or is a TIFF that may hold Photoshop layers — **Save** will not overwrite it and asks for a new file name instead. PNG and WebP are overwritten losslessly; JPEG is re-encoded at quality 95 on every save, so for long work keep a PNG or `.caaa` copy.
+
+## Privacy and costs
+
+- canvaaaas runs on your computer. Its built-in server listens only on 127.0.0.1.
+- Only the crop around your selection (with your sketch and references) is sent to the model you chose: laozhang.ai for Nano Banana, OpenAI through Codex for ChatGPT Images.
+- Every generation costs money or subscription quota. The counter in the top bar shows generations for this session and today; all calls are logged to `generations.jsonl` in the app data folder (`~/Library/Application Support/canvaaaas` on macOS, `%APPDATA%\canvaaaas` on Windows).
+
+## Build from source
+
+You need [Node.js](https://nodejs.org) 22.18 or newer.
 
 ```bash
 npm install
 ```
 
 ```bash
-npm run install:mac
-```
-
-Подписи разработчика Apple нет, поэтому пакет подписывается «на месте» (ad-hoc). На этом Mac он открывается без предупреждений; на другой Mac его лучше собирать там же.
-
-Установщик для Windows — `npm run app:win`, но собирать его надо на Windows: там подтянутся Windows-версии sharp.
-
-Без установки, из папки проекта:
-
-```bash
 npm start
 ```
 
-## Как работать
+`npm start` builds the app and opens it in Electron. Installers: `npm run dist:mac` (on a Mac with Apple Silicon) and `npm run dist:win` (on Windows, or on a Mac, where it builds in a copy of the project with the Windows versions of the dependencies in `work/win-build`).
 
-1. «Файл → Открыть…» (⌘O) — картинка любого размера (PNG, JPEG, WebP, TIFF) или проект canvaaaas (.caaa); проект открывается и двойным щелчком в Finder. Недавние файлы — на стартовом экране и в «Файл → Открыть недавние». «Новый холст…» (⌘N) — готовые размеры (Full HD, 4K, 8K, квадрат, 8000×6000, A4–A2 на 300 dpi) или свой; ⇄ поворачивает холст.
-2. Выделите область: прямоугольник (R), лассо (L), кисть (B), ластик (E). С Alt прямоугольник и лассо стирают. Рука (H) или зажатый пробел — двигать холст, колесо — масштаб.
-3. Масштаб: ⌘0 — вписать в окно, ⌘1 — 100%, ⌘2 — 50%, ⌘= и ⌘− — вдвое крупнее и мельче. Те же пункты — в меню «Вид» и в списке у процента масштаба вверху.
-4. Опишите, что должно получиться в области, и нажмите «Сгенерировать» (⌘↵). Стиль документа сверху добавляется к каждому запросу.
-5. Референсы (персонаж, предмет, стиль) — до трёх картинок на правку: кнопка «Референс», перетащить картинку на панель «Новая правка» или вставить из буфера обмена (⌘V).
-6. Пока идёт генерация, можно выделять и запускать следующие области: одновременно идут две задачи, остальные ждут.
-7. Готовый вариант показывается поверх области. Варианты переключаются стрелками ‹ › (или ← → на клавиатуре). Если модель почти ничего не изменила, карточка об этом скажет.
-8. Если модель нарисовала объект крупнее выделения и он обрезан, нажмите «Расширить по правке» или «Править маску» и докрасьте маску кистью. Это перевклейка готового ответа, новой генерации не нужно.
-9. «Принять» кладёт правку на холст отдельным слоем, «Отклонить» убирает её. В панели «Слои» глаз скрывает слой, а кнопка маски включает правку его маски: ластик скрывает часть слоя, кисть возвращает. Рядом с размером кисти появляется её мягкость: 0% — жёсткий край, 100% — мазок затухает от середины. [ и ] меняют размер, ⇧[ и ⇧] — мягкость. ⌘Z и ⇧⌘Z отменяют и повторяют.
-10. «Файл → Сохранить» (⌘S). Если в документе есть слои, а открыта обычная картинка, canvaaaas спросит, во что сохранить: в проект .caaa, где слои останутся слоями, или в картинку, где они сольются с холстом. Проект .caaa дальше сохраняется без вопросов, картинка без слоёв — тоже. «Сохранить как…» (⇧⌘S) — новый файл, формат по расширению: .caaa, PNG, JPEG, WebP или TIFF. «Экспортировать картинку…» (⇧⌘E) пишет холст со всеми видимыми слоями в PNG, JPEG, WebP или TIFF, а документ остаётся связан со своим файлом. Точка у имени документа — есть несохранённые изменения; при закрытии окна, выходе из приложения или открытии другого файла canvaaaas предупредит, что они пропадут, и предложит сохранить.
-
-#### Проект .caaa
-
-В проекте лежат исходник, все слои (и скрытые) с масками и стиль документа. После открытия слои можно скрывать и править их маски, как до сохранения; история отмены начинается заново. Первое сохранение большой картинки занимает пару секунд, следующие — доли секунды: исходник не перекодируется.
-
-#### Когда «Сохранить» не перезаписывает файл
-
-Холст внутри canvaaaas — sRGB, 8 бит, без прозрачности. Если исходник другой — есть прозрачность, 16 бит на канал, профиль Display P3 или Adobe RGB, CMYK, TIFF (в нём могут быть слои Photoshop) — перезапись испортила бы и то, что вне правок. Тогда «Сохранить» открывает «Сохранить как» с именем `имя-canvaaaas.png` и объясняет причину; исходник остаётся как был. Дальше «Сохранить» пишет уже в новый файл.
-
-PNG и WebP перезаписываются без потерь: всё вне правок остаётся побайтно тем же. JPEG каждый раз пережимается заново (качество 95), поэтому для долгой работы лучше один раз сохранить копию в PNG. Если файл тем временем изменила другая программа, canvaaaas спросит, перезаписывать ли его.
-
-Ключ laozhang.ai — в «canvaaaas → Настройки…» (⌘,).
-
-### ChatGPT Images по подписке
-
-В списке «Модель» есть ChatGPT Images. Ключ ему не нужен: картинку рисует Codex от имени вашего аккаунта ChatGPT, и генерации идут в счёт лимита подписки, а не по API.
-
-- Нужен Codex, вошедший в ChatGPT. Проще всего — приложение ChatGPT: в нём уже есть Codex, и canvaaaas находит его сам. Подойдёт и отдельный Codex CLI (`codex login`). Где он нашёлся — видно в настройках (⌘,).
-- Разрешение ответа ChatGPT выбирает сам: около 1,6 мегапикселя в пропорциях куска (1254×1254, 1448×1086…), поэтому список «Разрешение» для него не работает. Для больших областей Nano Banana в 2K или 4K детальнее.
-- Одна картинка идёт около минуты; одновременно работают не больше двух запусков Codex, остальные варианты ждут.
-- Каждый запуск — отдельная сессия Codex: она сохраняется в его истории (`~/.codex/sessions`), а картинка — в `~/.codex/generated_images`.
-- Если лимит подписки исчерпан, карточка правки скажет, когда он обновится.
-
-### Как писать промпт
-
-- Описывайте результат, а не проблему: не «исправь нестыковку рельсов», а «рельсы на мосту продолжают колею слева, без разрыва, с теми же шпалами».
-- Выделяйте только то место, которое надо поменять, с небольшим запасом. Кусок крупнее ответа модели (об этом предупреждает карточка) теряет детализацию, а модель хуже понимает, на чём сосредоточиться.
-- Для правок, где модели надо «подумать» (исправить перспективу, согласовать детали), попробуйте Nano Banana Pro: она медленнее и дороже, но рассуждает лучше.
-
-Каждая генерация платная: счётчик вверху показывает, сколько их было за сеанс и за сегодня, а журнал `generations.jsonl` лежит в папке данных приложения.
-
-## Разработка
+Development in the browser, with a mock model that costs nothing:
 
 ```bash
-npm run dev
+CANVAAAAS_PROVIDER=mock npm run dev
 ```
 
-Сервер и интерфейс на http://127.0.0.1:5173. Интерфейс перезагружается при правках сам, сервер — нет: после правок в `src/server` и `src/core` перезапустите команду. Переменные окружения: `CANVAAAAS_PROVIDER=mock` — подставная модель вместо платной, `CANVAAAAS_OPEN=путь/к/картинке` — сразу открыть картинку.
+Then open http://127.0.0.1:5173. `CANVAAAAS_LANG=en` or `ru` overrides the system language, `CANVAAAAS_OPEN=path/to/image.png` opens a picture on start.
 
 ```bash
 npm run typecheck
@@ -85,17 +112,16 @@ npm run typecheck
 npm test
 ```
 
-## Правка области из командной строки
+### Command line
 
 ```bash
-npm run edit-region -- --image big.png --mask mask.png --prompt "добавь лодку с красным парусом" --variants 2 --out result.png
+npm run edit-region -- --image big.png --mask mask.png --prompt "add a boat with a red sail" --variants 2 --out result.png
 ```
 
-- `--mask` — PNG того же размера, что и картинка: белое — что менять, чёрное — что оставить.
-- `--style` — общий стиль документа, добавляется к каждому запросу.
-- `--model flash|pro` — Nano Banana 2 (по умолчанию) или Nano Banana Pro.
-- `--provider chatgpt` — ChatGPT Images по подписке через Codex вместо Nano Banana; `--model` и `--size` тогда не нужны.
-- `--size auto|1K|2K|4K` — разрешение ответа модели. `auto` берёт наименьшее, при котором кусок не придётся уменьшать, но не больше 2K. 4K генерируется 4–5 минут, поэтому его нужно указывать явно.
-- `--context 0.3`, `--context-min 128` — запас контекста вокруг выделения: доля от размера выделения и минимум в пикселях.
-- `--feather 24` — ширина растушёвки внутрь маски, в пикселях.
-- `--dry-run` — посчитать кусок и сохранить то, что уйдёт в модель, без генерации.
+The mask is a PNG of the same size: white is what to redraw, black is what to keep. Run it without arguments for all options.
+
+## License
+
+[MIT](LICENSE). canvaaaas is not affiliated with Google, OpenAI or laozhang.ai.
+
+It is built with [Electron](https://www.electronjs.org), [sharp](https://sharp.pixelplumbing.com) and libvips, [ONNX Runtime](https://onnxruntime.ai), [OpenSeadragon](https://openseadragon.github.io), [Preact](https://preactjs.com), [Tabler Icons](https://tabler.io/icons) and the [Golos Text](https://github.com/googlefonts/golos-text) font. Object selection uses [SAM 2.1](https://github.com/facebookresearch/sam2) by Meta (Apache 2.0) in the ONNX build by [AnyLabeling](https://huggingface.co/vietanhdev/segment-anything-2.1-onnx-models).

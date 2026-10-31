@@ -6,6 +6,7 @@
 import sharp from 'sharp';
 import { Worker } from 'node:worker_threads';
 import type { Rect } from './frame.ts';
+import { L, lang } from '../shared/i18n.ts';
 
 const SIZE = 1024;
 /** Сторона масок декодера: логиты на сетке 256×256 поверх участка */
@@ -88,7 +89,8 @@ export class Segmenter {
 
   /** Кодировщик — на WebGPU, если он есть (втрое быстрее, маски те же), иначе на процессоре; декодер всегда на процессоре */
   static async load(encoder: string, decoder: string, prefer: Backend = 'webgpu'): Promise<Segmenter> {
-    const worker = new Worker(workerUrl());
+    // Язык — для текстов ошибок потока
+    const worker = new Worker(workerUrl(), { workerData: { lang: lang() } });
     const pending: Segmenter['pending'] = new Map();
     const fail = (err: Error) => {
       for (const p of pending.values()) p.reject(err);
@@ -104,7 +106,7 @@ export class Segmenter {
       else p.resolve(reply);
     });
     worker.on('error', (err: unknown) => fail(err instanceof Error ? err : new Error(String(err))));
-    worker.on('exit', (code) => fail(new Error(`Поток выделения объектов завершился (код ${code})`)));
+    worker.on('exit', (code) => fail(new Error(L(`Поток выделения объектов завершился (код ${code})`, `Object selection thread exited (code ${code})`))));
     const s = new Segmenter(worker, pending, prefer);
     try {
       const { backend } = await s.request({ type: 'load', encoder, decoder, prefer });
@@ -153,7 +155,7 @@ export class Segmenter {
     }
     const id = ++this.embeddings;
     await this.serial(() => {
-      if (shouldRun && !shouldRun()) throw new Error('Вид сменился');
+      if (shouldRun && !shouldRun()) throw new Error(L('Вид сменился', 'The view changed'));
       return this.request({ type: 'encode', id, input, size: SIZE }, [input.buffer]);
     });
     return { crop, id };
@@ -167,7 +169,7 @@ export class Segmenter {
       const b = prompt.box;
       pts.push([b.x, b.y, 2], [b.x + b.width, b.y + b.height, 3]);
     }
-    if (!pts.length) throw new Error('Нет подсказки для выделения');
+    if (!pts.length) throw new Error(L('Нет подсказки для выделения', 'No hint for selection'));
     const coords = new Float32Array(pts.length * 2);
     const labels = new Float32Array(pts.length);
     pts.forEach(([x, y, l], i) => {
@@ -183,7 +185,7 @@ export class Segmenter {
       ),
     );
     const [, k, h, w] = out.dims!;
-    if (h !== LOW || w !== LOW) throw new Error(`Декодер вернул маски ${w}×${h}, а не ${LOW}×${LOW}`);
+    if (h !== LOW || w !== LOW) throw new Error(L(`Декодер вернул маски ${w}×${h}, а не ${LOW}×${LOW}`, `Decoder returned ${w}×${h} masks instead of ${LOW}×${LOW}`));
     const data = out.masks!;
     const scores = out.scores!;
     return Array.from({ length: k! }, (_, j) => {

@@ -1,9 +1,12 @@
 // Поток для SAM: onnxruntime-node считает синхронно, и кодировщик на секунды держал бы поток сервера,
 // а в приложении — и главный процесс Electron: не приходили тайлы, окно не отвечало. Здесь лежат сеансы ONNX
 // и признаки последних участков; сервер шлёт сюда готовые тензоры и получает маски. Протокол — в segment.ts.
-import { parentPort } from 'node:worker_threads';
+import { parentPort, workerData } from 'node:worker_threads';
 import ort from 'onnxruntime-node';
 import type { Backend, WorkerReply, WorkerRequest } from './segment.ts';
+import { L, langOf, setLang } from '../shared/i18n.ts';
+
+setLang(langOf((workerData as { lang?: string } | null)?.lang));
 
 /** Признаков участков держим столько: сервер помнит меньше, поэтому нужные ему здесь всегда есть */
 const KEPT = 8;
@@ -15,7 +18,7 @@ const embeddings = new Map<number, { embed: ort.Tensor; f0: ort.Tensor; f1: ort.
 /** Признаки участка id; обращение делает их свежими */
 function embedding(id: number) {
   const e = embeddings.get(id);
-  if (!e) throw new Error('Признаки участка устарели: выделите заново');
+  if (!e) throw new Error(L('Признаки участка устарели: выделите заново', 'Region features are outdated: select again'));
   embeddings.delete(id);
   embeddings.set(id, e);
   return e;
@@ -40,14 +43,14 @@ async function handle(msg: WorkerRequest): Promise<{ reply: WorkerReply; transfe
     case 'load':
       return { reply: { seq: msg.seq, backend: await load(msg.encoder, msg.decoder, msg.prefer) } };
     case 'encode': {
-      if (!enc) throw new Error('Модель не загружена');
+      if (!enc) throw new Error(L('Модель не загружена', 'Model is not loaded'));
       const out = await enc.run({ image: new ort.Tensor('float32', msg.input, [1, 3, msg.size, msg.size]) });
       embeddings.set(msg.id, { embed: out.image_embed!, f0: out.high_res_feats_0!, f1: out.high_res_feats_1! });
       while (embeddings.size > KEPT) embeddings.delete(embeddings.keys().next().value!);
       return { reply: { seq: msg.seq } };
     }
     case 'decode': {
-      if (!dec) throw new Error('Модель не загружена');
+      if (!dec) throw new Error(L('Модель не загружена', 'Model is not loaded'));
       const e = embedding(msg.id);
       const n = msg.labels.length;
       const out = await dec.run({

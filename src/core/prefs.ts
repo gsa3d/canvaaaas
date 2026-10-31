@@ -3,6 +3,7 @@
 import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './image-file.ts';
+import { L } from '../shared/i18n.ts';
 
 /** Настройки — короткие значения формы и инструментов, не данные */
 const MAX_KEYS = 100;
@@ -34,9 +35,9 @@ export class Prefs {
   }
 
   set(key: string, value: unknown): Promise<void> {
-    if (!/^[a-z0-9-]{1,64}$/.test(key)) throw new Error('Нет такой настройки');
-    if (JSON.stringify(value ?? null).length > MAX_VALUE) throw new Error('Слишком длинная настройка');
-    if (!(key in this.values) && Object.keys(this.values).length >= MAX_KEYS) throw new Error('Слишком много настроек');
+    if (!/^[a-z0-9-]{1,64}$/.test(key)) throw new Error(L('Нет такой настройки', 'No such setting'));
+    if (JSON.stringify(value ?? null).length > MAX_VALUE) throw new Error(L('Слишком длинная настройка', 'Setting is too long'));
+    if (!(key in this.values) && Object.keys(this.values).length >= MAX_KEYS) throw new Error(L('Слишком много настроек', 'Too many settings'));
     this.values = { ...this.values, [key]: value ?? null };
     const snapshot = JSON.stringify(this.values, null, 2);
     const next = this.chain.then(async () => {

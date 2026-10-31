@@ -2,6 +2,7 @@
 // (imagegen/ajax.php): Google-формат generateContent, ключ в Authorization: Bearer.
 import { Agent, fetch } from 'undici';
 import { ProviderError, type GenerateRequest, type GenerateResult, type ImageProvider, type Size } from './types.ts';
+import { L } from '../shared/i18n.ts';
 
 export const GEMINI_MODELS = {
   flash: 'gemini-3.1-flash-image-preview', // Nano Banana 2
@@ -61,7 +62,7 @@ export function laozhangGemini(opts: LaozhangGeminiOptions): ImageProvider {
     outputSize(aspectRatio: string, imageSize: string): Size {
       const base = SIZES_1K[aspectRatio];
       const factor = SIZE_FACTOR[imageSize];
-      if (!base || !factor) throw new Error(`Nano Banana не поддерживает ${aspectRatio} ${imageSize}`);
+      if (!base || !factor) throw new Error(L(`Nano Banana не поддерживает ${aspectRatio} ${imageSize}`, `Nano Banana does not support ${aspectRatio} ${imageSize}`));
       return { width: base[0] * factor, height: base[1] * factor };
     },
 
@@ -101,12 +102,12 @@ export function laozhangGemini(opts: LaozhangGeminiOptions): ImageProvider {
           dispatcher,
         });
       } catch (err) {
-        if (req.signal?.aborted) throw new ProviderError('Генерация отменена');
+        if (req.signal?.aborted) throw new ProviderError(L('Генерация отменена', 'Generation canceled'));
         // fetch прячет настоящую причину (сброс соединения, DNS, таймаут) в err.cause
         const cause = err instanceof Error && err.cause instanceof Error ? err.cause : undefined;
         const code = cause && 'code' in cause ? ` ${String(cause.code)}` : '';
         const reason = cause ? `${cause.message}${code}` : err instanceof Error ? err.message : String(err);
-        throw new ProviderError(`Нет связи с laozhang.ai: ${reason}`, { retryable: true });
+        throw new ProviderError(L(`Нет связи с laozhang.ai: ${reason}`, `Cannot reach laozhang.ai: ${reason}`), { retryable: true });
       }
 
       const raw = await res.text();
@@ -126,9 +127,9 @@ export function laozhangGemini(opts: LaozhangGeminiOptions): ImageProvider {
         const why =
           data.error?.message ??
           data.error?.status ??
-          (data.promptFeedback?.blockReason && `запрос заблокирован: ${data.promptFeedback.blockReason}`) ??
-          (candidate?.finishReason && `модель не вернула картинку (finishReason ${candidate.finishReason})`) ??
-          (raw.slice(0, 300) || 'пустой ответ');
+          (data.promptFeedback?.blockReason && L(`запрос заблокирован: ${data.promptFeedback.blockReason}`, `request blocked: ${data.promptFeedback.blockReason}`)) ??
+          (candidate?.finishReason && L(`модель не вернула картинку (finishReason ${candidate.finishReason})`, `the model returned no image (finishReason ${candidate.finishReason})`)) ??
+          (raw.slice(0, 300) || L('пустой ответ', 'empty response'));
         throw new ProviderError(`laozhang.ai, HTTP ${res.status}: ${why}${text ? ` — «${text}»` : ''}`, {
           status: res.status,
           retryable: res.status === 429 || res.status >= 500,

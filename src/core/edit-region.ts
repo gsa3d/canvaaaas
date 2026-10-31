@@ -6,6 +6,7 @@ import type { SketchStroke } from '../shared/api.ts';
 import { AUTO_SIZE_CAP, chooseImageSize, computeFrame, FRAME_CONTEXT, frameScale, intersect, SCALE_WARN, type Frame, type Rect } from './frame.ts';
 import { blankOut, featherAlpha, highlight, insideDistance, maskBBox } from './mask.ts';
 import { drawSketch, sketchTouches } from './sketch.ts';
+import { L } from '../shared/i18n.ts';
 
 /**
  * Как показать модели, что менять:
@@ -224,7 +225,7 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
         .extractChannel(0)
         .raw({ depth: 'uchar' })
         .toBuffer({ resolveWithObject: true });
-  if (maskInfo.channels !== 1) throw new Error('Маска должна быть одним каналом');
+  if (maskInfo.channels !== 1) throw new Error(L('Маска должна быть одним каналом', 'Mask must be single-channel'));
   const maskRect: Rect = {
     x: isRaw(opts.mask) ? (opts.mask.x ?? 0) : 0,
     y: isRaw(opts.mask) ? (opts.mask.y ?? 0) : 0,
@@ -234,16 +235,16 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
   const partial = maskRect.x !== 0 || maskRect.y !== 0 || maskRect.width !== canvas.width || maskRect.height !== canvas.height;
   if (partial && isRaw(opts.mask) && opts.mask.x !== undefined) {
     if (maskRect.x < 0 || maskRect.y < 0 || maskRect.x + maskRect.width > canvas.width || maskRect.y + maskRect.height > canvas.height) {
-      throw new Error('Участок маски выходит за холст');
+      throw new Error(L('Участок маски выходит за холст', 'Mask region extends beyond the canvas'));
     }
   } else if (partial) {
     throw new Error(
-      `Маска ${maskInfo.width}×${maskInfo.height} не совпадает по размеру с картинкой ${canvas.width}×${canvas.height}`,
+      L(`Маска ${maskInfo.width}×${maskInfo.height} не совпадает по размеру с картинкой ${canvas.width}×${canvas.height}`, `Mask ${maskInfo.width}×${maskInfo.height} does not match the image size ${canvas.width}×${canvas.height}`),
     );
   }
   const mask = new Uint8Array(maskRaw.buffer, maskRaw.byteOffset, maskRaw.length);
   const localBox = maskBBox(mask, maskRect.width, maskRect.height);
-  if (!localBox) throw new Error('Маска пустая: нечего перерисовывать');
+  if (!localBox) throw new Error(L('Маска пустая: нечего перерисовывать', 'Mask is empty: nothing to redraw'));
   const bbox = { ...localBox, x: localBox.x + maskRect.x, y: localBox.y + maskRect.y };
 
   const frame = computeFrame(bbox, canvas, { context, contextMin, aspectRatios: provider.aspectRatios });
@@ -261,15 +262,15 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
   const warnings: string[] = [];
   // Что с этим делать, интерфейс подсказывает ещё до генерации — здесь только факт
   if (scale > SCALE_WARN) {
-    warnings.push(`Кусок ${rect.width}×${rect.height} больше ответа ${modelSize.width}×${modelSize.height} в ${scale.toFixed(1).replace('.', ',')} раза — детализация упадёт`);
+    warnings.push(L(`Кусок ${rect.width}×${rect.height} больше ответа ${modelSize.width}×${modelSize.height} в ${scale.toFixed(1).replace('.', ',')} раза — детализация упадёт`, `Crop ${rect.width}×${rect.height} is ${scale.toFixed(1)}× larger than the output ${modelSize.width}×${modelSize.height} — detail will drop`));
   }
   if (inside.width < rect.width || inside.height < rect.height) {
-    warnings.push('Кусок выходит за край холста: недостающее достроено отражением');
+    warnings.push(L('Кусок выходит за край холста: недостающее достроено отражением', 'Crop extends beyond the canvas edge: the missing part is filled by mirroring'));
   }
 
   // Исходный кусок; поля за холстом — отражение
   const insideRaw = opts.crop ? opts.crop(inside) : copyRect(baseRaw, canvas.width, inside, channels);
-  if (insideRaw.length !== inside.width * inside.height * channels) throw new Error('Кусок не того размера');
+  if (insideRaw.length !== inside.width * inside.height * channels) throw new Error(L('Кусок не того размера', 'Crop has the wrong size'));
   let frameImg = sharp(insideRaw, { raw: { width: inside.width, height: inside.height, channels } });
   if (inside.width < rect.width || inside.height < rect.height) {
     frameImg = sharp(
@@ -300,7 +301,7 @@ export async function prepareEdit(opts: EditRegionOptions): Promise<PreparedEdit
   const references = opts.references ?? [];
   let sketch = opts.sketch ?? [];
   if (sketch.length && !sketchTouches(sketch, rect)) {
-    warnings.push('Набросок не задевает кусок — модель его не увидит');
+    warnings.push(L('Набросок не задевает кусок — модель его не увидит', 'Sketch does not touch the crop — the model will not see it'));
     sketch = [];
   }
   const images = await guideImages(frameRgb, insideMask, frame, modelSize, guide, sketch);
@@ -720,7 +721,7 @@ export async function runVariants(
   const worker = async () => {
     while (next < count) {
       const index = next++;
-      opts.onProgress?.(`Вариант ${index + 1}: генерация…`);
+      opts.onProgress?.(L(`Вариант ${index + 1}: генерация…`, `Variant ${index + 1}: generating…`));
       try {
         const generated = await prep.provider.generate({
           prompt: prep.prompt,
@@ -729,11 +730,11 @@ export async function runVariants(
           imageSize: prep.imageSize,
           signal: opts.signal,
         });
-        opts.onProgress?.(`Вариант ${index + 1}: готов за ${(generated.elapsedMs / 1000).toFixed(1)} с, вклеиваю…`);
+        opts.onProgress?.(L(`Вариант ${index + 1}: готов за ${(generated.elapsedMs / 1000).toFixed(1)} с, вклеиваю…`, `Variant ${index + 1}: ready in ${(generated.elapsedMs / 1000).toFixed(1)} s, pasting…`));
         results[index] = { index, ok: true, generated, ...(await compositeVariant(prep, generated.image)) };
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
-        opts.onProgress?.(`Вариант ${index + 1}: ошибка — ${error}`);
+        opts.onProgress?.(L(`Вариант ${index + 1}: ошибка — ${error}`, `Variant ${index + 1}: error — ${error}`));
         results[index] = { index, ok: false, error };
       }
     }

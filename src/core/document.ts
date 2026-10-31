@@ -15,6 +15,7 @@ import { intersect, type Rect } from './frame.ts';
 import { encodeImage } from './image-file.ts';
 import { liveGroups } from './layer-tree.ts';
 import { featherAlpha, featherAlphaRegion, MASK_THRESHOLD } from './mask.ts';
+import { L } from '../shared/i18n.ts';
 
 export const TILE_SIZE = 512;
 const TILE_CACHE_LIMIT = 600;
@@ -256,13 +257,13 @@ export class CanvasDocument {
       .removeAlpha()
       .raw({ depth: 'uchar' })
       .toBuffer({ resolveWithObject: true });
-    if (info.channels !== 3) throw new Error(`Неожиданное число каналов: ${info.channels}`);
+    if (info.channels !== 3) throw new Error(L(`Неожиданное число каналов: ${info.channels}`, `Unexpected number of channels: ${info.channels}`));
     return new CanvasDocument(name, info.width, info.height, data);
   }
 
   static blank(width: number, height: number, color: [number, number, number], name: string): CanvasDocument {
     if (!(width >= 16 && height >= 16 && width <= 30000 && height <= 30000)) {
-      throw new Error('Размер холста — от 16 до 30000 пикселей по каждой стороне');
+      throw new Error(L('Размер холста — от 16 до 30000 пикселей по каждой стороне', 'Canvas size must be 16 to 30000 pixels on each side'));
     }
     const base = Buffer.alloc(width * height * 3);
     for (let i = 0; i < width * height; i++) base.set(color, i * 3);
@@ -271,7 +272,7 @@ export class CanvasDocument {
 
   /** Документ из проекта .caaa: исходник, слои с масками, их группы и версии как были, история отмены начинается заново */
   static restore(name: string, width: number, height: number, base: Buffer, patches: Patch[], objects: DocObject[] = [], groups: DocGroup[] = []): CanvasDocument {
-    if (base.length !== width * height * 3) throw new Error('Исходник не того размера');
+    if (base.length !== width * height * 3) throw new Error(L('Исходник не того размера', 'Source image has the wrong size'));
     return new CanvasDocument(name, width, height, base, patches, objects, groups);
   }
 
@@ -348,7 +349,7 @@ export class CanvasDocument {
 
   /** Вписать участок в исходник (RGB размером с rect): так слои вливают в фон; ⌘Z возвращает прежний */
   setBase(rect: Rect, rgb: Buffer): void {
-    if (rgb.length !== rect.width * rect.height * 3) throw new Error('Участок не того размера');
+    if (rgb.length !== rect.width * rect.height * 3) throw new Error(L('Участок не того размера', 'Region has the wrong size'));
     const before = Buffer.alloc(rgb.length);
     for (let row = 0; row < rect.height; row++) {
       const from = ((rect.y + row) * this.width + rect.x) * 3;
@@ -398,8 +399,8 @@ export class CanvasDocument {
   movePatch(patchId: string, to: Rect): void {
     const patch = this.patch(patchId);
     const from = patch.rect;
-    if (to.width !== from.width || to.height !== from.height) throw new Error('Сдвиг не меняет размер слоя');
-    if (to.x < 0 || to.y < 0 || to.x + to.width > this.width || to.y + to.height > this.height) throw new Error('Слой за краем холста');
+    if (to.width !== from.width || to.height !== from.height) throw new Error(L('Сдвиг не меняет размер слоя', 'Moving does not change the layer size'));
+    if (to.x < 0 || to.y < 0 || to.x + to.width > this.width || to.y + to.height > this.height) throw new Error(L('Слой за краем холста', 'Layer is outside the canvas'));
     if (to.x === from.x && to.y === from.y) return;
     this.place(patch, to, from);
     this.record({ kind: 'move', patchId, from, to });
@@ -451,7 +452,7 @@ export class CanvasDocument {
    */
   setPatchMask(patchId: string, mask: Uint8Array, changed?: Rect): void {
     const patch = this.patch(patchId);
-    if (mask.length !== patch.rect.width * patch.rect.height) throw new Error('Маска не того размера');
+    if (mask.length !== patch.rect.width * patch.rect.height) throw new Error(L('Маска не того размера', 'Mask has the wrong size'));
     const before = { mask: patch.mask, version: patch.maskVersion, feather: patch.feather };
     const after = { mask, version: ++this.maskVersions, feather: patch.feather };
     this.applyMask(patch, after, changed);
@@ -485,7 +486,7 @@ export class CanvasDocument {
 
   group(groupId: string): DocGroup {
     const g = this.groups.find((x) => x.id === groupId);
-    if (!g) throw new Error('Нет такой группы');
+    if (!g) throw new Error(L('Нет такой группы', 'No such group'));
     return g;
   }
 
@@ -496,7 +497,7 @@ export class CanvasDocument {
 
   object(objectId: string): DocObject {
     const o = this.objects.find((x) => x.id === objectId);
-    if (!o) throw new Error('Нет такого объекта');
+    if (!o) throw new Error(L('Нет такого объекта', 'No such object'));
     return o;
   }
 
@@ -617,10 +618,10 @@ export class CanvasDocument {
 
   private async cut(levels: Level[], prefix: string, k: number, tx: number, ty: number): Promise<Buffer> {
     const level = levels[k];
-    if (!level) throw new Error(`Нет уровня ${k}`);
+    if (!level) throw new Error(L(`Нет уровня ${k}`, `No level ${k}`));
     const x = tx * TILE_SIZE;
     const y = ty * TILE_SIZE;
-    if (x >= level.width || y >= level.height || tx < 0 || ty < 0) throw new Error('Тайл за пределами холста');
+    if (x >= level.width || y >= level.height || tx < 0 || ty < 0) throw new Error(L('Тайл за пределами холста', 'Tile is outside the canvas'));
     const key = `${prefix}${k}/${tx}/${ty}`;
     const cached = this.tiles.get(key);
     if (cached) {
@@ -656,7 +657,7 @@ export class CanvasDocument {
 
   private indexOf(patchId: string): number {
     const index = this.patches.findIndex((p) => p.id === patchId);
-    if (index < 0) throw new Error('Нет такого слоя');
+    if (index < 0) throw new Error(L('Нет такого слоя', 'No such layer'));
     return index;
   }
 
@@ -680,7 +681,7 @@ export class CanvasDocument {
   /** Скрыть или показать правку без слоя; у версии слоя видимость решает слой */
   private flip(patchId: string): void {
     const patch = this.patch(patchId);
-    if (patch.object) throw new Error('Версию слоя показывает её слой');
+    if (patch.object) throw new Error(L('Версию слоя показывает её слой', 'A layer version is shown by its layer'));
     patch.active = !patch.active;
     this.recompute(this.clip(patch.rect));
   }

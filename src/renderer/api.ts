@@ -1,9 +1,10 @@
 // Обращения к серверу приложения. Все изменяющие запросы несут заголовок x-canvaaaas.
 import { API_HEADER, type StateDto } from '../shared/api.ts';
+import { L, lang, langOf, setLang } from '../shared/i18n.ts';
 
 async function handle<T>(res: Response): Promise<T> {
   const data = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok) throw new Error(data.error ?? `Сервер ответил ${res.status}`);
+  if (!res.ok) throw new Error(data.error ?? L(`Сервер ответил ${res.status}`, `Server responded ${res.status}`));
   return data;
 }
 
@@ -17,6 +18,15 @@ export function post<T = { ok: true }>(path: string, body?: unknown): Promise<T>
     headers: { [API_HEADER]: '1', 'Content-Type': 'application/json' },
     body: JSON.stringify(body ?? {}),
   }).then((r) => handle<T>(r));
+}
+
+/** Язык интерфейса: его выбирает сервер (по системе или настройкам), окно читает раз при запуске */
+export async function loadLang(): Promise<void> {
+  const res = await fetch('/api/lang')
+    .then((r) => handle<{ lang: string }>(r))
+    .catch(() => null);
+  if (res) setLang(langOf(res.lang));
+  document.documentElement.lang = lang();
 }
 
 /** Настройки интерфейса: их хранит сервер, окно читает раз при запуске, до первой отрисовки */
