@@ -51,4 +51,15 @@ describe('CanvasDocument', () => {
     expect(before[0]).toBeLessThan(10);
     expect(after[0]).toBeGreaterThan(245);
   });
+
+  it('тайл, который кодировался, пока холст менялся, не остаётся в кэше устаревшим', async () => {
+    const doc = CanvasDocument.blank(1000, 1000, [0, 0, 0], 'test');
+    doc.addPatch(patch('w', 0, 0, 600, [255, 255, 255], 255));
+    // Тайл просят, а пока он кодируется, версию скрывают (так же — смена версии слоя или мазок по маске)
+    const inFlight = doc.tile(0, 0, 0);
+    doc.togglePatch('w');
+    expect((await sharp(await inFlight).raw().toBuffer())[0]).toBeGreaterThan(245);
+    const now = await sharp(await doc.tile(0, 0, 0)).raw().toBuffer();
+    expect(now[0]).toBeLessThan(10);
+  });
 });

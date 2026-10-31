@@ -603,7 +603,11 @@ export class CanvasDocument {
       const from = ((y + row) * level.width + x) * 3;
       level.data.copy(buf, row * width * 3, from, from + width * 3);
     }
+    const rev = this.rev;
     const jpeg = await sharp(buf, { raw: { width, height, channels: 3 } }).jpeg({ quality: 90 }).toBuffer();
+    // Пока тайл кодировался, холст могли поменять (другая версия слоя, мазок по маске): такой тайл отдаём, но не кэшируем.
+    // Иначе сервер отдавал бы его и после, и холст складывался из тайлов разных состояний
+    if (this.rev !== rev) return jpeg;
     this.tiles.set(key, jpeg);
     if (this.tiles.size > TILE_CACHE_LIMIT) this.tiles.delete(this.tiles.keys().next().value!);
     return jpeg;
