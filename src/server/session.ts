@@ -123,6 +123,9 @@ interface Variant {
   base?: number;
   /** Что критик сказал о варианте и при какой маске задачи (maskRev) смотрел */
   critique?: Critique;
+  /** Модель рисует маску по объекту его версии; не вышла — почему */
+  masking?: boolean;
+  maskError?: string;
 }
 
 interface Critique {
@@ -182,6 +185,10 @@ interface Job {
   sketch: SketchStroke[];
   /** Перед генерацией задачу расписывает директор */
   director: boolean;
+  /** Каждому варианту, который лёг версией, модель сразу рисует маску по объекту (maskVariant) */
+  objectMask: boolean;
+  /** Обрывает маски по объекту: «Отменить» задачу обрывает их, «Остановить» шаги — нет */
+  masks: AbortController;
   /** Что директор написал и для какой задачи (taskKey): та же задача — тот же текст, без нового вызова */
   directed?: { key: string; text: string };
   directing: boolean;
@@ -429,6 +436,8 @@ export class Session {
           fixes: v.fixes,
           base: v.base,
           critique: v.critique && { done: v.critique.done, text: v.critique.text },
+          masking: v.masking,
+          maskError: v.maskError,
         })),
         selected: j.selected,
         rev: j.rev,
@@ -902,7 +911,10 @@ export class Session {
   }
 
   private dropAllJobs(): void {
-    for (const j of this.jobs) j.abort.abort();
+    for (const j of this.jobs) {
+      j.abort.abort();
+      j.masks.abort();
+    }
     this.jobs = [];
   }
 
@@ -962,6 +974,7 @@ export class Session {
       references,
       sketch: checkSketch(req.sketch),
       director: !!req.director,
+      objectMask: !!req.objectMask,
     });
   }
 
@@ -1010,6 +1023,7 @@ export class Session {
       references: patch.refs ?? [],
       sketch: patch.sketch ?? [],
       director: req.director ?? patch.directed !== undefined,
+      objectMask: !!req.objectMask,
       directed: patch.directed ? { key: taskKey({ prompt: patch.prompt, hide: patch.hide ?? false }), text: patch.directed } : undefined,
       base,
       whole,
@@ -1033,6 +1047,7 @@ export class Session {
       | 'references'
       | 'sketch'
       | 'director'
+      | 'objectMask'
       | 'directed'
       | 'base'
       | 'whole'
@@ -1060,6 +1075,7 @@ export class Session {
       picked: false,
       rev: 1,
       abort: new AbortController(),
+      masks: new AbortController(),
       maskChain: Promise.resolve(),
     };
     this.jobs.push(job);
@@ -1168,7 +1184,8 @@ export class Session {
   /**
    * Новые варианты с нынешней задачей и показом области задачи. Готовые остаются на холсте, пока идут новые:
    * их можно сравнивать и принимать. jump — задачу поправили: первый готовый новый вариант сразу на холсте.
-   * С директором варианты идут не разом, а шагами с критиком (refine).
+   * С директором варианты идут не разом, а шагами с критиком (refine). С маской по объекту варианту, легшему версией,
+   * модель сразу рисует и её.
    */
   private async generate(job: Job, count: number, jump = false): Promise<void> {
     const prep = job.prep;
@@ -1222,6 +1239,7 @@ export class Session {
           v.error = message(err);
         }
         this.changed();
+        await this.maskVariant(job, v);
       }),
     );
     const failed = job.variants.find((v) => v.status === 'error');
@@ -1247,6 +1265,8 @@ export class Session {
     let mustFix = base !== undefined;
     let made = 0;
     let step: Variant | undefined;
+    // Маски по объекту готовых шагов рисуются, пока идут следующие: критик смотрит маску задачи, не версии
+    const masks: Promise<void>[] = [];
     if (!job.variants.some((v) => v.status === 'done')) job.status = 'running';
     job.error = undefined;
     job.picked = false;
@@ -1281,6 +1301,7 @@ export class Session {
         // Новый шаг сразу на холсте, если пользователь, пока шли шаги, сам не выбрал другую версию
         if (!job.picked || job.variants[job.selected]?.status !== 'done') job.selected = step.n;
         await this.land(job, step, job.selected === step.n);
+        masks.push(this.maskVariant(job, step));
         job.status = 'done';
         base = step;
         step = undefined;
@@ -1295,6 +1316,8 @@ export class Session {
       // Остановленный шаг не нужен: это всегда последний вариант
       if (step?.status === 'running' && job.variants.at(-1) === step) job.variants.pop();
       job.chain = undefined;
+      this.changed();
+      await Promise.all(masks);
       job.status = job.variants.some((v) => v.status === 'done') ? 'done' : 'error';
       if (job.status === 'error') job.error ??= 'Шаги остановлены';
       this.changed();
@@ -1375,7 +1398,11 @@ export class Session {
   async moreVariants(jobId: string, count: number, change: RedoChange = {}): Promise<void> {
     const job = this.job(jobId);
     const busy =
-      job.status === 'running' || job.status === 'preparing' || job.status === 'queued' || !!job.chain || job.variants.some((v) => v.status === 'running');
+      job.status === 'running' ||
+      job.status === 'preparing' ||
+      job.status === 'queued' ||
+      !!job.chain ||
+      job.variants.some((v) => v.status === 'running' || v.masking);
     if (busy) throw new Error('Задача ещё идёт');
     if (!job.prep) return this.retry(jobId, change);
     const n = Math.min(Math.max(Math.round(count), 1), MAX_VARIANTS_PER_JOB - job.variants.length);
@@ -1409,10 +1436,11 @@ export class Session {
     job.abort = new AbortController();
   }
 
-  /** Убрать задачу из очереди: идущая генерация отменяется, готовые варианты остаются версиями слоя */
+  /** Убрать задачу из очереди: идущая генерация и маски по объекту отменяются, готовые варианты остаются версиями слоя */
   discard(jobId: string): void {
     const job = this.job(jobId);
     job.abort.abort();
+    job.masks.abort();
     this.jobs = this.jobs.filter((j) => j !== job);
     this.changed();
     this.schedule();
@@ -1454,9 +1482,12 @@ export class Session {
       const whole = job.whole ?? (!!existing && !!edited && overlap(existing, edited) === area(existing));
       const over = below && !whole ? layerOver(below, { rect: patch.rect, layer: patch.layer, mask: job.mask }) : undefined;
       const version: NewPatch = over ? { ...patch, rect: over.rect, layer: over.layer, mask: over.mask, base: below!.id, part: over.part } : { ...patch, base: below?.id };
-      // Выделение за краем слоя — слой растёт; кольцо у перерисовки всего слоя — не выделение
+      // Выделение за краем слоя — слой растёт; кольцо у перерисовки всего слоя — не выделение. С маской по объекту растит
+      // только версия, которая ляжет на холст: область слоя станет её объектом, а вариант, легший следом не на холст,
+      // раздул бы её обратно до выделения
       const claimed = job.claim === undefined ? edited : job.claim;
-      const grown = existing && existing.kind !== 'fill' && claimed && overlap(claimed, existing) < area(claimed) ? trim(unionBitmap(existing, claimed)) : null;
+      const grown =
+        (show || !job.objectMask) && existing && existing.kind !== 'fill' && claimed && overlap(claimed, existing) < area(claimed) ? trim(unionBitmap(existing, claimed)) : null;
       const region = version.rect;
       const before = doc.region(region);
       let placed: string | undefined;
@@ -1472,6 +1503,25 @@ export class Session {
       v.patch = placed;
       this.changed();
     });
+  }
+
+  /**
+   * Маска по объекту варианту, который лёг версией, — если её просили у задачи (у фона под слоем её не бывает). Пока
+   * модель её рисует, задача не закончена. Ошибка маски — не ошибка варианта: версия остаётся с маской выделения
+   */
+  private async maskVariant(job: Job, v: Variant): Promise<void> {
+    const { signal } = job.masks;
+    if (!job.objectMask || !v.patch || v.status !== 'done' || signal.aborted) return;
+    v.masking = true;
+    this.changed();
+    try {
+      await this.objectMask(v.patch, job.model, signal);
+    } catch (err) {
+      if (!signal.aborted) v.maskError = message(err);
+    } finally {
+      v.masking = false;
+      this.changed();
+    }
   }
 
   /** Новый слой из выделения задачи: имя — задача */
@@ -1530,6 +1580,29 @@ export class Session {
   }
 
   /**
+   * Переставить слой в стопке: прямо над слоем over (и над его частями), null — под всеми слоями. Слой едет со своими
+   * частями (из старых проектов), заплатка фона под ним — следом сама (она всегда прямо под своим слоем). Шаг ⌘Z
+   */
+  reorderLayer(objectId: string, over: string | null): Promise<void> {
+    return this.serialDoc((doc) => {
+      doc.object(objectId);
+      const group = new Set([objectId, ...descendants(doc.objects, objectId).map((o) => o.id)]);
+      if (over !== null && group.has(over)) return;
+      const rest = doc.objects.filter((o) => !group.has(o.id));
+      let at = 0;
+      if (over !== null) {
+        doc.object(over);
+        const target = new Set([over, ...descendants(rest, over).map((o) => o.id)]);
+        at = rest.findLastIndex((o) => target.has(o.id)) + 1;
+      }
+      const next = [...rest.slice(0, at), ...doc.objects.filter((o) => group.has(o.id)), ...rest.slice(at)];
+      if (next.every((o, i) => o === doc.objects[i])) return;
+      doc.setObjects(next);
+      this.changed();
+    });
+  }
+
+  /**
    * Добавить к маске версии то, что модель нарисовала за её краем: сравнивается с холстом без этой версии,
    * а у правки части слоя — с прежней версией на её месте. К краю куска, за которым холст продолжается, маска
    * вплотную не подходит: там вклейка оборвалась бы без растушёвки
@@ -1564,16 +1637,15 @@ export class Session {
 
   /**
    * Маска версии — по объекту, который нарисовала модель: модель генерации перекрашивает ответ у версии на месте — объект
-   * белым, остальное чёрным (object-mask.ts); какой объект, она видит по подсветке того, что от версии видно. Сдвиг
-   * картинки на несколько пикселей исправляется по краям рисунка, растянутая картинка — ошибка (alignMask). Край — с
-   * контуром и растушёвкой, как у слоя из выделения, маска — сразу прозрачность (bakeMask); слой у текущей версии
-   * становится этим объектом (followMask). Генерация идёт десятки секунд мимо очереди правок; маску, поправленную за это
-   * время, она не перебивает. Шаг ⌘Z
+   * белым, остальное чёрным (object-mask.ts); какой объект, она видит по подсветке того, что от версии видно. У исходника
+   * слоя (копии) вместо ответа — сама копия. Сдвиг картинки на несколько пикселей исправляется по краям рисунка,
+   * растянутая картинка — ошибка (alignMask). Край — с контуром и растушёвкой, как у слоя из выделения, маска — сразу
+   * прозрачность (bakeMask); слой у текущей версии и у исходника становится этим объектом (followMask). Генерация идёт
+   * десятки секунд мимо очереди правок; маску, поправленную за это время, она не перебивает. Шаг ⌘Z
    */
-  async objectMask(patchId: string, model: ModelChoice): Promise<void> {
+  async objectMask(patchId: string, model: ModelChoice, signal?: AbortSignal): Promise<void> {
     const doc = this.requireDoc();
     const p = doc.patch(patchId);
-    if (p.lifted) throw new Error('У исходника слоя нет ответа модели');
     const { rect, maskVersion } = p;
     const { width, height } = rect;
     const n = width * height;
@@ -1588,7 +1660,7 @@ export class Session {
     const req = await objectMaskRequest(rgb, seen, width, height, provider);
     this.generations++;
     this.changed();
-    const res = await provider.generate(req.generate);
+    const res = await provider.generate({ ...req.generate, signal });
     const found = alignMask(await readObjectMask(res.image, req), rgb, width, height).mask;
     if (!found.includes(255)) throw new Error('Модель не нашла объект');
     await this.serialDoc((d) => {
@@ -1883,6 +1955,7 @@ export class Session {
           references: [],
           sketch: [],
           director: false,
+          objectMask: false,
         }),
       ];
     });
@@ -2106,13 +2179,14 @@ function taskKey(task: { prompt: string; hide: boolean }): string {
   return `${task.hide}:${task.prompt}`;
 }
 
-/** Поправка задачи перед повтором; true — что-то поменялось */
+/** Поправка задачи перед повтором; true — поменялась сама задача (маска по объекту её не меняет) */
 function redo(job: Job, change: RedoChange): boolean {
   const before = `${job.director}:${taskKey(job)}`;
   const prompt = change.prompt?.trim();
   if (prompt) job.prompt = prompt;
   if (change.hide !== undefined) job.hide = change.hide;
   if (change.director !== undefined) job.director = !!change.director;
+  if (change.objectMask !== undefined && !job.fillFor) job.objectMask = !!change.objectMask;
   return `${job.director}:${taskKey(job)}` !== before;
 }
 

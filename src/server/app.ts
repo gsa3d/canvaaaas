@@ -351,6 +351,11 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     await session.setHidden(id!, hidden === true);
     json(res, { ok: true });
   });
+  route('POST', '/api/objects/:id/order', async (req, res, [id]) => {
+    const { over } = await readJson<{ over: string | null }>(req);
+    await session.reorderLayer(id!, typeof over === 'string' ? over : null);
+    json(res, { ok: true });
+  });
   route('POST', '/api/objects/:id/move', async (req, res, [id]) => {
     const { dx, dy } = await readJson<{ dx: number; dy: number }>(req);
     if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new HttpError(400, 'Нет сдвига');

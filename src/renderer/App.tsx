@@ -243,7 +243,13 @@ function jobStatus(job: JobDto): string {
   if (job.directing) return 'Директор думает';
   if (job.reviewing) return 'Критик смотрит';
   if (job.chain?.step) return `Шаг ${job.chain.step} из ${job.chain.steps}`;
+  if (masksOnly(job)) return 'Маска по объекту';
   return STATUS[job.status];
+}
+
+/** Варианты готовы, модель рисует им маски по объекту */
+function masksOnly(job: JobDto): boolean {
+  return !job.chain && job.variants.some((v) => v.masking) && !job.variants.some((v) => v.status === 'running');
 }
 
 const STATUS: Record<JobDto['status'], string> = {
@@ -277,6 +283,8 @@ export function App() {
   const [hide, setHide] = useState(false);
   /** Перед генерацией ChatGPT расписывает задачу */
   const [director, setDirector] = usePref('director', false);
+  /** Каждому новому варианту модель сразу рисует маску по объекту */
+  const [autoMask, setAutoMask] = usePref('object-mask', false);
   const [model, setModel] = usePref<ModelChoice>('model', 'flash', (v) => MODELS.some((m) => m.id === v));
   const [size, setSize] = usePref<SizeChoice>('size', 'auto', (v) => SIZES.includes(v as SizeChoice));
   const [variants, setVariants] = usePref('variants', 2, isCount);
@@ -389,12 +397,15 @@ export function App() {
     );
     viewRef.current?.setJobs(open, labels);
   }, [state?.jobs, state?.objects]);
-  // Законченная генерация больше не нужна: её варианты — версии слоёв. Задачи с ошибкой остаются, пока их не уберут
+  // Законченная генерация больше не нужна: её варианты — версии слоёв. Задачи с ошибкой остаются, пока их не уберут.
+  // Маска по объекту, которая не вышла, — сообщением: версия осталась с маской выделения
   const discarded = useRef(new Set<string>());
   useEffect(() => {
     for (const j of jobs) {
       if (j.status !== 'done' || busyJob(j) || discarded.current.has(j.id)) continue;
       discarded.current.add(j.id);
+      const failed = j.variants.find((v) => v.maskError);
+      if (failed) notify(`Маска по объекту: ${failed.maskError}`);
       post(`/api/jobs/${j.id}/discard`).catch(() => discarded.current.delete(j.id));
     }
   }, [state?.jobs]);
@@ -776,8 +787,9 @@ export function App() {
         hide,
         sketch: hasSketch ? sketch : undefined,
         director: stepwise,
+        objectMask: autoMask,
       });
-      // Форма — для следующей области: задача, набросок, референсы и скрытие у неё свои; модель, разрешение, число вариантов и директор остаются
+      // Форма — для следующей области: задача, набросок, референсы и скрытие у неё свои; модель, разрешение, число вариантов, директор и маска остаются
       setSelection([]);
       setSketch([]);
       formOrder.current = [];
@@ -1094,8 +1106,8 @@ export function App() {
   /** Ещё варианты (с директором — шаги) задачи в очереди, можно с поправкой; с ошибкой до подготовки куска — начать её заново */
   const redoJob = (job: JobDto, change: RedoChange = {}) =>
     job.inside
-      ? post(`/api/jobs/${job.id}/more`, { count: countFor(change.director ?? job.director), ...change })
-      : post(`/api/jobs/${job.id}/retry`, change);
+      ? post(`/api/jobs/${job.id}/more`, { count: countFor(change.director ?? job.director), objectMask: autoMask, ...change })
+      : post(`/api/jobs/${job.id}/retry`, { objectMask: autoMask, ...change });
 
   // Ещё варианты версии, можно с поправкой: если они уже в очереди — туда же, а не второй задачей на ту же версию
   const layerVariants = async (patch: PatchDto, change: RedoChange = {}) => {
@@ -1113,7 +1125,7 @@ export function App() {
         return;
       }
       const count = countFor(change.director ?? patch.directed !== undefined);
-      await post(`/api/history/${patch.id}/variants`, { variants: count, model, size: sizeFor(model), ...change });
+      await post(`/api/history/${patch.id}/variants`, { variants: count, model, size: sizeFor(model), objectMask: autoMask, ...change });
       viewRef.current?.showRect(patch.rect);
     } catch (err) {
       fail(err);
@@ -1440,6 +1452,7 @@ export function App() {
               <div class="checks">
                 <HideOption checked={hide} onChange={setHide} />
                 <DirectorOption checked={director && canDirect} disabled={!canDirect} onChange={setDirector} />
+                <ObjectMaskOption checked={autoMask} onChange={setAutoMask} />
               </div>
               <div class="refs">
                 {refs.map((id) => (
@@ -1542,9 +1555,11 @@ export function App() {
               onMergeDown={mergeDown}
               onDelete={deleteObject}
               onMerge={() => void mergeLayers()}
+              onReorder={(o, over) => post(`/api/objects/${o.id}/order`, { over }).catch(fail)}
               onJob={(job, action) => {
                 if ((action === 'retry' || action === 'more') && needsKey(job.model) && !state?.hasKey) setDialog('settings');
-                else post(`/api/jobs/${job.id}/${action}`, action === 'more' ? { count: countFor(job.director) } : undefined).catch(fail);
+                else if (action === 'more' || action === 'retry') redoJob(job).catch(fail);
+                else post(`/api/jobs/${job.id}/${action}`).catch(fail);
               }}
               onShowJob={focus}
             />
@@ -1691,12 +1706,18 @@ type JobAction = 'discard' | 'retry' | 'more' | 'stop';
 
 /** У задачи что-то идёт: законченные интерфейс убирает сам — их варианты уже версии слоёв */
 function busyJob(job: JobDto): boolean {
-  return job.status === 'queued' || job.status === 'preparing' || job.status === 'running' || !!job.chain || job.variants.some((v) => v.status === 'running');
+  return (
+    job.status === 'queued' ||
+    job.status === 'preparing' ||
+    job.status === 'running' ||
+    !!job.chain ||
+    job.variants.some((v) => v.status === 'running' || v.masking)
+  );
 }
 
-/** Сколько плиток «идёт» у задачи: по одной на вариант в работе; пока вариантов нет — одна */
+/** Сколько плиток «идёт» у задачи: по одной на вариант в работе; пока вариантов нет — одна; маску рисуют на плитке версии */
 function runningTiles(job: JobDto): number {
-  if (!busyJob(job)) return 0;
+  if (!busyJob(job) || masksOnly(job)) return 0;
   return job.variants.filter((v) => v.status === 'running').length || 1;
 }
 
@@ -1713,7 +1734,7 @@ function Thumb(props: { src?: string; icon?: Icon; spin?: boolean }) {
 /**
  * Слои: строка — миниатюра того, что видно, имя и глаз. Слой, в котором работают, раскрыт (LayerCard). Генерация нового
  * слоя — строкой сверху, пока слой не появится. Shift-щелчок — слой в выделение; два и больше — «Объединить». Заплатки
- * фона — в карточке своего слоя, внизу — фон
+ * фона — в карточке своего слоя, внизу — фон. Строку слоя перетаскивают выше или ниже — так меняется порядок на холсте
  */
 function LayersPanel(props: {
   doc: DocDto;
@@ -1743,10 +1764,17 @@ function LayersPanel(props: {
   onMergeDown: (o: ObjectDto) => void;
   onDelete: (o: ObjectDto) => void;
   onMerge: () => void;
+  /** Положить слой прямо над over; null — под всеми слоями */
+  onReorder: (o: ObjectDto, over: string | null) => void;
   onJob: (job: JobDto, action: JobAction) => void;
   onShowJob: (job: JobDto) => void;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
+  /** Слой перетаскивают: ляжет прямо над over, null — под всеми */
+  const [drag, setDrag] = useState<{ id: string; over: string | null } | null>(null);
+  const listRef = useRef<HTMLOListElement>(null);
+  /** Щелчок, которым кончилось перетаскивание, слой не выбирает */
+  const dragged = useRef(false);
   /** Скрыть просили у слоя-копии, под которым нет фона: сначала спросить */
   const [asking, setAsking] = useState<string | null>(null);
   const patches = new Map(props.patches.map((p) => [p.id, p]));
@@ -1765,6 +1793,56 @@ function LayersPanel(props: {
   const pending = props.jobs.filter((j) => !j.object);
   const picked = new Set([...props.picked, ...(props.active ? [props.active] : [])]);
 
+  // Перетаскивают строки верхнего уровня; слой ляжет над той, чья середина ниже курсора
+  const tops = () => [...(listRef.current?.querySelectorAll<HTMLElement>(':scope > li[data-top]') ?? [])];
+  const dropTarget = (y: number): string | null => {
+    for (const li of tops()) {
+      const r = li.querySelector('.layer-row')!.getBoundingClientRect();
+      if (y < r.top + r.height / 2) return li.dataset.layer!;
+    }
+    return null;
+  };
+  /** Слой и так лежит прямо над over */
+  const inPlace = (id: string, over: string | null) => {
+    const ids = tops().map((li) => li.dataset.layer!);
+    return over === id || (ids[ids.indexOf(id) + 1] ?? null) === over;
+  };
+  const startDrag = (e: PointerEvent, o: ObjectDto) => {
+    if (e.button !== 0 || (e.target as Element).closest('button, input')) return;
+    const row = e.currentTarget as HTMLElement;
+    const y0 = e.clientY;
+    let moving = false;
+    const move = (ev: PointerEvent) => {
+      if (!moving && Math.abs(ev.clientY - y0) < 4) return;
+      if (!moving) row.setPointerCapture(ev.pointerId);
+      moving = true;
+      // У края боковой панели список прокручивается
+      const side = listRef.current?.closest('.side');
+      if (side) {
+        const r = side.getBoundingClientRect();
+        if (ev.clientY < r.top + 32) side.scrollTop -= 12;
+        else if (ev.clientY > r.bottom - 32) side.scrollTop += 12;
+      }
+      setDrag({ id: o.id, over: dropTarget(ev.clientY) });
+    };
+    const end = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
+      if (!moving) return;
+      setDrag(null);
+      dragged.current = true;
+      window.setTimeout(() => (dragged.current = false), 0);
+      const over = dropTarget(ev.clientY);
+      if (ev.type === 'pointerup' && !inPlace(o.id, over)) props.onReorder(o, over);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
+  };
+  // Куда ляжет перетаскиваемый слой: черта над этой строкой (null — над фоном); на своём месте черты нет
+  const dropOver = drag && !inPlace(drag.id, drag.over) ? drag.over : undefined;
+
   const row = (o: ObjectDto, depth: number) => {
     const active = props.active === o.id;
     const busy = props.jobs.some((j) => (j.object === o.id || j.fillFor === o.id) && busyJob(j));
@@ -1774,16 +1852,34 @@ function LayersPanel(props: {
     return (
       <Fragment key={o.id}>
         <li
-          class={['layer', active ? 'active' : '', !active && props.picked.has(o.id) ? 'picked' : '', o.hidden ? 'off' : '', o.lost ? 'lost' : ''].filter(Boolean).join(' ')}
+          class={[
+            'layer',
+            active ? 'active' : '',
+            !active && props.picked.has(o.id) ? 'picked' : '',
+            o.hidden ? 'off' : '',
+            o.lost ? 'lost' : '',
+            drag?.id === o.id ? 'dragged' : '',
+            dropOver === o.id ? 'drop-over' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
           data-layer={o.id}
+          data-top={depth === 0 || undefined}
           onPointerEnter={() => props.onHover(o)}
           onPointerLeave={() => props.onHover(null)}
         >
           <div
             class="layer-row"
             style={{ paddingLeft: `${6 + depth * 16}px` }}
-            title={o.lost ? 'После правки слой не нашёлся: маска прежняя' : 'Работать в слое; Shift — добавить к выделению; двойной щелчок — переименовать'}
-            onClick={(e) => props.onSelect(o, e.metaKey || e.ctrlKey || e.shiftKey)}
+            title={
+              o.lost
+                ? 'После правки слой не нашёлся: маска прежняя'
+                : 'Работать в слое; Shift — добавить к выделению; двойной щелчок — переименовать; перетащить — выше или ниже'
+            }
+            onPointerDown={depth === 0 && editing !== o.id ? (e) => startDrag(e, o) : undefined}
+            onClick={(e) => {
+              if (!dragged.current) props.onSelect(o, e.metaKey || e.ctrlKey || e.shiftKey);
+            }}
             onDblClick={() => setEditing(o.id)}
           >
             <Thumb src={thumb(patches.get(o.current ?? o.layer ?? ''))} />
@@ -1853,10 +1949,10 @@ function LayersPanel(props: {
           палочка ищет только в нём, генерация ложится его версией. Фон внизу — работа вне слоёв: генерация ляжет новым слоем.
           Версии — миниатюры под слоем: щелчок показывает версию, «+» —
           ещё варианты. ⌘J — копия выделенного новым слоем, ⌘⇧J — вырезать: под слоем дорисуется фон. Shift-щелчок — несколько
-          слоёв, ⌘E их объединяет. «\» — исходник всей картинки, пока держите.
+          слоёв, ⌘E их объединяет. Перетащите слой выше или ниже — так меняется порядок. «\» — исходник всей картинки, пока держите.
         </Help>
       </h2>
-      <ol class="layers">
+      <ol class={drag ? 'layers dragging' : 'layers'} ref={listRef}>
         {pending.map((j) => {
           const error = j.status === 'error';
           return (
@@ -1892,7 +1988,7 @@ function LayersPanel(props: {
         })}
         {(children.get(undefined) ?? []).map((o) => row(o, 0))}
         {/* Фон выбран, когда работают не в слое и слоёв в выделении нет: генерация ляжет новым слоем */}
-        <li class={!props.active && !props.picked.size ? 'layer background active' : 'layer background'}>
+        <li class={['layer background', !props.active && !props.picked.size ? 'active' : '', dropOver === null ? 'drop-over' : ''].filter(Boolean).join(' ')}>
           <div class="layer-row" title="Работать на фоне: правка — новым слоем" onClick={props.onBackground}>
             <Thumb src={`/api/doc/base/${props.doc.levels - 1}/0/0.jpg?doc=${props.doc.id}&base=${props.doc.baseState}`} />
             <span class="layer-name">Фон</span>
@@ -1942,17 +2038,26 @@ function LayerCard(props: {
   const [redoing, setRedoing] = useState(false);
   const [menu, setMenu] = useState(false);
   const current = o.current ? props.patchMap.get(o.current) : undefined;
+  // Что видно от слоя: текущая версия, без неё — его копия (исходник слоя-копии); у слоя из генерации исходник — то, что под ним
+  const shown = current ?? (o.layer ? props.patchMap.get(o.layer) : undefined);
   const jobs = props.jobs.filter((j) => j.object === o.id);
   // Фон под этим слоем дорисовывается в других слоях: здесь — только ход
   const fillJobs = props.jobs.filter((j) => j.fillFor === o.id && j.object !== o.id);
   // Что про вариант знает задача, пока она есть: правка почти не случилась
   const weak = new Set(props.jobs.flatMap((j) => j.variants.flatMap((v) => (v.patch && v.insideChangedPct !== undefined && v.insideChangedPct < 2 ? [v.patch] : []))));
+  // Версии, которым модель сейчас рисует маску по объекту
+  const masking = new Set(props.jobs.flatMap((j) => j.variants.flatMap((v) => (v.patch && v.masking ? [v.patch] : []))));
   const count = (director: boolean) => (director ? props.steps : props.variants);
   const tile = (key: string, label: string, p: PatchDto | undefined, on: boolean, title: string, pick: () => void) => (
     <button key={key} class={['vtile', on ? 'on' : '', p && weak.has(p.id) ? 'weak' : ''].filter(Boolean).join(' ')} title={title} aria-pressed={on} onClick={pick}>
       {p ? (
         <>
           <img src={props.thumb(p)} alt="" draggable={false} />
+          {masking.has(p.id) && (
+            <span class="vtile-busy" title="Модель рисует маску по объекту">
+              <IconLoader2 size={14} stroke={STROKE} class="spin" aria-hidden="true" />
+            </span>
+          )}
           <span class="vtile-n">{label}</span>
         </>
       ) : (
@@ -2072,20 +2177,20 @@ function LayerCard(props: {
 
       <div class="layer-tools">
         <button
-          class={current && props.maskLayer === current.id ? 'icon active' : 'icon'}
-          title={current ? 'Править маску версии' : 'У исходника маски нет'}
+          class={shown && props.maskLayer === shown.id ? 'icon active' : 'icon'}
+          title={shown ? (current ? 'Править маску версии' : 'Править маску исходника') : 'Исходник — то, что под слоем: маски нет'}
           aria-label="Править маску версии"
-          disabled={!current || o.hidden}
-          onClick={() => current && props.onMask(current)}
+          disabled={!shown || o.hidden}
+          onClick={() => shown && props.onMask(shown)}
         >
           <IconMask size={17} stroke={STROKE} />
         </button>
         <button
           class="icon"
-          title={current ? 'Маска по объекту: её рисует модель из формы — это генерация' : 'У исходника маски нет'}
+          title={shown ? 'Маска по объекту: её рисует модель из формы — это генерация' : 'Исходник — то, что под слоем: маски нет'}
           aria-label="Маска по объекту"
-          disabled={!current || o.hidden}
-          onClick={() => current && props.onObjectMask(current)}
+          disabled={!shown || o.hidden || masking.has(shown.id)}
+          onClick={() => shown && props.onObjectMask(shown)}
         >
           <IconWand size={17} stroke={STROKE} />
         </button>
@@ -2192,6 +2297,19 @@ function DirectorOption(props: { checked: boolean; disabled: boolean; onChange: 
         критик доволен или их число вышло; каждый шаг остаётся вариантом. Директор и критик идут по подписке ChatGPT через Codex,
         каждый добавляет около минуты.
       </Help>
+    </span>
+  );
+}
+
+/** Флажок «маска по объекту»: каждому новому варианту модель сразу рисует её */
+function ObjectMaskOption(props: { checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <span class="check">
+      <label>
+        <input type="checkbox" checked={props.checked} onChange={(e) => props.onChange(e.currentTarget.checked)} />
+        Маска по объекту
+      </label>
+      <Help>Модель сразу обводит каждый новый вариант по объекту, как палочка в карточке слоя. Ещё одна генерация на вариант.</Help>
     </span>
   );
 }

@@ -1077,7 +1077,37 @@ button.chip-clear:hover:not(:disabled) {
 }
 
 .layer {
+  position: relative;
   border-radius: var(--radius);
+}
+
+/* Перетаскивание: слой ляжет на черту — над строкой drop-over */
+.layer-row {
+  user-select: none;
+}
+
+.layers.dragging .layer-row {
+  cursor: grabbing;
+}
+
+.layer.dragged {
+  opacity: 0.5;
+}
+
+.layer.drop-over::before {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.layer.background.drop-over::before {
+  top: -3px;
 }
 
 .layer-row {
@@ -1278,6 +1308,17 @@ button.vtile.on:hover:not(:disabled) {
 
 .vtile.wait {
   background: var(--paper-2);
+  color: var(--accent);
+}
+
+/* Модель рисует версии маску по объекту */
+.vtile-busy {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.55);
   color: var(--accent);
 }
 
