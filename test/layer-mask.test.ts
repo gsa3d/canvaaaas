@@ -148,6 +148,29 @@ describe('Маска слоя', () => {
     const fresh = doc.patches.find((p) => p.jobId === more)!;
     expect(fresh.feather).toBe(24);
   }, 20_000);
+
+  it('кисть маски текущей версии за краем слоя растит и слой: его выделение и притушение — по тому, что видно; ⌘Z возвращает', async () => {
+    const s = new Session('mock', envOnlyStore());
+    await s.newDocument(W, H, [10, 20, 30]);
+    const doc = s.doc!;
+    // Слой — левая половина куска, у него две версии с ответом модели на весь кусок; видна «a»
+    const half = { rect: { ...R, width: R.width / 2 }, mask: new Uint8Array((R.width / 2) * R.height).fill(255) };
+    doc.setObjects([{ id: 'o', name: 'слой', ...half, createdAt: '', version: 1, current: 'a' }]);
+    doc.addPatch({ ...accepted(leftHalf(), 0), object: 'o' });
+    doc.addPatch({ ...accepted(leftHalf(), 0, [30, 30, 220]), id: 'b', object: 'o' });
+    const stroke = { kind: 'rect' as const, x: R.x + 300, y: R.y + 100, width: 60, height: 60 };
+    await s.editPatchMask('a', [stroke]);
+    const o = doc.object('o');
+    expect(o.rect.width).toBe(360);
+    expect(o.mask[(stroke.y - o.rect.y + 30) * o.rect.width + stroke.x - o.rect.x + 30]).toBe(255);
+    // Правка маски версии, которую не видно, слой не трогает
+    await s.editPatchMask('b', [{ ...stroke, y: R.y + 200 }]);
+    expect(doc.object('o').rect.height).toBe(R.height);
+    expect(doc.object('o').version).toBe(o.version);
+    await s.undo();
+    await s.undo();
+    expect(doc.object('o').rect).toEqual(half.rect);
+  });
 });
 
 async function until(ok: () => boolean): Promise<void> {

@@ -845,10 +845,7 @@ export class Session {
       if (changed) {
         doc.batch(() => {
           doc.setPatchMask(patchId, mask, changed);
-          // Маска отделённого объекта — это маска его слоя: стёртое ластиком уходит и из объекта
-          const obj = patch.lifted && patch.object ? doc.objects.find((o) => o.id === patch.object) : undefined;
-          const bitmap = obj && trim({ rect: patch.rect, mask });
-          if (obj && bitmap) doc.setObjects(doc.objects.map((o) => (o === obj ? { ...o, ...bitmap, version: doc.nextObjectVersion() } : o)));
+          followMask(doc, patchId);
         });
       }
       this.changed();
@@ -1543,12 +1540,15 @@ export class Session {
       const closed = { left: rect.x > 0, top: rect.y > 0, right: rect.x + width < doc.width, bottom: rect.y + height < doc.height };
       const { mask, addedPx } = expandMaskByDiff(p.mask, under, rgb, width, height, { closed });
       if (addedPx > 0) {
-        // Маска, правленная рукой, — сама прозрачность: добавленное растушёвываем здесь, как растушевала бы вклейка
-        if (p.feather) doc.setPatchMask(p.id, mask);
-        else {
-          const alpha = featherAlpha(mask.map((v) => (v >= MASK_THRESHOLD ? 255 : 0)), width, height, DEFAULT_FEATHER);
-          doc.setPatchMask(p.id, p.mask.map((v, i) => Math.max(v, Math.round(alpha[i]! * 255))));
-        }
+        doc.batch(() => {
+          // Маска, правленная рукой, — сама прозрачность: добавленное растушёвываем здесь, как растушевала бы вклейка
+          if (p.feather) doc.setPatchMask(p.id, mask);
+          else {
+            const alpha = featherAlpha(mask.map((v) => (v >= MASK_THRESHOLD ? 255 : 0)), width, height, DEFAULT_FEATHER);
+            doc.setPatchMask(p.id, p.mask.map((v, i) => Math.max(v, Math.round(alpha[i]! * 255))));
+          }
+          followMask(doc, p.id);
+        });
       }
       this.changed();
       return addedPx;
@@ -1560,8 +1560,7 @@ export class Session {
    * того, что модель поменяла под маской (сравнение с холстом под версией, как у «Расширить по правке»); объект может
    * выйти за видимое, но только туда, где модель что-то поменяла. Если изменений почти нет или поменялось почти всё,
    * подсказка — рамка того, что от версии видно, и за него объект не выходит. Край — с контуром и растушёвкой, как у
-   * слоя из выделения, маска — сразу прозрачность (bakeMask). У текущей версии и слой становится этим объектом: его
-   * выделяет щелчок по слою, его находит палочка. Объект ищется секунды, поэтому мимо очереди правок; маску,
+   * слоя из выделения, маска — сразу прозрачность (bakeMask). Слой у текущей версии становится этим объектом (followMask). Объект ищется секунды, поэтому мимо очереди правок; маску,
    * поправленную за это время, он не перебивает. Шаг ⌘Z
    */
   async objectMask(patchId: string, snap: boolean): Promise<void> {
@@ -1606,12 +1605,10 @@ export class Session {
       }
       const feathered = featherAlpha(binary, rect.width, rect.height, LIFT_FEATHER);
       const mask = Uint8Array.from(feathered, (a) => Math.round(a * 255));
-      const area = trim({ rect, mask: binary });
-      const obj = p.object ? d.objects.find((o) => o.id === p.object && o.kind !== 'fill' && o.current === patchId) : undefined;
       d.bakeMask(patchId);
       d.batch(() => {
         d.setPatchMask(patchId, mask);
-        if (obj && area) d.setObjects(d.objects.map((o) => (o === obj ? { ...o, ...area, version: d.nextObjectVersion(), lost: undefined } : o)));
+        followMask(d, patchId);
       });
       this.changed();
     });
@@ -2057,6 +2054,19 @@ function layersOverlap(a: Patch, b: Patch): boolean {
 /** Где ищет палочка: в слое owner или на фоне — всё, кроме видимых слоёв */
 function scopeOf(doc: CanvasDocument, owner: DocObject | null): Scope {
   return owner ? { layer: owner } : { outside: doc.visibleLayers() };
+}
+
+/**
+ * Область слоя — по маске его версии, которую поправили рукой (кисть и ластик маски, «Расширить по правке», «Маска
+ * по объекту»): у снятого исходника — всегда, у версии — когда она текущая. Иначе притушение вокруг слоя и его выделение
+ * резали бы то, что от него теперь видно, а палочка находила бы там не его. Вызывать в doc.batch вместе с правкой маски
+ */
+function followMask(doc: CanvasDocument, patchId: string): void {
+  const p = doc.patch(patchId);
+  const obj = p.object ? doc.objects.find((o) => o.id === p.object) : undefined;
+  if (!obj || (!p.lifted && (obj.kind === 'fill' || obj.current !== patchId))) return;
+  const bitmap = trim({ rect: p.rect, mask: p.mask });
+  if (bitmap) doc.setObjects(doc.objects.map((o) => (o === obj ? { ...o, ...bitmap, version: doc.nextObjectVersion(), lost: undefined } : o)));
 }
 
 /** Версия слоя, которую видно: текущая, а без неё у отделённого — снятый исходник */

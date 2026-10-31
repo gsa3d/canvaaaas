@@ -145,10 +145,12 @@ describe('Правка части слоя', () => {
     expect(first.layer[at(85, 150)]).toBeLessThan(255);
     expect(doc.object(id).rect).toEqual({ x: 98, y: 78, width: 204, height: 144 });
 
-    // «Расширить» берёт ответ модели за кольцом — пиксели модели, а не прежний слой
+    // «Расширить» берёт ответ модели за кольцом — пиксели модели, а не прежний слой; слой растёт вместе с видимым
     const before = first.mask.reduce((n, v) => n + (v >= 128 ? 1 : 0), 0);
     expect(await s.expandVersion(first.id)).toBeGreaterThan(0);
     expect(doc.patch(first.id).mask.reduce((n, v) => n + (v >= 128 ? 1 : 0), 0)).toBeGreaterThan(before);
+    const expanded = doc.object(id).rect;
+    expect(expanded.width).toBeGreaterThan(204);
 
     // «Ещё варианты» — так же: модель снова видит прежний красный слой, версии его заменяют
     const more = s.patchVariants(first.id, { variants: 1, model: 'flash', size: 'auto' });
@@ -163,7 +165,7 @@ describe('Правка части слоя', () => {
     expect(data[mid]).toBeGreaterThan(180);
     expect(data[mid + 1]).toBeLessThan(80);
     // Кольцо то же, слой с каждой перерисовкой не раздувается
-    expect(doc.object(id).rect).toEqual({ x: 98, y: 78, width: 204, height: 144 });
+    expect(doc.object(id).rect).toEqual(expanded);
     expect(second.layer[((150 - second.rect.y) * second.rect.width + 99 - second.rect.x) * 4 + 3]).toBe(255);
 
     // Проект помнит, что видела модель
