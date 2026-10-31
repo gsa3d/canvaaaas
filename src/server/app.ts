@@ -308,8 +308,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
 
   route('POST', '/api/objects', async (req, res) => {
-    const { shapes, name } = await readJson<{ shapes: MaskShape[]; name?: string }>(req);
-    json(res, { id: await session.saveObject(shapes, name) });
+    const { shapes, name, group } = await readJson<{ shapes: MaskShape[]; name?: string; group?: string }>(req);
+    json(res, { id: await session.saveObject(shapes, name, typeof group === 'string' ? group : undefined) });
   });
   route('POST', '/api/objects/:id/rename', async (req, res, [id]) => {
     const { name } = await readJson<{ name: string }>(req);
@@ -338,8 +338,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     json(res, { ids: session.fillUnder(id!, body) });
   });
   route('POST', '/api/objects/cut', async (req, res) => {
-    const { shapes, name } = await readJson<{ shapes: MaskShape[]; name?: string }>(req);
-    json(res, { id: await session.cutObject(shapes, name) });
+    const { shapes, name, group } = await readJson<{ shapes: MaskShape[]; name?: string; group?: string }>(req);
+    json(res, { id: await session.cutObject(shapes, name, typeof group === 'string' ? group : undefined) });
   });
   route('POST', '/api/objects/:id/current', async (req, res, [id]) => {
     const { patch } = await readJson<{ patch: string | null }>(req);
@@ -351,9 +351,33 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     await session.setHidden(id!, hidden === true);
     json(res, { ok: true });
   });
-  route('POST', '/api/objects/:id/order', async (req, res, [id]) => {
-    const { over } = await readJson<{ over: string | null }>(req);
-    await session.reorderLayer(id!, typeof over === 'string' ? over : null);
+  // Слой или группа — в группу into (null — в корень) прямо над её слоем или группой over (null — под всеми в ней)
+  route('POST', '/api/layers/:id/move', async (req, res, [id]) => {
+    const { into, over } = await readJson<{ into: string | null; over: string | null }>(req);
+    await session.moveLayer(id!, typeof into === 'string' ? into : null, typeof over === 'string' ? over : null);
+    json(res, { ok: true });
+  });
+  route('POST', '/api/groups', async (req, res) => {
+    const { ids, name } = await readJson<{ ids: string[]; name?: string }>(req);
+    if (!Array.isArray(ids)) throw new HttpError(400, 'Нет слоёв');
+    json(res, { id: await session.groupLayers(ids.map(String), name) });
+  });
+  route('POST', '/api/groups/:id/ungroup', async (_req, res, [id]) => {
+    await session.ungroup(id!);
+    json(res, { ok: true });
+  });
+  route('POST', '/api/groups/:id/rename', async (req, res, [id]) => {
+    const { name } = await readJson<{ name: string }>(req);
+    await session.renameGroup(id!, String(name ?? ''));
+    json(res, { ok: true });
+  });
+  route('POST', '/api/groups/:id/hidden', async (req, res, [id]) => {
+    const { hidden } = await readJson<{ hidden: boolean }>(req);
+    await session.setGroupHidden(id!, hidden === true);
+    json(res, { ok: true });
+  });
+  route('POST', '/api/groups/:id/delete', async (_req, res, [id]) => {
+    await session.deleteGroup(id!);
     json(res, { ok: true });
   });
   route('POST', '/api/objects/:id/move', async (req, res, [id]) => {

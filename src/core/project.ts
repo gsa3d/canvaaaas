@@ -9,7 +9,7 @@ import { extname } from 'node:path';
 import sharp from 'sharp';
 import type { InputImage } from '../providers/types.ts';
 import type { ModelChoice, SizeChoice, SketchStroke } from '../shared/api.ts';
-import { CanvasDocument, type DocObject, type Patch } from './document.ts';
+import { CanvasDocument, type DocGroup, type DocObject, type Patch } from './document.ts';
 import type { Rect } from './frame.ts';
 import { layerName, trim } from './objects.ts';
 import { checkSketch } from './sketch.ts';
@@ -78,7 +78,11 @@ interface Manifest {
     /** Откуда слой вырезали: рамка и маска дыры */
     hole?: { rect: Rect; mask: Part };
     mask: Part;
+    /** Группа, в которой лежит слой */
+    group?: string;
   }[];
+  /** Группы слоёв: имя, видимость и группа, в которой лежит эта */
+  groups?: { id: string; name: string; hidden?: boolean; group?: string; createdAt: string }[];
   /** Референсы: картинка, которая ушла с несколькими правками, хранится один раз */
   refs?: { mimeType: string; data: Part }[];
 }
@@ -180,7 +184,9 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
     edit: o.edit || undefined,
     freed: o.freed || undefined,
     mask: part(images[first + i]!),
+    group: o.group,
   }));
+  manifest.groups = doc.groups.map((g) => ({ id: g.id, name: g.name, hidden: g.hidden || undefined, group: g.group, createdAt: g.createdAt }));
   let parts = first + objects.length;
   patches.forEach((p, i) => {
     if (p.part) manifest.layers[i]!.part = part(images[parts++]!);
@@ -251,8 +257,22 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       edit: o.edit === true || undefined,
       freed: o.freed === true || undefined,
       hole: holes[i] ? { rect: o.hole!.rect, mask: new Uint8Array(holes[i]!) } : undefined,
+      group: typeof o.group === 'string' ? o.group : undefined,
     }),
   );
+  // Группы, которых нет, у слоёв не остаются; петли в группах обрывает дерево слоёв (layer-tree.ts)
+  const groupList = (manifest.groups ?? []).filter((g) => typeof g?.id === 'string');
+  const groupIds = new Set(groupList.map((g) => g.id));
+  const groups = groupList.map(
+    (g): DocGroup => ({
+      id: g.id,
+      name: String(g.name ?? ''),
+      hidden: g.hidden === true || undefined,
+      group: typeof g.group === 'string' && groupIds.has(g.group) && g.group !== g.id ? g.group : undefined,
+      createdAt: String(g.createdAt ?? ''),
+    }),
+  );
+  for (const o of objects) if (o.group && !groupIds.has(o.group)) o.group = undefined;
   // Копия, а не кусок файла: иначе в памяти остался бы весь файл
   const refs = (manifest.refs ?? []).map((r): InputImage => ({ mimeType: r.mimeType, data: Buffer.from(slice(r.data)) }));
   const patches = manifest.layers.map((l, i): Patch => {
@@ -289,7 +309,7 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
     };
   });
   if (manifest.version < 2) migrate(patches, objects);
-  const doc = CanvasDocument.restore(name, width, height, base!, patches, objects);
+  const doc = CanvasDocument.restore(name, width, height, base!, patches, objects, groups);
   doc.style = manifest.style ?? '';
   basePngs.set(doc.base, { state: doc.baseState, png: Promise.resolve(Buffer.from(baseBytes)) });
   return { doc, density: manifest.density };

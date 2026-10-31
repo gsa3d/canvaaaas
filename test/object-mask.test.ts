@@ -151,6 +151,31 @@ describe('Маска от модели на рисунке', () => {
   it('растянутая маска сдвигом не совмещается — ошибка', () => {
     expect(() => alignMask(disk(C.x, C.y, 80), drawing(), w, h)).toThrow(/растянула|сдвинула/);
   });
+
+  it('маска пышнее рисунка с одного края, в штриховке — не «растянутая»: половины края не уходят на линии рядом', () => {
+    // Рисунок тушью: штриховка вокруг и внутри, круг с контуром; модель обвела верх слева пышнее (как волосы бюста).
+    // Половина края, искавшая сдвиг в двух осях сразу, находила себе штрихи на ±15 px — и ровная маска была «растянутой»
+    const rgb = new Uint8Array(w * h * 3);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const r = Math.hypot(x - C.x, y - C.y);
+        const hatch = (x + 2 * y) % 9 < 2 || (2 * x - y + 900) % 11 < 2;
+        const v = r <= 68 ? ((x + y) % 9 < 1 ? 60 : 235) : r <= 72 ? 25 : hatch ? 40 : 240;
+        rgb.fill(v, (y * w + x) * 3, (y * w + x) * 3 + 3);
+      }
+    }
+    const mask = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const a = Math.atan2(y - C.y, x - C.x);
+        const bulge = a < -Math.PI / 2 ? 20 * Math.sin(-2 * a) ** 2 : 0;
+        if (Math.hypot(x - C.x, y - C.y) <= 72 + bulge) mask[y * w + x] = 255;
+      }
+    }
+    const res = alignMask(mask, rgb, w, h);
+    expect(Math.abs(res.dx)).toBeLessThanOrEqual(1);
+    expect(Math.abs(res.dy)).toBeLessThanOrEqual(1);
+  });
 });
 
 describe('Настройки интерфейса', () => {

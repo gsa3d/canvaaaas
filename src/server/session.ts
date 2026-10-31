@@ -6,7 +6,8 @@ import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import sharp from 'sharp';
-import { CanvasDocument, TILE_SIZE, type DocObject, type NewPatch, type Patch } from '../core/document.ts';
+import { CanvasDocument, TILE_SIZE, type DocGroup, type DocObject, type NewPatch, type Patch } from '../core/document.ts';
+import { buildTree, flatten, groupNodes, insertTop, layersOf, locate, moveNode, ungroupNode } from '../core/layer-tree.ts';
 import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, type ImageFormat } from '../core/image-file.ts';
 import { encodeProject, isProject, isProjectPath, openProject, PROJECT_EXTENSION } from '../core/project.ts';
 import type { Prefs } from '../core/prefs.ts';
@@ -187,6 +188,8 @@ interface Job {
   director: boolean;
   /** Каждому варианту, который лёг версией, модель сразу рисует маску по объекту (maskVariant) */
   objectMask: boolean;
+  /** Группа, сверху которой появится новый слой; нет — сверху всех */
+  group?: string;
   /** Обрывает маски по объекту: «Отменить» задачу обрывает их, «Остановить» шаги — нет */
   masks: AbortController;
   /** Что директор написал и для какой задачи (taskKey): та же задача — тот же текст, без нового вызова */
@@ -381,6 +384,7 @@ export class Session {
 
   state(): StateDto {
     const doc = this.doc;
+    const visible = doc ? doc.visibility() : () => true;
     return {
       provider: this.providerKind,
       models: this.modelOutputs(),
@@ -471,6 +475,8 @@ export class Session {
         rev: o.version,
         lost: o.lost,
         hidden: o.hidden,
+        visible: visible(o),
+        group: o.group,
         current: o.current,
         kind: o.kind,
         under: o.under,
@@ -478,6 +484,7 @@ export class Session {
         layer: liftedLayer(doc!, o.id)?.id,
         freed: o.freed || doc!.objects.some((f) => f.kind === 'fill' && f.under === o.id) || undefined,
       })),
+      groups: (doc?.groups ?? []).map((g) => ({ id: g.id, name: g.name, hidden: g.hidden, group: g.group })),
       segment: this.segmentation.state(),
       canUndo: doc?.canUndo ?? false,
       canRedo: doc?.canRedo ?? false,
@@ -952,7 +959,7 @@ export class Session {
     if (object) {
       const o = this.requireDoc().objects.find((x) => x.id === object);
       if (!o) throw new Error('Слоя уже нет: выберите другой');
-      if (o.hidden) throw new Error(`Слой «${o.name}» скрыт: покажите его`);
+      if (!this.requireDoc().visibility()(o)) throw new Error(`Слой «${o.name}» скрыт: покажите его`);
     }
     const refIds = req.refs ?? [];
     if (refIds.length > MAX_REFERENCES) throw new Error(`Не больше ${MAX_REFERENCES} референсов на правку`);
@@ -975,6 +982,7 @@ export class Session {
       sketch: checkSketch(req.sketch),
       director: !!req.director,
       objectMask: !!req.objectMask,
+      group: !object && req.group && this.requireDoc().groups.some((g) => g.id === req.group) ? req.group : undefined,
     });
   }
 
@@ -1048,6 +1056,7 @@ export class Session {
       | 'sketch'
       | 'director'
       | 'objectMask'
+      | 'group'
       | 'directed'
       | 'base'
       | 'whole'
@@ -1492,8 +1501,8 @@ export class Session {
       const before = doc.region(region);
       let placed: string | undefined;
       doc.batch(() => {
-        // Новый слой — сверху (фон — в самом низу), остальные не трогаются
-        if (!existing) doc.setObjects(job.bottom ? [owner, ...doc.objects] : [...doc.objects, owner]);
+        // Новый слой — сверху (своей группы, если она ещё есть; фон — в самом низу), остальные не трогаются
+        if (!existing) doc.setObjects(job.bottom ? [owner, ...doc.objects] : onTop(doc, owner, job.group));
         if (freed && !freed.freed) doc.setObjects(doc.objects.map((o) => (o.id === freed.id ? { ...o, freed: true } : o)));
         if (grown) doc.setObjects(doc.objects.map((o) => (o.id === owner.id ? { ...o, ...grown, version: doc.nextObjectVersion(), lost: undefined } : o)));
         placed = doc.addPatch({ ...version, object: owner.id }).id;
@@ -1580,24 +1589,79 @@ export class Session {
   }
 
   /**
-   * Переставить слой в стопке: прямо над слоем over (и над его частями), null — под всеми слоями. Слой едет со своими
-   * частями (из старых проектов), заплатка фона под ним — следом сама (она всегда прямо под своим слоем). Шаг ⌘Z
+   * Переставить слой или группу (id): в группу into (null — в корень) прямо над её слоем или группой over (null — под всеми
+   * в ней). Группа едет со всем, что в ней; слой — со своими частями и заплаткой фона (из старых проектов). Шаг ⌘Z
    */
-  reorderLayer(objectId: string, over: string | null): Promise<void> {
+  moveLayer(id: string, into: string | null, over: string | null): Promise<void> {
     return this.serialDoc((doc) => {
-      doc.object(objectId);
-      const group = new Set([objectId, ...descendants(doc.objects, objectId).map((o) => o.id)]);
-      if (over !== null && group.has(over)) return;
-      const rest = doc.objects.filter((o) => !group.has(o.id));
-      let at = 0;
-      if (over !== null) {
-        doc.object(over);
-        const target = new Set([over, ...descendants(rest, over).map((o) => o.id)]);
-        at = rest.findLastIndex((o) => target.has(o.id)) + 1;
-      }
-      const next = [...rest.slice(0, at), ...doc.objects.filter((o) => group.has(o.id)), ...rest.slice(at)];
-      if (next.every((o, i) => o === doc.objects[i])) return;
-      doc.setObjects(next);
+      const tree = buildTree(doc.objects, doc.groups);
+      if (!locate(tree, id)) throw new Error('Нет такого слоя');
+      if (!moveNode(tree, id, into, over)) return;
+      const next = flatten(tree);
+      doc.setObjects(next.objects, next.groups);
+      this.changed();
+    });
+  }
+
+  /**
+   * Сгруппировать слои и группы ids: новая группа встаёт на место верхнего из них, они в ней — в прежнем порядке. Шаг ⌘Z.
+   * Возвращает id группы
+   */
+  groupLayers(ids: string[], name?: string): Promise<string> {
+    return this.serialDoc((doc) => {
+      const tree = buildTree(doc.objects, doc.groups);
+      const group: DocGroup = { id: randomUUID(), name: name?.trim() || nextGroupName(doc), createdAt: new Date().toISOString() };
+      groupNodes(tree, ids, group);
+      const next = flatten(tree);
+      doc.setObjects(next.objects, next.groups);
+      this.changed();
+      return group.id;
+    });
+  }
+
+  /** Разгруппировать: слои и группы из неё встают на её место. Шаг ⌘Z */
+  ungroup(groupId: string): Promise<void> {
+    return this.serialDoc((doc) => {
+      doc.group(groupId);
+      const tree = buildTree(doc.objects, doc.groups);
+      ungroupNode(tree, groupId);
+      const next = flatten(tree);
+      doc.setObjects(next.objects, next.groups);
+      this.changed();
+    });
+  }
+
+  renameGroup(groupId: string, name: string): Promise<void> {
+    return this.serialDoc((doc) => {
+      const trimmed = name.trim();
+      if (!trimmed) throw new Error('Пустое имя');
+      if (doc.group(groupId).name === trimmed) return;
+      doc.setObjects(doc.objects, doc.groups.map((g) => (g.id === groupId ? { ...g, name: trimmed } : g)));
+      this.changed();
+    });
+  }
+
+  /** Скрыть группу со всем, что в ней, или показать. Шаг ⌘Z */
+  setGroupHidden(groupId: string, hidden: boolean): Promise<void> {
+    return this.serialDoc((doc) => {
+      if (!!doc.group(groupId).hidden === hidden) return;
+      doc.setObjects(doc.objects, doc.groups.map((g) => (g.id === groupId ? { ...g, hidden: hidden || undefined } : g)));
+      this.changed();
+    });
+  }
+
+  /** Удалить группу со всеми слоями в ней и их версиями; группа уходит сама, раз слоёв в ней нет. Одним шагом ⌘Z */
+  deleteGroup(groupId: string): Promise<void> {
+    return this.serialDoc((doc) => {
+      doc.group(groupId);
+      const tree = buildTree(doc.objects, doc.groups);
+      const at = locate(tree, groupId)!;
+      const gone = new Set(layersOf(at.list[at.index]!).flatMap((o) => [o.id, ...descendants(doc.objects, o.id).map((d) => d.id)]));
+      for (const f of doc.objects) if (f.kind === 'fill' && f.under && gone.has(f.under)) gone.add(f.id);
+      doc.batch(() => {
+        doc.removePatches(doc.patches.filter((p) => p.object && gone.has(p.object)).map((p) => p.id));
+        doc.setObjects(doc.objects.filter((o) => !gone.has(o.id)));
+      });
       this.changed();
     });
   }
@@ -1698,7 +1762,7 @@ export class Session {
    * Слой из выделения: копия того, что сейчас видно под ним, — своими пикселями, сверху всех. Другие слои не трогаются;
    * правки под ним его больше не меняют. Одним шагом ⌘Z
    */
-  saveObject(input: MaskShape[], name?: string): Promise<string> {
+  saveObject(input: MaskShape[], name?: string, group?: string): Promise<string> {
     return this.serialDoc(async (doc) => {
       const bitmap = await this.selectionBitmap(doc, input);
       if (this.doc !== doc) throw new Error('Документ уже закрыт');
@@ -1710,7 +1774,7 @@ export class Session {
         version: doc.nextObjectVersion(),
       };
       doc.batch(() => {
-        doc.setObjects([...doc.objects, obj]);
+        doc.setObjects(onTop(doc, obj, group));
         this.lift(doc, obj, `copy:${obj.id}`);
       });
       this.changed();
@@ -1723,7 +1787,7 @@ export class Session {
    * там видны: в слое — его версия теряет этот кусок (область слоя прежняя, дыра — его), в фоне — белое место. Копия
    * шире дыры на контур, поэтому, пока слой на месте, картинка та же. Генерации нет. Одним шагом ⌘Z
    */
-  cutObject(input: MaskShape[], name?: string): Promise<string> {
+  cutObject(input: MaskShape[], name?: string, group?: string): Promise<string> {
     return this.serialDoc(async (doc) => {
       const hole = await this.selectionBitmap(doc, input);
       if (this.doc !== doc) throw new Error('Документ уже закрыт');
@@ -1747,7 +1811,7 @@ export class Session {
       }
       doc.batch(() => {
         // Сначала копия — того, что видно сейчас, с дырами ещё нет
-        doc.setObjects([...doc.objects, obj]);
+        doc.setObjects(onTop(doc, obj, group));
         this.lift(doc, obj, `cut:${obj.id}`);
         for (const [patchId, claim] of claims) {
           if (patchId === null) {
@@ -1809,7 +1873,7 @@ export class Session {
   mergeIntoBase(objectId: string): Promise<void> {
     return this.serialDoc((doc) => {
       const obj = doc.object(objectId);
-      if (obj.hidden) throw new Error(`Слой «${obj.name}» скрыт: покажите его или удалите`);
+      if (!doc.visibility()(obj)) throw new Error(`Слой «${obj.name}» скрыт: покажите его или удалите`);
       // Слой, его части (из старых проектов) и заплатки фона под ними
       const group = new Set([objectId, ...descendants(doc.objects, objectId).map((o) => o.id)]);
       for (const f of doc.objects) if (f.kind === 'fill' && f.under && group.has(f.under)) group.add(f.id);
@@ -1845,7 +1909,8 @@ export class Session {
    */
   mergeLayers(ids: string[]): Promise<string> {
     return this.serialDoc((doc) => {
-      const picked = [...new Set(ids)].map((id) => doc.object(id)).filter((o) => o.kind !== 'fill' && !o.hidden);
+      const visible = doc.visibility();
+      const picked = [...new Set(ids)].map((id) => doc.object(id)).filter((o) => o.kind !== 'fill' && visible(o));
       if (picked.length < 2) throw new Error('Объединяют два видимых слоя или больше');
       const group = new Set(picked.flatMap((o) => [o.id, ...descendants(doc.objects, o.id).map((d) => d.id)]));
       const mine = doc.drawOrder().filter((p) => p.object && group.has(p.object));
@@ -1857,7 +1922,9 @@ export class Session {
       // Верхний — тот, чья версия рисуется последней; его место и имя
       const top = doc.object(mine.at(-1)!.object!);
       const topId = top.parent && group.has(top.parent) ? picked.find((o) => o.id === top.parent)?.id ?? top.id : top.id;
-      const merged: DocObject = { id: randomUUID(), name: doc.object(topId).name, ...shape, createdAt: new Date().toISOString(), version: doc.nextObjectVersion() };
+      // Объединённый слой — в группе верхнего, на его месте
+      const head = doc.object(topId);
+      const merged: DocObject = { id: randomUUID(), name: head.name, ...shape, createdAt: new Date().toISOString(), version: doc.nextObjectVersion(), group: head.group };
       const next = doc.objects.flatMap((o): DocObject[] => {
         if (o.id === topId) return [merged];
         if (group.has(o.id)) return [];
@@ -2091,6 +2158,22 @@ export class Session {
 /** Слой отделённого объекта; нет — объект не отделён */
 function liftedLayer(doc: CanvasDocument, objectId: string): Patch | undefined {
   return doc.patches.findLast((p) => p.lifted && p.object === objectId);
+}
+
+/** Стопка с новым слоем сверху группы group, если она есть, иначе сверху всех */
+function onTop(doc: CanvasDocument, obj: DocObject, group: string | undefined): DocObject[] {
+  if (!group || !doc.groups.some((g) => g.id === group)) return [...doc.objects, obj];
+  const tree = buildTree(doc.objects, doc.groups);
+  insertTop(tree, obj, group);
+  return flatten(tree).objects;
+}
+
+/** «Группа N» со следующим свободным номером */
+function nextGroupName(doc: CanvasDocument): string {
+  const used = new Set(doc.groups.map((g) => g.name));
+  let n = doc.groups.length + 1;
+  while (used.has(`Группа ${n}`)) n++;
+  return `Группа ${n}`;
 }
 
 /** «Слой N» со следующим свободным номером */

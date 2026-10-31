@@ -11,8 +11,17 @@ const PAD = 128;
 /** Сдвиг маски ищется до такой доли большей стороны куска, но не меньше SHIFT_MIN px */
 const SHIFT_SHARE = 0.02;
 const SHIFT_MIN = 16;
-/** Половинам края нужны сдвиги, разошедшиеся больше чем на такую долю расстояния между ними, — картинка растянута */
+/**
+ * Половинам края нужны сдвиги, разошедшиеся больше чем на такую долю расстояния между ними (но не меньше чем на
+ * STRETCH_MIN_PX), — картинка растянута. Меньше незаметно: маска шире объекта на контур
+ */
 const STRETCH_MAX = 0.03;
+const STRETCH_MIN_PX = 4;
+/**
+ * И только если своим сдвигом половина края ложится на рисунок заметно лучше, чем общим: у растянутой картинки при общем
+ * сдвиге она мимо контура (свой лучше в разы), а на штриховке свой сдвиг — соседняя линия, лучше на проценты
+ */
+const STRETCH_GAIN = 1.2;
 /** Меньше стольких пикселей края — по нему ничего не понять */
 const HALF_MIN = 100;
 /** Край длиннее берётся через равные промежутки: столько пикселей хватает, а поиск сдвига идёт по каждому */
@@ -92,7 +101,10 @@ export async function readObjectMask(generated: Buffer, req: MaskRequest): Promi
  * Маска, совмещённая с рисунком (rgb того же размера): модель могла сдвинуть картинку на несколько пикселей. Сдвиг —
  * тот, при котором край маски ложится на самые резкие перепады яркости рисунка. Если левой и правой (верхней и нижней)
  * половинам края нужны разные сдвиги, модель картинку растянула, и сдвигом её не совместить — ошибка; так же, если сдвиг
- * дальше, чем ищется. Край у рамки куска не в счёт: там маску обрезает кусок, а не объект
+ * дальше, чем ищется. Сдвиг половины ищется только вдоль её оси, по другой — общий, и растяжением считается, только
+ * если он ложится заметно лучше общего (STRETCH_GAIN): иначе на рисунке тушью половина края находила себе линии штриховки
+ * рядом (±15 px при маске, лёгшей ровно), и ровная маска ChatGPT выходила «растянутой». Край у рамки куска не в счёт:
+ * там маску обрезает кусок, а не объект
  */
 export function alignMask(mask: Uint8Array, rgb: Uint8Array, width: number, height: number): { mask: Uint8Array; dx: number; dy: number } {
   const n = width * height;
@@ -144,10 +156,24 @@ export function alignMask(mask: Uint8Array, rgb: Uint8Array, width: number, heig
   }
   cx /= border.length;
   cy /= border.length;
+  /** Сдвиг половины края вдоль оси axis (по другой оси — общий) и во сколько раз он ложится на рисунок лучше общего */
+  const along = (points: number[], axis: 'dx' | 'dy') => {
+    let out = { s: 0, k: -1 };
+    let common = 0;
+    for (let s = -reach; s <= reach; s++) {
+      const d = axis === 'dx' ? dy * width + s : s * width + dx;
+      let k = 0;
+      for (const i of points) k += grad[i + d]!;
+      if (k > out.k) out = { s, k };
+      if (s === (axis === 'dx' ? dx : dy)) common = k;
+    }
+    return { s: out.s, gain: common > 0 ? out.k / common : Infinity };
+  };
   const stretched = (a: number[], b: number[], axis: 'dx' | 'dy', at: (i: number) => number) => {
     if (a.length < HALF_MIN || b.length < HALF_MIN) return false;
     const mid = (p: number[]) => p.reduce((s, i) => s + at(i), 0) / p.length;
-    return Math.abs(best(a)[axis] - best(b)[axis]) > STRETCH_MAX * Math.abs(mid(b) - mid(a));
+    const [sa, sb] = [along(a, axis), along(b, axis)];
+    return Math.abs(sa.s - sb.s) > Math.max(STRETCH_MIN_PX, STRETCH_MAX * Math.abs(mid(b) - mid(a))) && Math.max(sa.gain, sb.gain) > STRETCH_GAIN;
   };
   const column = (i: number) => i % width;
   const row = (i: number) => Math.floor(i / width);

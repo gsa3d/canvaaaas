@@ -13,6 +13,7 @@ import type { ModelChoice, SizeChoice, SketchStroke } from '../shared/api.ts';
 import { applyLayer, type RawImage, type RawRegion } from './edit-region.ts';
 import { intersect, type Rect } from './frame.ts';
 import { encodeImage } from './image-file.ts';
+import { liveGroups } from './layer-tree.ts';
 import { featherAlpha, featherAlphaRegion, MASK_THRESHOLD } from './mask.ts';
 
 export const TILE_SIZE = 512;
@@ -96,6 +97,22 @@ export interface DocObject {
   freed?: boolean;
   /** Откуда слой вырезали: дыра на старом месте (со сдвигом не едет); «Дорисовать фон» закрашивает её, где бы слой ни был */
   hole?: { rect: Rect; mask: Uint8Array };
+  /** Группа, в которой лежит слой (layer-tree.ts) */
+  group?: string;
+}
+
+/**
+ * Группа слоёв, как папка в Photoshop: имя и видимость. Места в стопке у неё нет — она там, где её слои (они лежат
+ * подряд); группа без слоёв уходит сама. Запись не меняется на месте, как и слой
+ */
+export interface DocGroup {
+  id: string;
+  name: string;
+  /** Скрыта — со всем, что в ней */
+  hidden?: boolean;
+  /** Группа, в которой лежит эта */
+  group?: string;
+  createdAt: string;
 }
 
 interface Level {
@@ -121,7 +138,8 @@ type HistoryOp =
   | { kind: 'toggle'; patchId: string }
   /** changed — участок маски, где before и after различаются: отмена пересчитывает только его */
   | { kind: 'mask'; patchId: string; before: MaskState; after: MaskState; changed?: Rect }
-  | { kind: 'objects'; before: DocObject[]; after: DocObject[] }
+  /** groups — группы до и после, если они поменялись */
+  | { kind: 'objects'; before: DocObject[]; after: DocObject[]; groups?: { before: DocGroup[]; after: DocGroup[] } }
   /** Слой сдвинули: размер тот же, другое место */
   | { kind: 'move'; patchId: string; from: Rect; to: Rect }
   /** В исходник вписали участок (влили слой, свели слои); state — номер состояния исходника до и после */
@@ -201,6 +219,7 @@ export class CanvasDocument {
   style = '';
   patches: Patch[] = [];
   objects: DocObject[] = [];
+  groups: DocGroup[] = [];
   /** Растёт при каждом изменении холста: по нему браузер понимает, что тайлы устарели */
   rev = 1;
   private readonly levels: Level[];
@@ -215,7 +234,7 @@ export class CanvasDocument {
   /** Шаги внутри batch: лягут одним */
   private collecting: HistoryOp[] | null = null;
 
-  private constructor(name: string, width: number, height: number, base: Buffer, patches: Patch[] = [], objects: DocObject[] = []) {
+  private constructor(name: string, width: number, height: number, base: Buffer, patches: Patch[] = [], objects: DocObject[] = [], groups: DocGroup[] = []) {
     this.name = name;
     this.width = width;
     this.height = height;
@@ -223,6 +242,7 @@ export class CanvasDocument {
     this.composite = Buffer.from(base);
     this.patches = patches;
     this.objects = objects;
+    this.groups = liveGroups(objects, groups);
     this.sync();
     for (const p of this.drawOrder()) applyLayer({ data: this.composite, rect: this.bounds(), channels: 3 }, p.rect, p.layer);
     this.levels = pyramid(this.composite, width, height);
@@ -249,10 +269,10 @@ export class CanvasDocument {
     return new CanvasDocument(name, width, height, base);
   }
 
-  /** Документ из проекта .caaa: исходник, слои с масками и объекты как были, история отмены начинается заново */
-  static restore(name: string, width: number, height: number, base: Buffer, patches: Patch[], objects: DocObject[] = []): CanvasDocument {
+  /** Документ из проекта .caaa: исходник, слои с масками, их группы и версии как были, история отмены начинается заново */
+  static restore(name: string, width: number, height: number, base: Buffer, patches: Patch[], objects: DocObject[] = [], groups: DocGroup[] = []): CanvasDocument {
     if (base.length !== width * height * 3) throw new Error('Исходник не того размера');
-    return new CanvasDocument(name, width, height, base, patches, objects);
+    return new CanvasDocument(name, width, height, base, patches, objects, groups);
   }
 
   raw(): RawImage {
@@ -301,9 +321,11 @@ export class CanvasDocument {
     return this.baseState ? `base${this.baseState}|${layers}` : layers;
   }
 
-  /** Объекты с именами, частями и масками: меняется — проекту .caaa есть что сохранить */
+  /** Слои с именами, частями, масками и группами: меняется — проекту .caaa есть что сохранить */
   get objectsKey(): string {
-    return this.objects.map((o) => `${o.id}:${o.version}:${o.parent ?? ''}:${o.lost ? 1 : 0}:${o.hidden ? 1 : 0}:${o.current ?? ''}:${o.name}`).join('\n');
+    const layers = this.objects.map((o) => `${o.id}:${o.version}:${o.parent ?? ''}:${o.lost ? 1 : 0}:${o.hidden ? 1 : 0}:${o.current ?? ''}:${o.group ?? ''}:${o.name}`);
+    const groups = this.groups.map((g) => `${g.id}:${g.group ?? ''}:${g.hidden ? 1 : 0}:${g.name}`);
+    return [...layers, ...groups].join('\n');
   }
 
   get canUndo(): boolean {
@@ -450,11 +472,21 @@ export class CanvasDocument {
     patch.feather = 0;
   }
 
-  /** Новый список объектов — шаг отмены */
-  setObjects(next: DocObject[]): void {
-    const op: HistoryOp = { kind: 'objects', before: this.objects, after: next };
-    this.placeObjects(next);
+  /**
+   * Новый список слоёв (и групп, если они поменялись) — шаг отмены. Группы, где не осталось слоёв, уходят тем же шагом
+   */
+  setObjects(next: DocObject[], groups: DocGroup[] = this.groups): void {
+    const live = liveGroups(next, groups);
+    const changed = live.length !== this.groups.length || live.some((g, i) => g !== this.groups[i]);
+    const op: HistoryOp = { kind: 'objects', before: this.objects, after: next, groups: changed ? { before: this.groups, after: live } : undefined };
+    this.placeObjects(next, live);
     this.record(op);
+  }
+
+  group(groupId: string): DocGroup {
+    const g = this.groups.find((x) => x.id === groupId);
+    if (!g) throw new Error('Нет такой группы');
+    return g;
   }
 
   /** Номер для новой маски объекта */
@@ -499,7 +531,7 @@ export class CanvasDocument {
     if (op.kind === 'group') {
       for (const o of [...op.ops].reverse()) this.revert(o);
     } else if (op.kind === 'objects') {
-      this.placeObjects(op.before);
+      this.placeObjects(op.before, op.groups?.before ?? this.groups);
     } else if (op.kind === 'add') {
       this.patches.splice(op.index, 1);
       this.sync();
@@ -527,7 +559,7 @@ export class CanvasDocument {
     if (op.kind === 'group') {
       for (const o of op.ops) this.apply(o);
     } else if (op.kind === 'objects') {
-      this.placeObjects(op.after);
+      this.placeObjects(op.after, op.groups?.after ?? this.groups);
     } else if (op.kind === 'add') {
       this.patches.splice(op.index, 0, op.patch);
       this.sync();
@@ -739,12 +771,19 @@ export class CanvasDocument {
     );
   }
 
-  /** Виден ли слой: он сам и всё, частью чего он является, не скрыто */
-  private visibility(): (o: DocObject | undefined) => boolean {
+  /** Виден ли слой: он сам, всё, частью чего он является, и группы, в которых всё это лежит, не скрыты */
+  visibility(): (o: DocObject | undefined) => boolean {
     const byId = new Map(this.objects.map((o) => [o.id, o]));
+    const groups = new Map(this.groups.map((g) => [g.id, g]));
+    const groupShown = (id: string | undefined) => {
+      for (let i = 0, g = id ? groups.get(id) : undefined; g && i < 64; i++, g = g.group ? groups.get(g.group) : undefined) {
+        if (g.hidden) return false;
+      }
+      return true;
+    };
     return (o) => {
       for (let i = 0; o && i < 64; i++) {
-        if (o.hidden) return false;
+        if (o.hidden || !groupShown(o.group)) return false;
         o = o.parent ? byId.get(o.parent) : undefined;
       }
       return true;
@@ -765,10 +804,11 @@ export class CanvasDocument {
     }
   }
 
-  /** Новый список слоев: участки, где видимые версии или их порядок поменялись, пересобираются */
-  private placeObjects(next: DocObject[]): void {
+  /** Новый список слоев и групп: участки, где видимые версии или их порядок поменялись, пересобираются */
+  private placeObjects(next: DocObject[], groups: DocGroup[]): void {
     const before = this.drawOrder();
     this.objects = next;
+    this.groups = groups;
     this.sync();
     const after = this.drawOrder();
     const was = new Set(before);

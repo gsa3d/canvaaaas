@@ -36,7 +36,7 @@ describe('Порядок слоёв', () => {
     expect(px(doc, 110, 110)).toEqual(BLUE);
     const before = Buffer.from(doc.composite);
 
-    await s.reorderLayer('a', 'b');
+    await s.moveLayer('a', null, 'b');
     expect(doc.objects.map((o) => o.id)).toEqual(['b', 'a']);
     expect(px(doc, 110, 110)).toEqual(RED);
     // Там, где они не перекрываются, — как было
@@ -51,11 +51,11 @@ describe('Порядок слоёв', () => {
     expect(px(doc, 110, 110)).toEqual(RED);
 
     // Под всеми — снова под синим; туда же ещё раз — ничего не меняется
-    await s.reorderLayer('a', null);
+    await s.moveLayer('a', null, null);
     expect(px(doc, 110, 110)).toEqual(BLUE);
     const steps = (doc as unknown as { undoStack: unknown[] }).undoStack.length;
-    await s.reorderLayer('a', null);
-    await s.reorderLayer('b', 'a');
+    await s.moveLayer('a', null, null);
+    await s.moveLayer('b', null, 'a');
     expect((doc as unknown as { undoStack: unknown[] }).undoStack.length).toBe(steps);
   });
 
@@ -67,17 +67,17 @@ describe('Порядок слоёв', () => {
     // Часть из старого проекта, появившаяся позже, — выше всех, заплатка — прямо под своим слоем
     expect(order()).toEqual(['fill', 'a', 'b', 'part']);
 
-    await s.reorderLayer('a', 'b');
+    await s.moveLayer('a', null, 'b');
     expect(order()).toEqual(['b', 'fill', 'a', 'part']);
     expect(px(doc, 110, 110)).toEqual(RED);
     expect(px(doc, 70, 70)).toEqual(GREEN);
 
-    // Слой не кладут над его же частью
-    await s.reorderLayer('a', 'part');
+    // Часть — не место в стопке: она едет со своим слоем
+    await expect(s.moveLayer('b', null, 'part')).rejects.toThrow();
     expect(order()).toEqual(['b', 'fill', 'a', 'part']);
 
     // Синий — над красным с частью: над частью тоже
-    await s.reorderLayer('b', 'a');
+    await s.moveLayer('b', null, 'a');
     expect(order()).toEqual(['fill', 'a', 'part', 'b']);
   });
 });

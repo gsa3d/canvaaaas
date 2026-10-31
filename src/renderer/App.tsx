@@ -5,7 +5,6 @@ import {
   IconArrowsMove,
   IconBrush,
   IconCubePlus,
-  IconDots,
   IconEraser,
   IconEye,
   IconEyeOff,
@@ -32,7 +31,15 @@ import {
   IconAlertTriangle,
   IconCheck,
   IconArrowBarToDown,
+  IconArrowsMaximize,
+  IconBucketDroplet,
+  IconChevronDown,
+  IconChevronRight,
+  IconFolder,
+  IconFolderOpen,
+  IconSparkles,
   IconTrash,
+  IconTrashX,
   IconWand,
   IconX,
   type Icon,
@@ -50,6 +57,7 @@ import {
   shapesBBox,
   type AppCommand,
   type DocDto,
+  type GroupDto,
   type JobDto,
   type MaskEditResult,
   type MaskResult,
@@ -294,6 +302,8 @@ export function App() {
   const [maskLayer, setMaskLayer] = useState<string | null>(null);
   /** Слой, в котором работают: палочка ищет только в нём, генерация ложится его версией; нет — новым слоем */
   const [active, setActive] = useState<string | null>(null);
+  /** Группа, выбранная в «Слоях»: её слои в выделении, новый слой ляжет сверху в неё */
+  const [activeGroup, setActiveGroup] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0);
   const [toast, setToast] = useState<{ text: string; error: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -329,12 +339,14 @@ export function App() {
   const jobs = state?.jobs ?? [];
   const layers = state?.history ?? [];
   const objects = state?.objects ?? [];
+  const groups = state?.groups ?? [];
   const segment = state?.segment;
   const segmentReady = segment?.status === 'ready';
   selectionRef.current = selection;
   const editedLayer = layers.find((p) => p.id === maskLayer && p.active) ?? null;
   const maskEdit = editedLayer ? layerMaskEdit(editedLayer, layers) : null;
   const activeObj = active ? objects.find((o) => o.id === active) : undefined;
+  const activeGrp = activeGroup ? groups.find((g) => g.id === activeGroup) : undefined;
 
   const notify = (text: string, error = true) => {
     setToast({ text, error });
@@ -375,11 +387,15 @@ export function App() {
     formOrder.current = [];
     setMaskLayer(null);
     setActive(null);
+    setActiveGroup(null);
   }, [doc?.id]);
-  // Удалённый слой — работа вне слоя
+  // Удалённый слой — работа вне слоя; ушедшая группа — тоже
   useEffect(() => {
     if (active && state && !activeObj) setActive(null);
   }, [active, !!activeObj]);
+  useEffect(() => {
+    if (activeGroup && state && !activeGrp) setActiveGroup(null);
+  }, [activeGroup, !!activeGrp]);
   useEffect(() => viewRef.current?.setLayer(activeObj && !maskLayer ? objectShape(activeObj) : null), [activeObj?.id, activeObj?.rev, !!maskLayer]);
   // Слой, в который вошли щелчком на холсте, виден и в списке
   useEffect(() => {
@@ -615,7 +631,9 @@ export function App() {
   const saveObject = async (cut = false): Promise<ObjectDto | undefined> => {
     if (!doc || !selection.some((s) => !s.erase)) return;
     try {
-      const { id } = await post<{ id: string }>(cut ? '/api/objects/cut' : '/api/objects', { shapes: selection });
+      // Копия ложится сверху выбранной группы или группы слоя, в котором работают
+      const group = activeGroup ?? activeObj?.group;
+      const { id } = await post<{ id: string }>(cut ? '/api/objects/cut' : '/api/objects', { shapes: selection, group });
       // Состояние — с новым слоем: запрошенное раньше и пришедшее позже его не перебьёт
       const seq = ++refreshSeq.current;
       const s = await getState();
@@ -626,6 +644,7 @@ export function App() {
         formOrder.current.push('shape');
         setSelection([objectShape(o)]);
         setActive(o.id);
+        setActiveGroup(null);
         notify(`Слой «${o.name}»`, false);
       }
       return o;
@@ -654,6 +673,68 @@ export function App() {
       fail(err);
     }
   };
+  /** ⌘G: выбранная группа, слои в выделении (Shift-щелчком в списке) или тот, в котором работают, — в новую группу */
+  const groupLayers = async () => {
+    const ids = activeGroup ? [activeGroup] : [...new Set([...selectedObjects, ...(active ? [active] : [])])];
+    if (!ids.length) {
+      notify('Выберите в «Слоях» слои: щелчок или Shift-щелчок', false);
+      return;
+    }
+    try {
+      const { id } = await post<{ id: string }>('/api/groups', { ids });
+      // Состояние — с новой группой: иначе её выбор сбросился бы как выбор ушедшей
+      const seq = ++refreshSeq.current;
+      const s = await getState();
+      if (seq === refreshSeq.current) setState(s);
+      setActive(null);
+      setActiveGroup(id);
+    } catch (err) {
+      fail(err);
+    }
+  };
+  /** ⇧⌘G: слои из группы — на её место */
+  const ungroup = (g: GroupDto | undefined) => {
+    if (!g) {
+      notify('Выберите группу в «Слоях»', false);
+      return;
+    }
+    post(`/api/groups/${g.id}/ungroup`).then(() => setActiveGroup(null), fail);
+  };
+  const deleteGroup = (g: GroupDto) => {
+    post(`/api/groups/${g.id}/delete`)
+      .then(() => {
+        setActiveGroup(null);
+        clearSelection();
+        notify(`Группа «${short(g.name)}» удалена со слоями. ⌘Z вернёт`, false);
+      })
+      .catch(fail);
+  };
+  /**
+   * Щелчок по группе в «Слоях»: её видимые слои — в выделение, новый слой ляжет сверху в неё. С ⌘ или Shift — её слои
+   * добавляются к выделению; второй щелчок — назад к картинке
+   */
+  const selectGroup = (g: GroupDto, add: boolean) => {
+    const byId = new Map(groups.map((x) => [x.id, x]));
+    const within = (o: ObjectDto) => {
+      for (let i = 0, id = o.group; id && i < 64; i++, id = byId.get(id)?.group) if (id === g.id) return true;
+      return false;
+    };
+    const shapes = objects.filter((o) => o.kind !== 'fill' && o.visible && within(o)).map(objectShape);
+    setActive(null);
+    if (add) {
+      const ids = new Set(shapes.map((x) => (x as MaskRef).id));
+      updateSelection((sel) => [...sel.filter((x) => !(x.kind === 'mask' && ids.has(x.id))), ...shapes]);
+      setActiveGroup(null);
+    } else if (activeGroup === g.id) {
+      setActiveGroup(null);
+      clearSelection();
+    } else {
+      formOrder.current = formOrder.current.filter((k) => k !== 'shape');
+      if (shapes.length) formOrder.current.push('shape');
+      updateSelection(() => shapes);
+      setActiveGroup(g.id);
+    }
+  };
   /** Влить слой в фон: то, что от него видно, становится исходником */
   const mergeDown = (o: ObjectDto | undefined) => {
     if (!o) {
@@ -679,6 +760,7 @@ export function App() {
    */
   const selectObject = (o: ObjectDto, add: boolean) => {
     const shape = objectShape(o);
+    setActiveGroup(null);
     if (add) {
       // Несколько слоёв вместе правят новым слоем поверх них
       const has = selection.some((s) => s.kind === 'mask' && s.id === shape.id && !s.erase);
@@ -700,6 +782,7 @@ export function App() {
    */
   const toBackground = () => {
     setActive(null);
+    setActiveGroup(null);
     const own = selectionRef.current.filter((s) => !(s.kind === 'mask' && s.id.startsWith('obj:')));
     if (!own.length) clearSelection();
     else if (own.length < selectionRef.current.length) updateSelection(() => own);
@@ -710,6 +793,7 @@ export function App() {
     formOrder.current.push('shape');
     updateSelection(() => [objectShape(o)]);
     setActive(o.id);
+    setActiveGroup(null);
   };
   const selectedObjects = new Set(selection.flatMap((s) => (s.kind === 'mask' && s.id.startsWith('obj:') && !s.erase ? [s.id.slice(4)] : [])));
 
@@ -779,6 +863,7 @@ export function App() {
       await post('/api/jobs', {
         shapes: selection,
         object: activeObj?.id,
+        group: activeObj ? undefined : (activeGroup ?? undefined),
         prompt,
         variants: countFor(stepwise),
         model,
@@ -900,6 +985,12 @@ export function App() {
       case 'merge-layers':
         void mergeLayers();
         break;
+      case 'group-layers':
+        void groupLayers();
+        break;
+      case 'ungroup':
+        ungroup(activeGrp);
+        break;
       case 'merge-down':
         mergeDown(activeObj ?? (selectedObjects.size === 1 ? objects.find((x) => selectedObjects.has(x.id)) : undefined));
         break;
@@ -983,9 +1074,12 @@ export function App() {
       if (zoomMenu) setZoomMenu(false);
       else if (dialog) setDialog(null);
       else if (maskLayer) setMaskLayer(null);
-      // Сначала снимается выделение, потом — работа в слое
-      else if (selection.length || !activeObj) clearSelection();
-      else setActive(null);
+      // Сначала снимается выделение, потом — работа в слое или в группе
+      else if (selection.length || (!activeObj && !activeGrp)) clearSelection();
+      else {
+        setActive(null);
+        setActiveGroup(null);
+      }
       (document.activeElement as HTMLElement | null)?.blur();
       return;
     }
@@ -1000,6 +1094,7 @@ export function App() {
         d: 'deselect',
         j: 'save-object',
         e: 'merge-layers',
+        g: 'group-layers',
         '0': 'zoom-fit',
         '1': 'zoom-100',
         '2': 'zoom-50',
@@ -1008,7 +1103,17 @@ export function App() {
         '-': 'zoom-out',
       };
       const command =
-        e.shiftKey && key === 's' ? 'save-as' : e.shiftKey && key === 'e' ? 'export' : e.shiftKey && key === 'j' ? 'cut-object' : e.shiftKey || e.altKey ? undefined : byKey[key];
+        e.shiftKey && key === 's'
+          ? 'save-as'
+          : e.shiftKey && key === 'e'
+            ? 'export'
+            : e.shiftKey && key === 'j'
+              ? 'cut-object'
+              : e.shiftKey && key === 'g'
+                ? 'ungroup'
+                : e.shiftKey || e.altKey
+                  ? undefined
+                  : byKey[key];
       if (command) {
         e.preventDefault();
         run(command);
@@ -1263,7 +1368,7 @@ export function App() {
               )}
               <span class="opt-sep" />
               <button class="opt-button" title="Маска по объекту: её рисует модель из формы — это генерация" onClick={() => void objectMask(editedLayer)}>
-                <IconWand size={16} stroke={STROKE} aria-hidden="true" />
+                <IconSparkles size={16} stroke={STROKE} aria-hidden="true" />
                 По объекту
               </button>
               <button class="opt-done" onClick={() => setMaskLayer(null)}>
@@ -1520,6 +1625,7 @@ export function App() {
                     <span class="chip plain">
                       <IconStackPlus size={14} stroke={STROKE} aria-hidden="true" />
                       {prompt.trim() ? `Новый слой «${short(layerName(prompt), 28)}»` : 'Новый слой'}
+                      {activeGrp && ` в «${short(activeGrp.name, 16)}»`}
                     </span>
                   </div>
                 )
@@ -1532,19 +1638,27 @@ export function App() {
             <LayersPanel
               doc={doc}
               objects={objects}
+              groups={groups}
               patches={layers}
               jobs={jobs}
               active={active}
+              activeGroup={activeGroup}
               picked={selectedObjects}
               maskLayer={maskLayer}
               canDirect={canDirect}
               variants={variants}
               steps={steps}
               onSelect={selectObject}
+              onEnter={(o) => {
+                if (active !== o.id) enterLayer(o);
+              }}
+              onSelectGroup={selectGroup}
               onBackground={toBackground}
               onHover={(o) => setLitObject(o?.id ?? null)}
               onRename={(o, name) => post(`/api/objects/${o.id}/rename`, { name }).catch(fail)}
+              onRenameGroup={(g, name) => post(`/api/groups/${g.id}/rename`, { name }).catch(fail)}
               onHidden={(o, hidden) => post(`/api/objects/${o.id}/hidden`, { hidden }).catch(fail)}
+              onGroupHidden={(g, hidden) => post(`/api/groups/${g.id}/hidden`, { hidden }).catch(fail)}
               onCurrent={(o, patch) => post(`/api/objects/${o.id}/current`, { patch }).catch(fail)}
               onMask={editLayerMask}
               onObjectMask={(patch) => void objectMask(patch)}
@@ -1555,7 +1669,10 @@ export function App() {
               onMergeDown={mergeDown}
               onDelete={deleteObject}
               onMerge={() => void mergeLayers()}
-              onReorder={(o, over) => post(`/api/objects/${o.id}/order`, { over }).catch(fail)}
+              onGroup={() => void groupLayers()}
+              onUngroup={ungroup}
+              onDeleteGroup={deleteGroup}
+              onMove={(id, into, over) => post(`/api/layers/${id}/move`, { into, over }).catch(fail)}
               onJob={(job, action) => {
                 if ((action === 'retry' || action === 'more') && needsKey(job.model) && !state?.hasKey) setDialog('settings');
                 else if (action === 'more' || action === 'retry') redoJob(job).catch(fail);
@@ -1731,17 +1848,66 @@ function Thumb(props: { src?: string; icon?: Icon; spin?: boolean }) {
   );
 }
 
+/** Строка дерева «Слоёв»: слой (его части из старых проектов — строками под ним) или группа со всем, что в ней */
+type RowNode = { kind: 'layer'; o: ObjectDto } | { kind: 'group'; g: GroupDto; children: RowNode[] };
+
 /**
- * Слои: строка — миниатюра того, что видно, имя и глаз. Слой, в котором работают, раскрыт (LayerCard). Генерация нового
- * слоя — строкой сверху, пока слой не появится. Shift-щелчок — слой в выделение; два и больше — «Объединить». Заплатки
- * фона — в карточке своего слоя, внизу — фон. Строку слоя перетаскивают выше или ниже — так меняется порядок на холсте
+ * Слои и группы сверху вниз — то же дерево, что на сервере (layer-tree.ts). Части слоя и заплатки фона из старых проектов —
+ * не строки дерева; петли в группах (испорченный проект) обрываются в корне
+ */
+function layerTree(objects: ObjectDto[], groups: GroupDto[]): RowNode[] {
+  const ids = new Set(objects.map((o) => o.id));
+  const byId = new Map(groups.map((g) => [g.id, g]));
+  const parentOf = (id: string): string | undefined => {
+    const seen = new Set([id]);
+    const p = byId.get(id)?.group;
+    for (let cur = p; cur !== undefined; cur = byId.get(cur)?.group) {
+      if (seen.has(cur) || !byId.has(cur)) return undefined;
+      seen.add(cur);
+    }
+    return p;
+  };
+  const roots: RowNode[] = [];
+  const made = new Map<string, Extract<RowNode, { kind: 'group' }>>();
+  const childrenOf = (id: string): RowNode[] => {
+    const known = made.get(id);
+    if (known) return known.children;
+    const node = { kind: 'group' as const, g: byId.get(id)!, children: [] as RowNode[] };
+    made.set(id, node);
+    const parent = parentOf(id);
+    (parent ? childrenOf(parent) : roots).push(node);
+    return node.children;
+  };
+  for (const o of [...objects].reverse()) {
+    const attached = o.kind === 'fill' ? !!o.under && ids.has(o.under) : !!o.parent && ids.has(o.parent);
+    if (!attached) (o.group && byId.has(o.group) ? childrenOf(o.group) : roots).push({ kind: 'layer', o });
+  }
+  return roots;
+}
+
+/** Куда ляжет перетаскиваемое: в группу into (null — в корень) прямо над over (null — под всеми в ней); at, where — где черта */
+interface Drop {
+  into: string | null;
+  over: string | null;
+  /** Строка, у которой черта; null — над фоном */
+  at: string | null;
+  where: 'above' | 'below' | 'into';
+}
+
+/**
+ * Слои: строка — миниатюра того, что видно, имя и глаз; группы — папками, как в Photoshop: стрелка сворачивает, глаз скрывает
+ * всё, что в ней. Генерация нового слоя — строкой сверху, пока слой не появится. Shift-щелчок — в выделение; два и больше —
+ * «Сгруппировать» и «Объединить». Строки перетаскивают выше, ниже и в группы. Под списком — свойства слоя или группы, в
+ * которых работают: щелчок по строке ничего в списке не сдвигает, поэтому двойной щелчок попадает в тот же слой
  */
 function LayersPanel(props: {
   doc: DocDto;
   objects: ObjectDto[];
+  groups: GroupDto[];
   patches: PatchDto[];
   jobs: JobDto[];
   active: string | null;
+  activeGroup: string | null;
   /** Слои в выделении: Shift-щелчком в списке */
   picked: Set<string>;
   /** Версия, маску которой правят */
@@ -1750,10 +1916,15 @@ function LayersPanel(props: {
   variants: number;
   steps: number;
   onSelect: (o: ObjectDto, add: boolean) => void;
+  /** Работать в слое, если ещё не в нём (двойной щелчок — переименовать) */
+  onEnter: (o: ObjectDto) => void;
+  onSelectGroup: (g: GroupDto, add: boolean) => void;
   onBackground: () => void;
   onHover: (o: ObjectDto | null) => void;
   onRename: (o: ObjectDto, name: string) => void;
+  onRenameGroup: (g: GroupDto, name: string) => void;
   onHidden: (o: ObjectDto, hidden: boolean) => void;
+  onGroupHidden: (g: GroupDto, hidden: boolean) => void;
   onCurrent: (o: ObjectDto, patch: string | null) => void;
   onMask: (patch: PatchDto) => void;
   onObjectMask: (patch: PatchDto) => void;
@@ -1764,50 +1935,104 @@ function LayersPanel(props: {
   onMergeDown: (o: ObjectDto) => void;
   onDelete: (o: ObjectDto) => void;
   onMerge: () => void;
-  /** Положить слой прямо над over; null — под всеми слоями */
-  onReorder: (o: ObjectDto, over: string | null) => void;
+  onGroup: () => void;
+  onUngroup: (g: GroupDto) => void;
+  onDeleteGroup: (g: GroupDto) => void;
+  /** Слой или группу id — в группу into прямо над over */
+  onMove: (id: string, into: string | null, over: string | null) => void;
   onJob: (job: JobDto, action: JobAction) => void;
   onShowJob: (job: JobDto) => void;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
-  /** Слой перетаскивают: ляжет прямо над over, null — под всеми */
-  const [drag, setDrag] = useState<{ id: string; over: string | null } | null>(null);
+  /** Свёрнутые группы: только в этом окне, в документ не идут */
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  /** Что перетаскивают и куда оно ляжет */
+  const [drag, setDrag] = useState<{ id: string; drop: Drop | null } | null>(null);
   const listRef = useRef<HTMLOListElement>(null);
-  /** Щелчок, которым кончилось перетаскивание, слой не выбирает */
+  /** Щелчок, которым кончилось перетаскивание, ничего не выбирает */
   const dragged = useRef(false);
   /** Скрыть просили у слоя-копии, под которым нет фона: сначала спросить */
   const [asking, setAsking] = useState<string | null>(null);
   const patches = new Map(props.patches.map((p) => [p.id, p]));
   const ids = new Set(props.objects.map((o) => o.id));
-  // Заплатка фона — в карточке своего слоя; осталась без него — строкой
+  // Заплатка фона — в свойствах своего слоя; осталась без него — строкой
   const fills = new Map(props.objects.flatMap((o) => (o.kind === 'fill' && o.under && ids.has(o.under) ? [[o.under, o] as const] : [])));
-  const rows = props.objects.filter((o) => !(o.kind === 'fill' && o.under && ids.has(o.under)));
-  const rowIds = new Set(rows.map((o) => o.id));
-  const children = new Map<string | undefined, ObjectDto[]>();
-  for (const o of [...rows].reverse()) {
-    const parent = o.parent && rowIds.has(o.parent) ? o.parent : undefined;
-    children.set(parent, [...(children.get(parent) ?? []), o]);
+  // Части слоя из старых проектов — строками под ним
+  const parts = new Map<string, ObjectDto[]>();
+  for (const o of [...props.objects].reverse()) {
+    if (o.kind !== 'fill' && o.parent && ids.has(o.parent)) parts.set(o.parent, [...(parts.get(o.parent) ?? []), o]);
   }
+  const tree = layerTree(props.objects, props.groups);
+  // Где каждый узел дерева: в какой группе, кто прямо под ним, первый в группе и что лежит в группе
+  const place = new Map<string, { parent: string | null; next: string | null }>();
+  const first = new Map<string, string>();
+  const inside = new Map<string, Set<string>>();
+  const index = (nodes: RowNode[], parent: string | null): string[] => {
+    const all: string[] = [];
+    nodes.forEach((n, i) => {
+      const id = n.kind === 'layer' ? n.o.id : n.g.id;
+      const below = nodes[i + 1];
+      place.set(id, { parent, next: below ? (below.kind === 'layer' ? below.o.id : below.g.id) : null });
+      all.push(id);
+      if (n.kind === 'group') {
+        const head = n.children[0];
+        if (head) first.set(id, head.kind === 'layer' ? head.o.id : head.g.id);
+        const nested = index(n.children, id);
+        inside.set(id, new Set(nested));
+        all.push(...nested);
+      }
+    });
+    return all;
+  };
+  index(tree, null);
+  const groupById = new Map(props.groups.map((g) => [g.id, g]));
+  /** Группа видна: ни она, ни те, в которых она лежит, не скрыты */
+  const groupShown = (id: string | undefined) => {
+    for (let i = 0, g = id ? groupById.get(id) : undefined; g && i < 64; i++, g = g.group ? groupById.get(g.group) : undefined) if (g.hidden) return false;
+    return true;
+  };
   const thumb = (p: PatchDto | undefined) => p && `/api/history/${p.id}/thumb.png?doc=${props.doc.id}&m=${p.maskRev}`;
   // Генерации новых слоёв — пока слоя нет
   const pending = props.jobs.filter((j) => !j.object);
   const picked = new Set([...props.picked, ...(props.active ? [props.active] : [])]);
+  // Слои стоят с отступом под стрелкой группы, когда группы есть: миниатюры одного уровня — в столбик
+  const gutter = props.groups.length ? 24 : 6;
 
-  // Перетаскивают строки верхнего уровня; слой ляжет над той, чья середина ниже курсора
-  const tops = () => [...(listRef.current?.querySelectorAll<HTMLElement>(':scope > li[data-top]') ?? [])];
-  const dropTarget = (y: number): string | null => {
-    for (const li of tops()) {
+  // Слой, в который вошли щелчком на холсте, виден: группы, где он лежит, разворачиваются
+  useEffect(() => {
+    const o = props.objects.find((x) => x.id === props.active);
+    const chain: string[] = [];
+    for (let i = 0, g = o?.group ? groupById.get(o.group) : undefined; g && i < 64; i++, g = g.group ? groupById.get(g.group) : undefined) chain.push(g.id);
+    if (chain.some((id) => collapsed.has(id))) setCollapsed((c) => new Set([...c].filter((id) => !chain.includes(id))));
+  }, [props.active]);
+  const toggle = (id: string) =>
+    setCollapsed((c) => {
+      const next = new Set(c);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+
+  /** Куда ляжет перетаскиваемое при курсоре на высоте y: у группы середина строки — в неё, у слоя — над ним или под ним */
+  const dropAt = (y: number): Drop => {
+    for (const li of listRef.current?.querySelectorAll<HTMLElement>(':scope > li[data-node]') ?? []) {
       const r = li.querySelector('.layer-row')!.getBoundingClientRect();
-      if (y < r.top + r.height / 2) return li.dataset.layer!;
+      if (y > r.bottom) continue;
+      const id = li.dataset.node!;
+      const at = place.get(id) ?? { parent: null, next: null };
+      const f = (y - r.top) / r.height;
+      if (li.dataset.kind === 'group' && f >= 0.3 && (f < 0.7 || !collapsed.has(id))) return { into: id, over: first.get(id) ?? null, at: id, where: 'into' };
+      if (f < 0.5) return { into: at.parent, over: id, at: id, where: 'above' };
+      return { into: at.parent, over: at.next, at: id, where: 'below' };
     }
-    return null;
+    return { into: null, over: null, at: null, where: 'above' };
   };
-  /** Слой и так лежит прямо над over */
-  const inPlace = (id: string, over: string | null) => {
-    const ids = tops().map((li) => li.dataset.layer!);
-    return over === id || (ids[ids.indexOf(id) + 1] ?? null) === over;
+  /** Ляжет ли туда id: не в саму себя (группа) и не туда же, где лежит */
+  const changes = (id: string, d: Drop) => {
+    if (d.into !== null && (d.into === id || inside.get(id)?.has(d.into))) return false;
+    const now = place.get(id);
+    return d.over !== id && !(now && now.parent === d.into && now.next === d.over);
   };
-  const startDrag = (e: PointerEvent, o: ObjectDto) => {
+  const startDrag = (e: PointerEvent, id: string) => {
     if (e.button !== 0 || (e.target as Element).closest('button, input')) return;
     const row = e.currentTarget as HTMLElement;
     const y0 = e.clientY;
@@ -1816,14 +2041,16 @@ function LayersPanel(props: {
       if (!moving && Math.abs(ev.clientY - y0) < 4) return;
       if (!moving) row.setPointerCapture(ev.pointerId);
       moving = true;
-      // У края боковой панели список прокручивается
-      const side = listRef.current?.closest('.side');
-      if (side) {
-        const r = side.getBoundingClientRect();
-        if (ev.clientY < r.top + 32) side.scrollTop -= 12;
-        else if (ev.clientY > r.bottom - 32) side.scrollTop += 12;
+      // У края списка он прокручивается
+      const list = listRef.current;
+      const scroller = list && list.scrollHeight > list.clientHeight ? list : list?.closest('.side');
+      if (scroller) {
+        const r = scroller.getBoundingClientRect();
+        if (ev.clientY < r.top + 32) scroller.scrollTop -= 12;
+        else if (ev.clientY > r.bottom - 32) scroller.scrollTop += 12;
       }
-      setDrag({ id: o.id, over: dropTarget(ev.clientY) });
+      const d = dropAt(ev.clientY);
+      setDrag({ id, drop: changes(id, d) ? d : null });
     };
     const end = (ev: PointerEvent) => {
       window.removeEventListener('pointermove', move);
@@ -1833,17 +2060,50 @@ function LayersPanel(props: {
       setDrag(null);
       dragged.current = true;
       window.setTimeout(() => (dragged.current = false), 0);
-      const over = dropTarget(ev.clientY);
-      if (ev.type === 'pointerup' && !inPlace(o.id, over)) props.onReorder(o, over);
+      const d = dropAt(ev.clientY);
+      if (ev.type === 'pointerup' && changes(id, d)) props.onMove(id, d.into, d.over);
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', end);
     window.addEventListener('pointercancel', end);
   };
-  // Куда ляжет перетаскиваемый слой: черта над этой строкой (null — над фоном); на своём месте черты нет
-  const dropOver = drag && !inPlace(drag.id, drag.over) ? drag.over : undefined;
+  const dropClass = (id: string | null) => (drag?.drop && drag.drop.at === id ? `drop-${drag.drop.where}` : '');
 
-  const row = (o: ObjectDto, depth: number) => {
+  /**
+   * Двойной щелчок — по строке первого щелчка, что бы ни оказалось под курсором ко второму: щелчок по слою меняет выделение,
+   * форма над списком растёт или сжимается, и список съезжает. Второй щелчок в той же точке вскоре — переименование
+   */
+  const armRename = (e: MouseEvent, start: () => void) => {
+    const { clientX: x, clientY: y, timeStamp: t } = e;
+    const second = (ev: MouseEvent) => {
+      if (ev.detail < 2 || ev.timeStamp - t > 600 || Math.hypot(ev.clientX - x, ev.clientY - y) > 6) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      stop();
+      start();
+    };
+    const stop = () => {
+      window.removeEventListener('click', second, true);
+      window.clearTimeout(timer);
+    };
+    const timer = window.setTimeout(stop, 600);
+    window.addEventListener('click', second, true);
+  };
+
+  const nameOrField = (id: string, name: string, done: (name: string) => void) =>
+    editing === id ? (
+      <RenameField
+        value={name}
+        onDone={(next) => {
+          setEditing(null);
+          if (next && next !== name) done(next);
+        }}
+      />
+    ) : (
+      <span class="layer-name">{name}</span>
+    );
+
+  const layerRow = (o: ObjectDto, depth: number, node: boolean): ComponentChildren => {
     const active = props.active === o.id;
     const busy = props.jobs.some((j) => (j.object === o.id || j.fillFor === o.id) && busyJob(j));
     const failed = props.jobs.some((j) => j.object === o.id && j.status === 'error');
@@ -1856,44 +2116,36 @@ function LayersPanel(props: {
             'layer',
             active ? 'active' : '',
             !active && props.picked.has(o.id) ? 'picked' : '',
-            o.hidden ? 'off' : '',
+            o.visible ? '' : 'off',
             o.lost ? 'lost' : '',
             drag?.id === o.id ? 'dragged' : '',
-            dropOver === o.id ? 'drop-over' : '',
+            dropClass(o.id),
           ]
             .filter(Boolean)
             .join(' ')}
           data-layer={o.id}
-          data-top={depth === 0 || undefined}
+          data-node={node ? o.id : undefined}
+          data-kind="layer"
+          style={{ '--indent': `${gutter + depth * 18}px` }}
           onPointerEnter={() => props.onHover(o)}
           onPointerLeave={() => props.onHover(null)}
         >
           <div
             class="layer-row"
-            style={{ paddingLeft: `${6 + depth * 16}px` }}
-            title={
-              o.lost
-                ? 'После правки слой не нашёлся: маска прежняя'
-                : 'Работать в слое; Shift — добавить к выделению; двойной щелчок — переименовать; перетащить — выше или ниже'
-            }
-            onPointerDown={depth === 0 && editing !== o.id ? (e) => startDrag(e, o) : undefined}
+            style={{ paddingLeft: `${gutter + depth * 18}px` }}
+            title={o.lost ? 'После правки слой не нашёлся: маска прежняя' : 'Работать в слое; Shift — к выделению; двойной щелчок — переименовать; перетащить — порядок'}
+            onPointerDown={node && editing !== o.id ? (e) => startDrag(e, o.id) : undefined}
             onClick={(e) => {
-              if (!dragged.current) props.onSelect(o, e.metaKey || e.ctrlKey || e.shiftKey);
+              if (dragged.current || e.detail > 1) return;
+              props.onSelect(o, e.metaKey || e.ctrlKey || e.shiftKey);
+              armRename(e, () => {
+                props.onEnter(o);
+                setEditing(o.id);
+              });
             }}
-            onDblClick={() => setEditing(o.id)}
           >
             <Thumb src={thumb(patches.get(o.current ?? o.layer ?? ''))} />
-            {editing === o.id ? (
-              <RenameField
-                value={o.name}
-                onDone={(name) => {
-                  setEditing(null);
-                  if (name && name !== o.name) props.onRename(o, name);
-                }}
-              />
-            ) : (
-              <span class="layer-name">{o.name}</span>
-            )}
+            {nameOrField(o.id, o.name, (name) => props.onRename(o, name))}
             {busy && <IconLoader2 size={15} stroke={STROKE} class="spin layer-badge" aria-label="Идёт генерация" />}
             {failed && !busy && <IconAlertTriangle size={15} stroke={STROKE} class="layer-badge error" aria-label="Генерация с ошибкой" />}
             {o.freed && <IconPhoto size={14} stroke={STROKE} class="layer-badge" aria-label="Под ним уже нет его самого: вырезан или дорисован фон" />}
@@ -1933,12 +2185,76 @@ function LayersPanel(props: {
               </button>
             </div>
           )}
-          {active && <LayerCard {...props} object={o} fill={fills.get(o.id)} patchMap={patches} thumb={thumb} />}
         </li>
-        {(children.get(o.id) ?? []).map((c) => row(c, depth + 1))}
+        {(parts.get(o.id) ?? []).map((c) => layerRow(c, depth + 1, false))}
       </Fragment>
     );
   };
+
+  const groupRow = (n: Extract<RowNode, { kind: 'group' }>, depth: number): ComponentChildren => {
+    const { g } = n;
+    const open = !collapsed.has(g.id);
+    const active = props.activeGroup === g.id;
+    const Folder = open ? IconFolderOpen : IconFolder;
+    return (
+      <Fragment key={g.id}>
+        <li
+          class={['layer', 'group', active ? 'active' : '', groupShown(g.id) ? '' : 'off', drag?.id === g.id ? 'dragged' : '', dropClass(g.id)].filter(Boolean).join(' ')}
+          data-node={g.id}
+          data-kind="group"
+          style={{ '--indent': `${4 + depth * 18}px` }}
+        >
+          <div
+            class="layer-row"
+            style={{ paddingLeft: `${depth * 18}px` }}
+            title="Группа: её слои в выделение, новый слой ляжет в неё; двойной щелчок — переименовать; перетащить — порядок"
+            onPointerDown={editing !== g.id ? (e) => startDrag(e, g.id) : undefined}
+            onClick={(e) => {
+              if (dragged.current || e.detail > 1) return;
+              props.onSelectGroup(g, e.metaKey || e.ctrlKey || e.shiftKey);
+              armRename(e, () => setEditing(g.id));
+            }}
+          >
+            <button
+              class="layer-fold"
+              title={open ? 'Свернуть' : 'Развернуть'}
+              aria-label={open ? 'Свернуть группу' : 'Развернуть группу'}
+              aria-expanded={open}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggle(g.id);
+              }}
+            >
+              {open ? <IconChevronDown size={14} stroke={2} /> : <IconChevronRight size={14} stroke={2} />}
+            </button>
+            <span class="thumb folder">
+              <Folder size={17} stroke={STROKE} aria-hidden="true" />
+            </span>
+            {nameOrField(g.id, g.name, (name) => props.onRenameGroup(g, name))}
+            <button
+              class="layer-icon"
+              title={g.hidden ? 'Показать группу' : 'Скрыть группу'}
+              aria-label="Показывать группу"
+              aria-pressed={!g.hidden}
+              onClick={(e) => {
+                e.stopPropagation();
+                props.onGroupHidden(g, !g.hidden);
+              }}
+            >
+              {g.hidden ? <IconEyeOff size={17} stroke={STROKE} /> : <IconEye size={17} stroke={STROKE} />}
+            </button>
+          </div>
+        </li>
+        {open && rows(n.children, depth + 1)}
+      </Fragment>
+    );
+  };
+
+  const rows = (nodes: RowNode[], depth: number): ComponentChildren[] => nodes.map((n) => (n.kind === 'layer' ? layerRow(n.o, depth, true) : groupRow(n, depth)));
+
+  const activeLayer = props.objects.find((o) => o.id === props.active);
+  const activeGroup = props.groups.find((g) => g.id === props.activeGroup);
+  const groupLayers = activeGroup ? props.objects.filter((o) => o.kind !== 'fill' && (o.group === activeGroup.id || inside.get(activeGroup.id)?.has(o.id))) : [];
 
   return (
     <section class="panel layers-panel">
@@ -1946,10 +2262,11 @@ function LayersPanel(props: {
         Слои
         <Help>
           Слой — кусок картинки со своими пикселями поверх остального. Щелчок по слою здесь или палочкой на холсте — работа в нём:
-          палочка ищет только в нём, генерация ложится его версией. Фон внизу — работа вне слоёв: генерация ляжет новым слоем.
-          Версии — миниатюры под слоем: щелчок показывает версию, «+» —
-          ещё варианты. ⌘J — копия выделенного новым слоем, ⌘⇧J — вырезать: под слоем дорисуется фон. Shift-щелчок — несколько
-          слоёв, ⌘E их объединяет. Перетащите слой выше или ниже — так меняется порядок. «\» — исходник всей картинки, пока держите.
+          палочка ищет только в нём, генерация ложится его версией; под списком — его версии, маска и действия. Фон внизу — работа
+          вне слоёв: генерация ляжет новым слоем. ⌘J — копия выделенного новым слоем, ⌘⇧J — вырезать. Shift-щелчок — несколько
+          слоёв: ⌘G их группирует, ⌘E объединяет. Группа: щелчок — её слои в выделение, новый слой ляжет в неё; стрелка
+          сворачивает, глаз скрывает всё, что в ней, ⇧⌘G разгруппировывает. Перетащите слой или группу выше, ниже или в группу.
+          «\» — исходник всей картинки, пока держите.
         </Help>
       </h2>
       <ol class={drag ? 'layers dragging' : 'layers'} ref={listRef}>
@@ -1986,9 +2303,9 @@ function LayersPanel(props: {
             </li>
           );
         })}
-        {(children.get(undefined) ?? []).map((o) => row(o, 0))}
-        {/* Фон выбран, когда работают не в слое и слоёв в выделении нет: генерация ляжет новым слоем */}
-        <li class={['layer background', !props.active && !props.picked.size ? 'active' : '', dropOver === null ? 'drop-over' : ''].filter(Boolean).join(' ')}>
+        {rows(tree, 0)}
+        {/* Фон выбран, когда работают не в слое и не в группе и слоёв в выделении нет: генерация ляжет новым слоем */}
+        <li class={['layer background', !props.active && !props.activeGroup && !props.picked.size ? 'active' : '', dropClass(null)].filter(Boolean).join(' ')}>
           <div class="layer-row" title="Работать на фоне: правка — новым слоем" onClick={props.onBackground}>
             <Thumb src={`/api/doc/base/${props.doc.levels - 1}/0/0.jpg?doc=${props.doc.id}&base=${props.doc.baseState}`} />
             <span class="layer-name">Фон</span>
@@ -2000,9 +2317,34 @@ function LayersPanel(props: {
           <span>
             {picked.size} {plural(picked.size, 'слой', 'слоя', 'слоёв')}
           </span>
+          <button onClick={props.onGroup} title="В новую группу (⌘G)">
+            Сгруппировать
+          </button>
           <button onClick={props.onMerge} title="Одним слоем из того, что сейчас видно; версии уйдут (⌘E)">
             Объединить
           </button>
+        </div>
+      )}
+      {activeLayer && <LayerProps {...props} key={activeLayer.id} object={activeLayer} fill={fills.get(activeLayer.id)} patchMap={patches} thumb={thumb} />}
+      {activeGroup && !activeLayer && (
+        <div class="props">
+          <div class="props-head">
+            <IconFolder size={16} stroke={STROKE} aria-hidden="true" />
+            <strong title={activeGroup.name}>{activeGroup.name}</strong>
+            <span class="dim">
+              {groupLayers.length} {plural(groupLayers.length, 'слой', 'слоя', 'слоёв')}
+            </span>
+          </div>
+          <div class="props-actions">
+            <button class="act" title="Слои из неё — на её место (⇧⌘G)" onClick={() => props.onUngroup(activeGroup)}>
+              <IconFolderOpen size={15} stroke={STROKE} aria-hidden="true" />
+              Разгруппировать
+            </button>
+            <button class="act danger" title="Группа со всеми слоями в ней; ⌘Z вернёт" onClick={() => props.onDeleteGroup(activeGroup)}>
+              <IconTrash size={15} stroke={STROKE} aria-hidden="true" />
+              Удалить со слоями
+            </button>
+          </div>
         </div>
       )}
     </section>
@@ -2010,10 +2352,11 @@ function LayersPanel(props: {
 }
 
 /**
- * Слой, в котором работают: версии миниатюрами (исходник, генерации, идущие и с ошибкой, «+» — ещё варианты текущей),
- * задача текущей версии с директором и критиком, ход генерации, фон под слоем и действия
+ * Свойства слоя, в котором работают, — под списком. Сверху версии миниатюрами (исходник, генерации, идущие и с ошибкой,
+ * «+» — ещё варианты текущей) и ход генерации. Ниже — то, что видно сейчас (версия или исходник): её задача с директором
+ * и критиком и её маска. В самом низу — сам слой: фон под ним, влить в фон, удалить
  */
-function LayerCard(props: {
+function LayerProps(props: {
   object: ObjectDto;
   fill?: ObjectDto;
   patchMap: Map<string, PatchDto>;
@@ -2036,7 +2379,6 @@ function LayerCard(props: {
 }) {
   const { object: o, fill } = props;
   const [redoing, setRedoing] = useState(false);
-  const [menu, setMenu] = useState(false);
   const current = o.current ? props.patchMap.get(o.current) : undefined;
   // Что видно от слоя: текущая версия, без неё — его копия (исходник слоя-копии); у слоя из генерации исходник — то, что под ним
   const shown = current ?? (o.layer ? props.patchMap.get(o.layer) : undefined);
@@ -2073,164 +2415,182 @@ function LayerCard(props: {
         </span>
       )),
     );
+  const number = current ? o.versions.indexOf(current.id) + 1 : 0;
 
   return (
-    <div class="layer-card">
-      <div class="version-strip">
-        {tile('src', 'исх', o.layer ? props.patchMap.get(o.layer) : undefined, !o.current, o.layer ? 'Исходник слоя: копия того, что было видно' : 'Исходник: то, что под слоем', () => props.onCurrent(o, null))}
-        {o.versions.map((id, i) => {
-          const p = props.patchMap.get(id);
-          return tile(id, String(i + 1), p, o.current === id, p?.prompt ?? '', () => props.onCurrent(o, id));
-        })}
-        {spinners(jobs)}
-        {jobs
-          .filter((j) => j.status === 'error')
-          .map((j) => (
-            <span key={j.id} class="vtile failed" title={j.error}>
-              <IconAlertTriangle size={16} stroke={STROKE} aria-hidden="true" />
-            </span>
-          ))}
-        {current && !jobs.some(busyJob) && (
-          <button
-            class="vtile add"
-            title={current.directed !== undefined ? `Ещё ${countText(true, count(true))} от текущей версии` : `Ещё ${countText(false, count(false))} с той же задачей`}
-            aria-label="Ещё варианты"
-            onClick={() => props.onMore(current)}
-          >
-            <IconPlus size={16} stroke={STROKE} />
-          </button>
-        )}
+    <div class="props">
+      <div class="props-head">
+        <IconStack2 size={16} stroke={STROKE} aria-hidden="true" />
+        <strong title={o.name}>{o.name}</strong>
       </div>
 
-      {current && !redoing && (
-        <div class="layer-task">
-          <p title={current.prompt}>{current.prompt}</p>
-          <button class="icon" title="Поправить задачу и сгенерировать ещё" aria-label="Поправить задачу" onClick={() => setRedoing(true)}>
-            <IconPencil size={15} stroke={STROKE} />
-          </button>
-        </div>
-      )}
-      {current?.directed && !redoing && <Note label="Директор" text={current.directed} />}
-      {current?.critique && !redoing && <Note label={current.critique.done ? 'Критик: готово' : 'Критик'} text={current.critique.text} />}
-      {redoing && current && (
-        <RedoForm
-          prompt={current.prompt}
-          hide={current.hide ?? false}
-          director={current.directed !== undefined}
-          canDirect={props.canDirect}
-          variants={props.variants}
-          steps={props.steps}
-          onCancel={() => setRedoing(false)}
-          onSubmit={(change) => {
-            setRedoing(false);
-            props.onMore(current, change);
-          }}
-        />
-      )}
-      {current && weak.has(current.id) && (
-        <p class="job-warning">
-          Модель почти ничего не изменила
-          <Help>Опишите, что должно получиться, а не что исправить, или выделите область поменьше.</Help>
-        </p>
-      )}
-
-      {[...jobs, ...fillJobs].filter(busyJob).map((j) => (
-        <div class="layer-status" key={j.id}>
-          <span>
-            {j.fillFor === o.id ? 'Фон под ним: ' : j.fillFor ? 'Фон: ' : ''}
-            {jobStatus(j)}, {clock(Date.now() - Date.parse(j.createdAt))}
-          </span>
-          {j.chain && (
-            <button class="small" title="Готовые шаги останутся версиями" onClick={() => props.onJob(j, 'stop')}>
-              Остановить
+      <div class="props-block">
+        <span class="props-label">Версии</span>
+        <div class="version-strip">
+          {tile('src', 'исх', o.layer ? props.patchMap.get(o.layer) : undefined, !o.current, o.layer ? 'Исходник слоя: копия того, что было видно' : 'Исходник: то, что под слоем', () => props.onCurrent(o, null))}
+          {o.versions.map((id, i) => {
+            const p = props.patchMap.get(id);
+            return tile(id, String(i + 1), p, o.current === id, p?.prompt ?? '', () => props.onCurrent(o, id));
+          })}
+          {spinners(jobs)}
+          {jobs
+            .filter((j) => j.status === 'error')
+            .map((j) => (
+              <span key={j.id} class="vtile failed" title={j.error}>
+                <IconAlertTriangle size={16} stroke={STROKE} aria-hidden="true" />
+              </span>
+            ))}
+          {current && !jobs.some(busyJob) && (
+            <button
+              class="vtile add"
+              title={current.directed !== undefined ? `Ещё ${countText(true, count(true))} от текущей версии` : `Ещё ${countText(false, count(false))} с той же задачей`}
+              aria-label="Ещё варианты"
+              onClick={() => props.onMore(current)}
+            >
+              <IconPlus size={16} stroke={STROKE} />
             </button>
           )}
-          <button class="small" title="Готовые варианты останутся версиями" onClick={() => props.onJob(j, 'discard')}>
-            Отменить
-          </button>
         </div>
-      ))}
-      {[...jobs, ...fillJobs]
-        .filter((j) => j.status === 'error')
-        .map((j) => (
-          <div class="layer-status error" key={j.id}>
-            <p>{j.error}</p>
-            <button class="small primary" onClick={() => props.onJob(j, j.inside ? 'more' : 'retry')}>
-              Повторить
-            </button>
-            <button class="small" onClick={() => props.onJob(j, 'discard')}>
-              Убрать
+        {[...jobs, ...fillJobs].filter(busyJob).map((j) => (
+          <div class="layer-status" key={j.id}>
+            <span>
+              {j.fillFor === o.id ? 'Фон под ним: ' : j.fillFor ? 'Фон: ' : ''}
+              {jobStatus(j)}, {clock(Date.now() - Date.parse(j.createdAt))}
+            </span>
+            {j.chain && (
+              <button class="small" title="Готовые шаги останутся версиями" onClick={() => props.onJob(j, 'stop')}>
+                Остановить
+              </button>
+            )}
+            <button class="small" title="Готовые варианты останутся версиями" onClick={() => props.onJob(j, 'discard')}>
+              Отменить
             </button>
           </div>
         ))}
-
-      {/* Заплатка фона из проектов, где фон дорисовывали под слоем отдельно */}
-      {fill && (
-        <div class="version-strip fill-strip">
-          <span class="strip-label">Фон</span>
-          {fill.versions.map((id, i) => {
-            const p = props.patchMap.get(id);
-            return tile(id, String(i + 1), p, fill.current === id, 'Вариант фона под слоем', () => props.onCurrent(fill, id));
-          })}
-        </div>
-      )}
-
-      <div class="layer-tools">
-        <button
-          class={shown && props.maskLayer === shown.id ? 'icon active' : 'icon'}
-          title={shown ? (current ? 'Править маску версии' : 'Править маску исходника') : 'Исходник — то, что под слоем: маски нет'}
-          aria-label="Править маску версии"
-          disabled={!shown || o.hidden}
-          onClick={() => shown && props.onMask(shown)}
-        >
-          <IconMask size={17} stroke={STROKE} />
-        </button>
-        <button
-          class="icon"
-          title={shown ? 'Маска по объекту: её рисует модель из формы — это генерация' : 'Исходник — то, что под слоем: маски нет'}
-          aria-label="Маска по объекту"
-          disabled={!shown || o.hidden || masking.has(shown.id)}
-          onClick={() => shown && props.onObjectMask(shown)}
-        >
-          <IconWand size={17} stroke={STROKE} />
-        </button>
-        {o.kind !== 'fill' && (
-          <button
-            class="icon"
-            title="Дорисовать фон под слоем: в слоях, где под ним дыра, — их версиями; где только фон — новым слоем внизу"
-            aria-label="Дорисовать фон под слоем"
-            disabled={fillJobs.some(busyJob)}
-            onClick={() => props.onFill(o)}
-          >
-            <IconPhoto size={17} stroke={STROKE} />
-          </button>
+        {[...jobs, ...fillJobs]
+          .filter((j) => j.status === 'error')
+          .map((j) => (
+            <div class="layer-status error" key={j.id}>
+              <p>{j.error}</p>
+              <button class="small primary" onClick={() => props.onJob(j, j.inside ? 'more' : 'retry')}>
+                Повторить
+              </button>
+              <button class="small" onClick={() => props.onJob(j, 'discard')}>
+                Убрать
+              </button>
+            </div>
+          ))}
+        {/* Заплатка фона из проектов, где фон дорисовывали под слоем отдельно */}
+        {fill && (
+          <div class="version-strip fill-strip">
+            <span class="strip-label">Фон</span>
+            {fill.versions.map((id, i) => {
+              const p = props.patchMap.get(id);
+              return tile(id, String(i + 1), p, fill.current === id, 'Вариант фона под слоем', () => props.onCurrent(fill, id));
+            })}
+          </div>
         )}
-        <button class="icon" title="Влить в фон" aria-label="Влить в фон" disabled={o.hidden} onClick={() => props.onMergeDown(o)}>
-          <IconArrowBarToDown size={17} stroke={STROKE} />
-        </button>
-        <button class="icon" title={o.freed ? 'Убрать с холста' : 'Удалить слой'} aria-label="Удалить слой" onClick={() => props.onDelete(o)}>
-          <IconTrash size={17} stroke={STROKE} />
-        </button>
-        {current && (
-          <span class="menu-anchor">
-            <button class="icon" title="Ещё" aria-label="Ещё" aria-expanded={menu} onClick={() => setMenu(!menu)}>
-              <IconDots size={17} stroke={STROKE} />
+      </div>
+
+      <div class="props-block">
+        <div class="props-title">
+          <span class="props-label">{current ? `Версия ${number}` : 'Исходник'}</span>
+          {current && (
+            <button class="icon props-icon" title="Удалить версию; ⌘Z вернёт" aria-label="Удалить версию" onClick={() => props.onDeleteVersion(current)}>
+              <IconTrashX size={15} stroke={STROKE} />
             </button>
-            {menu && (
-              <>
-                <div class="click-catcher" onClick={() => setMenu(false)} />
-                <ul class="layer-menu" role="menu" onClick={() => setMenu(false)}>
-                  <li role="menuitem" onClick={() => props.onExpand(current)}>
-                    Расширить по правке
-                  </li>
-                  <li role="menuitem" class="danger" onClick={() => props.onDeleteVersion(current)}>
-                    Удалить версию
-                  </li>
-                </ul>
-              </>
-            )}
-          </span>
+          )}
+        </div>
+        {current && !redoing && (
+          <div class="layer-task">
+            <p title={current.prompt}>{current.prompt}</p>
+            <button class="icon" title="Поправить задачу и сгенерировать ещё" aria-label="Поправить задачу" onClick={() => setRedoing(true)}>
+              <IconPencil size={15} stroke={STROKE} />
+            </button>
+          </div>
         )}
+        {current?.directed && !redoing && <Note label="Директор" text={current.directed} />}
+        {current?.critique && !redoing && <Note label={current.critique.done ? 'Критик: готово' : 'Критик'} text={current.critique.text} />}
+        {redoing && current && (
+          <RedoForm
+            prompt={current.prompt}
+            hide={current.hide ?? false}
+            director={current.directed !== undefined}
+            canDirect={props.canDirect}
+            variants={props.variants}
+            steps={props.steps}
+            onCancel={() => setRedoing(false)}
+            onSubmit={(change) => {
+              setRedoing(false);
+              props.onMore(current, change);
+            }}
+          />
+        )}
+        {current && weak.has(current.id) && (
+          <p class="job-warning">
+            Модель почти ничего не изменила
+            <Help>Опишите, что должно получиться, а не что исправить, или выделите область поменьше.</Help>
+          </p>
+        )}
+        {shown ? (
+          <div class="props-row">
+            <span class="props-key">Маска</span>
+            <div class="props-actions">
+              <button
+                class={props.maskLayer === shown.id ? 'act on' : 'act'}
+                title="Кисть возвращает, ластик скрывает"
+                aria-pressed={props.maskLayer === shown.id}
+                disabled={!o.visible}
+                onClick={() => props.onMask(shown)}
+              >
+                <IconBrush size={15} stroke={STROKE} aria-hidden="true" />
+                Править
+              </button>
+              <button
+                class="act"
+                title="Маску по объекту рисует модель из формы — это генерация"
+                disabled={!o.visible || masking.has(shown.id)}
+                onClick={() => props.onObjectMask(shown)}
+              >
+                <IconSparkles size={15} stroke={STROKE} aria-hidden="true" />
+                По объекту
+              </button>
+              {current && (
+                <button class="act" title="Добавить к маске то, что модель нарисовала за её краем" onClick={() => props.onExpand(current)}>
+                  <IconArrowsMaximize size={15} stroke={STROKE} aria-hidden="true" />
+                  По правке
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <p class="props-note">То, что под слоем</p>
+        )}
+      </div>
+
+      <div class="props-block">
+        <span class="props-label">Слой</span>
+        <div class="props-actions">
+          {o.kind !== 'fill' && (
+            <button
+              class="act"
+              title="В слоях, где под ним дыра, — их версиями; где только фон — новым слоем внизу"
+              disabled={fillJobs.some(busyJob)}
+              onClick={() => props.onFill(o)}
+            >
+              <IconBucketDroplet size={15} stroke={STROKE} aria-hidden="true" />
+              Дорисовать фон
+            </button>
+          )}
+          <button class="act" title="То, что от него видно, — в исходник; ⌘Z вернёт" disabled={!o.visible} onClick={() => props.onMergeDown(o)}>
+            <IconArrowBarToDown size={15} stroke={STROKE} aria-hidden="true" />
+            Влить в фон
+          </button>
+          <button class="act danger" title={o.freed ? 'Убрать с холста; ⌘Z вернёт' : 'Удалить слой; ⌘Z вернёт'} onClick={() => props.onDelete(o)}>
+            <IconTrash size={15} stroke={STROKE} aria-hidden="true" />
+            {o.freed ? 'Убрать' : 'Удалить'}
+          </button>
+        </div>
       </div>
     </div>
   );

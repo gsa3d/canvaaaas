@@ -183,6 +183,10 @@ export interface ObjectDto {
   freed?: boolean;
   /** Скрыт (с частями) */
   hidden?: boolean;
+  /** Виден на холсте: не скрыт ни он, ни то, частью чего он является, ни его группы */
+  visible: boolean;
+  /** Группа, в которой лежит слой */
+  group?: string;
   /** Текущая версия; нет — исходник */
   current?: string;
   /** Версии по порядку появления, без исходника */
@@ -190,6 +194,16 @@ export interface ObjectDto {
   /** Заплатка фона под слоем under */
   kind?: 'fill';
   under?: string;
+}
+
+/** Группа слоёв, как папка в Photoshop: её место в стопке — там, где её слои */
+export interface GroupDto {
+  id: string;
+  name: string;
+  /** Скрыта со всем, что в ней */
+  hidden?: boolean;
+  /** Группа, в которой лежит эта */
+  group?: string;
 }
 
 /** Модель выделения объектов: её веса скачиваются по просьбе пользователя */
@@ -277,6 +291,7 @@ export interface StateDto {
   jobs: JobDto[];
   history: PatchDto[];
   objects: ObjectDto[];
+  groups: GroupDto[];
   segment: SegmentDto;
   canUndo: boolean;
   canRedo: boolean;
@@ -292,6 +307,8 @@ export interface CreateJobRequest {
   shapes: MaskShape[];
   /** Слой, в котором работают: вариант ляжет его версией; без него — новым слоем из выделения */
   object?: string;
+  /** Группа, сверху которой ляжет новый слой; без неё — сверху всех */
+  group?: string;
   prompt: string;
   /** Сколько вариантов; с директором — сколько шагов с критиком самое большее */
   variants: number;
@@ -406,6 +423,8 @@ export type AppCommand =
   | 'save-object'
   | 'cut-object'
   | 'merge-layers'
+  | 'group-layers'
+  | 'ungroup'
   | 'merge-down'
   | 'flatten'
   | 'zoom-fit'
