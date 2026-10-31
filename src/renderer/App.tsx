@@ -5,7 +5,6 @@ import {
   IconArrowsMove,
   IconBrush,
   IconCubePlus,
-  IconEraser,
   IconEye,
   IconEyeOff,
   IconHandStop,
@@ -210,7 +209,6 @@ const TOOL_ICONS: Record<Tool, Icon> = {
   rect: IconMarquee2,
   lasso: IconLasso,
   brush: IconBrush,
-  eraser: IconEraser,
   sketch: IconScribble,
 };
 
@@ -221,13 +219,12 @@ const TOOLS: { id: Tool; name: string; label: string; key: string }[] = [
   { id: 'rect', name: 'Прямоугольник', label: 'Прямоугольник', key: 'R' },
   { id: 'lasso', name: 'Лассо', label: 'Лассо', key: 'L' },
   { id: 'brush', name: 'Кисть', label: 'Кисть', key: 'B' },
-  { id: 'eraser', name: 'Ластик', label: 'Ластик', key: 'E' },
   { id: 'sketch', name: 'Набросок', label: 'Набросок для модели, Alt стирает', key: 'S' },
   { id: 'hand', name: 'Рука', label: 'Рука (или зажать пробел)', key: 'H' },
 ];
 
 /** Инструменты выделения: у них режим «Новое / Добавить / Вычесть» и край */
-const SELECTING: Tool[] = ['object', 'rect', 'lasso', 'brush', 'eraser'];
+const SELECTING: Tool[] = ['object', 'rect', 'lasso', 'brush'];
 
 /** Цвета наброска под рукой; любой другой — из палитры */
 const SKETCH_COLORS = ['#ff3b30', '#1e88ff', '#22b14c', '#111111', '#ffffff'];
@@ -301,8 +298,10 @@ export function App() {
   const [variants, setVariants] = usePref('variants', 2, isCount);
   /** Сколько шагов с критиком, когда включён директор */
   const [steps, setSteps] = usePref('steps', 3, isCount);
-  /** Слой, маску которого сейчас правят */
+  /** Слой, маску видимой версии которого сейчас правят (миниатюра маски в «Слоях»); всегда тот, в котором работают */
   const [maskLayer, setMaskLayer] = useState<string | null>(null);
+  /** При правке маски кисть и фигуры возвращают часть версии (add) или скрывают её (sub); Alt — наоборот */
+  const [maskOp, setMaskOp] = useState<'add' | 'sub'>('sub');
   /** Слой, в котором работают: палочка ищет только в нём, генерация ложится его версией; нет — новым слоем */
   const [active, setActive] = useState<string | null>(null);
   /** Группа, выбранная в «Слоях»: её слои в выделении, новый слой ляжет сверху в неё */
@@ -362,7 +361,9 @@ export function App() {
   const segment = state?.segment;
   const segmentReady = segment?.status === 'ready';
   selectionRef.current = selection;
-  const editedLayer = layers.find((p) => p.id === maskLayer && p.active) ?? null;
+  const maskObj = maskLayer ? objects.find((o) => o.id === maskLayer && o.kind !== 'fill') : undefined;
+  /** Версия, маску которой правят: что сейчас видно от слоя — другая версия становится текущей, и правится её маска */
+  const editedLayer = (maskObj && layers.find((p) => p.id === (maskObj.current ?? maskObj.layer) && p.active)) || null;
   const maskEdit = editedLayer ? layerMaskEdit(editedLayer, layers) : null;
   const activeObj = active ? objects.find((o) => o.id === active) : undefined;
   const activeGrp = activeGroup ? groups.find((g) => g.id === activeGroup) : undefined;
@@ -470,10 +471,11 @@ export function App() {
       post(`/api/jobs/${j.id}/discard`).catch(() => discarded.current.delete(j.id));
     }
   }, [state?.jobs]);
-  // Скрытая или удалённая версия маску больше не правит
+  // Маску правят только у слоя, в котором работают, пока от него что-то видно: скрытый слой или исходник слоя из генерации — нет
   useEffect(() => {
-    if (maskLayer && !editedLayer) setMaskLayer(null);
-  }, [maskLayer, editedLayer?.id]);
+    if (maskLayer && (maskLayer !== active || !editedLayer)) setMaskLayer(null);
+  }, [maskLayer, active, editedLayer?.id]);
+  useEffect(() => viewRef.current?.setMaskErase(maskOp === 'sub'), [maskOp]);
   const maskEditKey = JSON.stringify(maskEdit);
   useEffect(() => viewRef.current?.setMaskEdit(maskEdit), [maskEditKey]);
   useEffect(() => viewRef.current?.setSelection(selection), [selection]);
@@ -519,7 +521,7 @@ export function App() {
     formOrder.current.push('shape');
     updateSelection((s) => (op === 'new' ? [shape] : [...s, shape]));
     // Кисть по линиям: мазок заменяется маской, привязанной к рисунку, когда сервер её посчитает
-    if (brushSnap && shape.kind === 'stroke' && (tool === 'brush' || tool === 'eraser')) {
+    if (brushSnap && shape.kind === 'stroke' && tool === 'brush') {
       const { erase, ...stroke } = shape;
       // Запас — треть радиуса кисти: клетка, которую мазок почти накрыл, берётся вся, а соседняя большая — нет
       post<MaskResult>('/api/selection/snap', { shapes: [stroke], reach: shape.size / 6 })
@@ -814,6 +816,9 @@ export function App() {
       if (!has) formOrder.current.push('shape');
       updateSelection((sel) => (has ? sel.filter((s) => !(s.kind === 'mask' && s.id === shape.id)) : [...sel, shape]));
       setActive(null);
+    } else if (active === o.id && maskLayer === o.id) {
+      // Правили маску — щелчок по слою возвращает к его пикселям, как в Photoshop
+      setMaskLayer(null);
     } else if (active === o.id) {
       // Второй щелчок по слою, в котором работают, — назад к картинке
       setActive(null);
@@ -1301,6 +1306,11 @@ export function App() {
       toggleFocus();
       return;
     }
+    // X при правке маски — скрывать или возвращать, как смена цветов в Photoshop
+    if (e.code === 'KeyX' && maskLayer) {
+      setMaskOp((op) => (op === 'sub' ? 'add' : 'sub'));
+      return;
+    }
     // По коду клавиши — в русской раскладке тоже
     const t = TOOLS.find((x) => e.code === `Key${x.key}` || e.key.toLowerCase() === x.key.toLowerCase());
     if (t) setTool(t.id);
@@ -1352,15 +1362,16 @@ export function App() {
 
   const saveStyle = (style: string) => post('/api/doc/style', { style }).then(() => setDialog(null), fail);
 
-  // Маску версии правят прежде всего, чтобы скрыть кусок, поэтому сразу ластик
-  const editLayerMask = (patch: PatchDto) => {
-    if (maskLayer === patch.id) {
-      setMaskLayer(null);
-      return;
-    }
-    setMaskLayer(patch.id);
-    setTool('eraser');
-    viewRef.current?.reveal(patch.rect);
+  /** Щелчок по миниатюре маски: работа в слое, кисть правит маску того, что от него видно. Прежде всего — чтобы скрыть кусок */
+  const editLayerMask = (o: ObjectDto) => {
+    const shown = layers.find((p) => p.id === (o.current ?? o.layer));
+    if (!shown) return;
+    if (active !== o.id) enterLayer(o);
+    if (maskLayer === o.id) return;
+    setMaskLayer(o.id);
+    setMaskOp('sub');
+    setTool('brush');
+    viewRef.current?.reveal(shown.rect);
   };
 
   /** Маска версии по объекту, который нарисовала модель: её рисует модель из формы — это генерация */
@@ -1527,11 +1538,24 @@ export function App() {
               <span class="opt-title">
                 <IconMask size={16} stroke={STROKE} aria-hidden="true" />
                 {`Маска «${short(objects.find((o) => o.id === editedLayer.object)?.name ?? editedLayer.prompt, 24)}»`}
-                <Help>Ластик и Alt скрывают часть версии, кисть и фигуры возвращают её — и за краем прежнего выделения. ⌘Z отменяет мазок.</Help>
+                <Help>Кисть и фигуры скрывают часть версии или возвращают её — и за краем прежнего выделения. Alt — наоборот, X — сменить. ⌘Z отменяет мазок.</Help>
               </span>
-              {(tool === 'brush' || tool === 'eraser') && (
+              {tool !== 'hand' && (
                 <>
                   <span class="opt-sep" />
+                  <Seg
+                    label="Кисть по маске"
+                    value={maskOp}
+                    options={[
+                      { value: 'add' as const, icon: IconLayersUnion, title: 'Вернуть часть версии (X)' },
+                      { value: 'sub' as const, icon: IconLayersSubtract, title: 'Скрыть часть версии (X, Alt)' },
+                    ]}
+                    onChange={setMaskOp}
+                  />
+                </>
+              )}
+              {tool === 'brush' && (
+                <>
                   <Slider label="Размер" title="Размер кисти на экране ([ и ])" min={4} max={400} value={brush} onChange={setBrush} />
                   <Slider
                     label="Мягкость"
@@ -1563,7 +1587,7 @@ export function App() {
                 })()}
                 {TOOLS.find((t) => t.id === tool)?.name}
               </span>
-              {SELECTING.includes(tool) && tool !== 'eraser' && (
+              {SELECTING.includes(tool) && (
                 <>
                   <span class="opt-sep" />
                   <Seg
@@ -1591,7 +1615,7 @@ export function App() {
                   <OptCheck label="По линиям" title="Край выделения — по линиям рисунка, с контуром" checked={objectSnap} onChange={setObjectSnap} />
                 </>
               )}
-              {(tool === 'brush' || tool === 'eraser') && (
+              {tool === 'brush' && (
                 <>
                   <Slider label="Размер" title="Размер кисти на экране ([ и ])" min={4} max={400} value={brush} onChange={setBrush} />
                   <OptCheck label="По линиям" title="Клетки рисунка, которые задел мазок, — целиком, с контуром" checked={brushSnap} onChange={setBrushSnap} />
@@ -1706,7 +1730,6 @@ export function App() {
           onError={setErrorJob}
           onMore={(p) => void layerVariants(p)}
           onRedo={startRedo}
-          onMask={editLayerMask}
           onObjectMask={(p) => void objectMask(p)}
           onExpand={expandVersion}
           onDeleteVersion={deleteVersion}
@@ -1731,7 +1754,9 @@ export function App() {
               activeGroup={activeGroup}
               activeJob={activeJob}
               picked={selectedObjects}
+              maskLayer={maskLayer}
               onSelect={selectObject}
+              onMask={editLayerMask}
               onEnter={(o) => {
                 if (active !== o.id) enterLayer(o);
               }}
@@ -2095,7 +2120,11 @@ function LayersPanel(props: {
   activeJob: string | null;
   /** Слои в выделении: Shift-щелчком в списке */
   picked: Set<string>;
+  /** Слой, маску которого правят */
+  maskLayer: string | null;
   onSelect: (o: ObjectDto, add: boolean) => void;
+  /** Щелчок по миниатюре маски: кисть правит маску того, что от слоя видно */
+  onMask: (o: ObjectDto) => void;
   /** Работать в слое, если ещё не в нём (двойной щелчок — переименовать) */
   onEnter: (o: ObjectDto) => void;
   onSelectGroup: (g: GroupDto, add: boolean) => void;
@@ -2165,6 +2194,7 @@ function LayersPanel(props: {
     return true;
   };
   const thumb = (p: PatchDto | undefined) => p && `/api/history/${p.id}/thumb.png?doc=${props.doc.id}&m=${p.maskRev}`;
+  const maskThumb = (p: PatchDto) => `/api/history/${p.id}/mask-thumb.png?doc=${props.doc.id}&m=${p.maskRev}`;
   // Генерации новых слоёв — пока слоя нет
   const pending = props.jobs.filter((j) => !j.object);
   // Слои стоят с отступом под стрелкой группы, когда группы есть: миниатюры одного уровня — в столбик
@@ -2281,12 +2311,16 @@ function LayersPanel(props: {
     // Копия без фона: скрой её — под ней то же самое
     const needsFill = o.kind !== 'fill' && !o.freed && !o.current && !o.hidden;
     const filling = props.jobs.some((j) => j.fillFor === o.id && busyJob(j));
+    // Что от слоя видно: у этой версии и маска; у исходника слоя из генерации маски нет
+    const shown = o.kind !== 'fill' ? patches.get(o.current ?? o.layer ?? '') : undefined;
+    const masking = props.maskLayer === o.id;
     return (
       <Fragment key={o.id}>
         <li
           class={[
             'layer',
             active ? 'active' : '',
+            masking ? 'masking' : '',
             !active && props.picked.has(o.id) ? 'picked' : '',
             o.visible ? '' : 'off',
             o.lost ? 'lost' : '',
@@ -2316,7 +2350,24 @@ function LayersPanel(props: {
               });
             }}
           >
-            <Thumb src={thumb(patches.get(o.current ?? o.layer ?? ''))} />
+            <span class="thumbs">
+              <Thumb src={thumb(patches.get(o.current ?? o.layer ?? ''))} />
+              {shown && (
+                <button
+                  class="thumb mask"
+                  title={o.visible ? 'Маска: править кистью' : 'Слой скрыт'}
+                  aria-label="Маска слоя"
+                  aria-pressed={masking}
+                  disabled={!o.visible}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    props.onMask(o);
+                  }}
+                >
+                  <img src={maskThumb(shown)} alt="" draggable={false} />
+                </button>
+              )}
+            </span>
             {nameOrField(o.id, o.name, (name) => props.onRename(o, name))}
             {busy && <IconLoader2 size={15} stroke={STROKE} class="spin layer-badge" aria-label="Идёт генерация" />}
             {failed && !busy && <IconAlertTriangle size={15} stroke={STROKE} class="layer-badge error" aria-label="Генерация с ошибкой" />}
@@ -2456,7 +2507,8 @@ function LayersPanel(props: {
         Слои
         <Help>
           Слой — кусок картинки со своими пикселями поверх остального. Щелчок по слою здесь или палочкой на холсте — работа в нём:
-          палочка ищет только в нём, генерация ложится его версией; его версии — в ленте под холстом. Фон внизу — работа вне слоёв:
+          палочка ищет только в нём, генерация ложится его версией; его версии — в ленте под холстом. Щелчок по маске рядом — кисть
+          правит её, щелчок по слою — снова его пиксели. Фон внизу — работа вне слоёв:
           генерация ляжет новым слоем. ⌘J — копия выделенного новым слоем, ⌘⇧J — вырезать. Shift-щелчок — несколько слоёв: ⌘G их
           группирует, ⌘E объединяет. Группа: щелчок — её слои в выделение, новый слой ляжет в неё; стрелка сворачивает, глаз скрывает
           всё, что в ней, ⇧⌘G разгруппировывает. Перетащите слой или группу выше, ниже или в группу. «\» — исходник всей картинки,
@@ -2552,7 +2604,6 @@ function VersionsBand(props: {
   onError: (job: string | null) => void;
   onMore: (patch: PatchDto) => void;
   onRedo: (patch: PatchDto) => void;
-  onMask: (patch: PatchDto) => void;
   onObjectMask: (patch: PatchDto) => void;
   onExpand: (patch: PatchDto) => void;
   onDeleteVersion: (patch: PatchDto) => void;
@@ -2768,7 +2819,7 @@ function VersionsBand(props: {
             </button>
             {shown && (
               <MenuButton
-                class={props.maskLayer === shown.id ? 'bbtn on' : 'bbtn'}
+                class={props.maskLayer === o.id ? 'bbtn on' : 'bbtn'}
                 title={off ? 'Слой скрыт' : 'Маска того, что видно'}
                 disabled={off}
                 label={
@@ -2779,7 +2830,6 @@ function VersionsBand(props: {
                   </>
                 }
                 items={[
-                  { icon: IconBrush, label: props.maskLayer === shown.id ? 'Закончить правку' : 'Править кистью', title: 'Кисть возвращает, ластик скрывает', run: () => props.onMask(shown) },
                   { icon: IconSparkles, label: 'По объекту', hint: 'генерация', disabled: masking.has(shown.id), title: 'Маску рисует модель из правки', run: () => props.onObjectMask(shown) },
                   ...(current
                     ? [{ icon: IconArrowsMaximize, label: 'По правке', hint: 'без генерации', title: 'Добавить к маске то, что модель нарисовала за её краем', run: () => props.onExpand(current) }]

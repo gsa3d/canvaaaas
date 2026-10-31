@@ -7,7 +7,7 @@ import { API_HEADER, type DocDto, type JobDto, type MaskEditResult, type MaskSha
 import { post } from './api.ts';
 import { MaskPreview, type MaskEditView } from './mask-edit.ts';
 
-export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'eraser' | 'sketch' | 'object' | 'move';
+export type Tool = 'hand' | 'rect' | 'lasso' | 'brush' | 'sketch' | 'object' | 'move';
 
 /** Что фигура делает с выделением: заменяет его, добавляется к нему или вычитается */
 export type SelectOp = 'new' | 'add' | 'sub';
@@ -149,7 +149,7 @@ export class CanvasView {
   private readonly overlay: HTMLCanvasElement;
   private readonly fill = document.createElement('canvas');
   private readonly edge = document.createElement('canvas');
-  /** Набросок рисуется отдельно: его ластик стирает только набросок */
+  /** Набросок рисуется отдельно: Alt у наброска стирает только набросок */
   private readonly ink = document.createElement('canvas');
   private readonly hooks: ViewerHooks;
 
@@ -167,6 +167,8 @@ export class CanvasView {
   private tool: Tool = 'rect';
   /** Режим выделения на панели инструмента; Shift и Alt меняют его на время щелчка */
   private selectMode: SelectOp = 'new';
+  /** При правке маски кисть и фигуры скрывают часть версии, иначе — возвращают её; Alt — наоборот */
+  private maskErase = true;
   private spaceHeld = false;
   private brushPx = 40;
   /** Мягкость края кисти 0..1; действует только при правке маски — выделение всегда с жёстким краем */
@@ -282,7 +284,7 @@ export class CanvasView {
     container.addEventListener('pointermove', (e) => {
       const r = container.getBoundingClientRect();
       this.cursor = { x: e.clientX - r.left, y: e.clientY - r.top };
-      if (this.tool === 'brush' || this.tool === 'eraser' || this.tool === 'sketch') this.redraw();
+      if (this.tool === 'brush' || this.tool === 'sketch') this.redraw();
       if (this.activeTool() === 'object' && !this.draft) {
         this.hoverAt = this.toImage(new OpenSeadragon.Point(this.cursor.x, this.cursor.y));
         this.requestHover();
@@ -483,6 +485,17 @@ export class CanvasView {
 
   setSelectMode(mode: SelectOp): void {
     this.selectMode = mode;
+    this.redraw();
+  }
+
+  setMaskErase(erase: boolean): void {
+    this.maskErase = erase;
+    this.redraw();
+  }
+
+  /** Сотрёт ли мазок кисти без клавиш: у маски — её режим, у выделения — «Вычесть» */
+  private brushErases(): boolean {
+    return this.maskMode() ? this.maskErase : this.selectMode === 'sub';
   }
 
   /** Что щелчок или фигура сделают с выделением: Alt — вычесть, Shift (и ⌘) — добавить, иначе режим с панели. Кисть не заменяет */
@@ -786,12 +799,12 @@ export class CanvasView {
       return;
     }
     const kind = tool === 'rect' ? 'rect' : tool === 'lasso' ? 'lasso' : 'stroke';
-    // У маски слоя или задачи кисть дорисовывает, ластик и Alt стирают; у выделения — режим с панели, ластик вычитает
-    const op: SelectOp = tool === 'eraser' ? 'sub' : this.opFor(original, kind === 'stroke');
+    // У маски слоя или задачи кисть и фигуры скрывают или возвращают по её режиму, Alt — наоборот; у выделения — режим с панели
+    const op = this.opFor(original, kind === 'stroke');
     const draft: Draft = {
       kind,
       points: [p],
-      erase: this.maskMode() ? tool === 'eraser' || original.altKey : op === 'sub',
+      erase: this.maskMode() ? this.maskErase !== original.altKey : op === 'sub',
       op,
       size: round(this.brushPx / this.scale()),
       softness: this.maskMode() ? this.softness : 0,
@@ -1010,7 +1023,7 @@ export class CanvasView {
       peek.forEach((part, i) => ctx.drawImage(images[i]!, part.rect.x, part.rect.y, part.rect.width, part.rect.height));
     }
 
-    // Выделение: объединение фигур с вычитанием ластика — на отдельном канвасе, затем заливка и контур.
+    // Выделение: объединение фигур с вычитаемыми — на отдельном канвасе, затем заливка и контур.
     // Пока правится маска, выделение не показываем, чтобы не путать одно с другим. Мазок по маске виден сразу
     // в превью; черновик — только у прямоугольника и лассо (и пока превью грузится), стирающий — красным
     const shapes: (MaskShape | Draft)[] = maskMode ? [] : [...this.selection];
@@ -1149,7 +1162,7 @@ export class CanvasView {
 
     // Курсор кисти; у мягкой кисти пунктиром — где кончается сплошная середина; у наброска — его цветом
     const tool = this.activeTool();
-    if (this.cursor && (tool === 'brush' || tool === 'eraser' || tool === 'sketch')) {
+    if (this.cursor && (tool === 'brush' || tool === 'sketch')) {
       const circle = (radius: number, dash: number[]) => {
         ctx.beginPath();
         ctx.arc(this.cursor!.x, this.cursor!.y, radius, 0, Math.PI * 2);
@@ -1158,7 +1171,7 @@ export class CanvasView {
         ctx.strokeStyle = 'rgba(0,0,0,0.55)';
         ctx.stroke();
         ctx.lineWidth = 1.2;
-        ctx.strokeStyle = tool === 'eraser' ? '#fff' : tool === 'sketch' ? this.sketchColor : ACCENT;
+        ctx.strokeStyle = tool === 'sketch' ? this.sketchColor : this.brushErases() ? '#fff' : ACCENT;
         ctx.stroke();
         ctx.setLineDash([]);
       };

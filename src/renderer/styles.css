@@ -1375,14 +1375,16 @@ button.layer-fold:hover {
   background: rgba(0, 0, 0, 0.04);
 }
 
-/* Выбранное — заливкой строки и синим кольцом у миниатюры: синий — то, что выделено на холсте */
+/* Выбранное — заливкой строки и синим кольцом у миниатюры: синий — то, что выделено на холсте.
+   Правят маску — кольцо у миниатюры маски, как рамка в Photoshop */
 .layer.active > .layer-row,
 .layer.picked > .layer-row {
   background: var(--sel);
 }
 
-.layer.active .thumb:not(.folder),
-.layer.picked .thumb {
+.layer.active:not(.masking) .thumb:not(.folder, .mask),
+.layer.picked .thumb:not(.mask),
+.layer.masking .thumb.mask {
   box-shadow:
     0 0 0 1.5px var(--paper),
     0 0 0 3px var(--accent);
@@ -1478,6 +1480,29 @@ button.layer-fold:hover {
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+/* Миниатюра слоя и рядом — маска того, что от него видно: белое видно, чёрное скрыто */
+.thumbs {
+  flex: none;
+  display: flex;
+  gap: 3px;
+}
+
+/* Рамка темнее обычной: целиком белая маска на заливке выбранной строки иначе теряется */
+button.thumb.mask {
+  padding: 0;
+  border-color: #b9b5ac;
+  background: var(--fill);
+  cursor: pointer;
+}
+
+button.thumb.mask:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+button.thumb.mask:disabled {
+  cursor: default;
 }
 
 .spin {

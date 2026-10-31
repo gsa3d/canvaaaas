@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
 import { CanvasDocument } from '../src/core/document.ts';
 import { featherAlpha } from '../src/core/mask.ts';
@@ -170,6 +171,18 @@ describe('Маска слоя', () => {
     await s.undo();
     await s.undo();
     expect(doc.object('o').rect).toEqual(half.rect);
+  });
+
+  it('миниатюра маски — прозрачность версии на весь кусок: белое видно, чёрное скрыто', async () => {
+    const s = new Session('mock', envOnlyStore());
+    await s.newDocument(W, H, [10, 20, 30]);
+    s.doc!.addPatch(accepted(leftHalf(), 0));
+    const png = await s.maskThumbPng('a', 40);
+    expect((await sharp(png).metadata()).channels).toBe(1);
+    const { data, info } = await sharp(png).toColourspace('b-w').raw().toBuffer({ resolveWithObject: true });
+    expect([info.width, info.height, info.channels]).toEqual([40, 30, 1]);
+    expect(data[15 * 40 + 5]).toBe(255);
+    expect(data[15 * 40 + 35]).toBe(0);
   });
 });
 

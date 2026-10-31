@@ -259,6 +259,9 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   route('GET', '/api/history/:id/thumb.png', async (_req, res, [id]) => {
     send(res, 200, await session.thumbPng(id!), 'image/png', { 'Cache-Control': 'private, max-age=31536000, immutable' });
   });
+  route('GET', '/api/history/:id/mask-thumb.png', async (_req, res, [id]) => {
+    send(res, 200, await session.maskThumbPng(id!), 'image/png', { 'Cache-Control': 'private, max-age=31536000, immutable' });
+  });
   route('GET', '/api/history/:id/cutout.png', async (_req, res, [id]) => {
     send(res, 200, await session.cutoutPng(id!), 'image/png', { 'Cache-Control': 'no-store' });
   });
