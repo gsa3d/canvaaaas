@@ -3449,11 +3449,18 @@ function SettingsDialog(props: {
           <>
             <p>{L('Картинки и директор идут через Codex по подписке ChatGPT, ключ не нужен.', 'Images and the director go through Codex on your ChatGPT subscription; no key needed.')}</p>
             <p class="hint">
-              Codex: <code>{props.codex}</code>{L('. Если пишет, что вход не выполнен, войдите в Codex в приложении ChatGPT.', '. If it says you are not signed in, sign in to Codex in the ChatGPT app.')}
+              Codex: <code>{props.codex}</code>
+              {mac
+                ? L('. Если пишет, что вход не выполнен, войдите в Codex в приложении ChatGPT.', '. If it says you are not signed in, sign in to Codex in the ChatGPT app.')
+                : L('. Если пишет, что вход не выполнен, войдите командой codex login.', '. If it says you are not signed in, sign in with codex login.')}
             </p>
           </>
         ) : (
-          <p>{L('Не найден Codex. Установите приложение ChatGPT (Codex в нём есть) или Codex CLI и войдите в ChatGPT.', 'Codex not found. Install the ChatGPT app (it includes Codex) or Codex CLI and sign in to ChatGPT.')}</p>
+          <p>
+            {mac
+              ? L('Не найден Codex. Установите приложение ChatGPT (Codex в нём есть) или Codex CLI и войдите в ChatGPT.', 'Codex not found. Install the ChatGPT app (it includes Codex) or Codex CLI and sign in to ChatGPT.')
+              : L('Не найден Codex. Установите Codex CLI (npm install -g @openai/codex) и войдите в ChatGPT: codex login.', 'Codex not found. Install Codex CLI (npm install -g @openai/codex) and sign in to ChatGPT: codex login.')}
+          </p>
         )}
       </div>
     </div>

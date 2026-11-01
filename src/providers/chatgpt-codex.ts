@@ -6,10 +6,10 @@
 // Размер ответа инструменту не задаётся: модель отдаёт около 1,57 Мп в пропорциях первой картинки.
 // Тот же Codex без инструмента картинок — директор и критик: агент смотрит на кусок и отвечает текстом.
 import { spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, extname, join } from 'node:path';
+import { delimiter, dirname, extname, join } from 'node:path';
 import { criticPrompt, directorPrompt, parseCritic, parseDirector, type PromptDirector } from './director.ts';
 import { ProviderError, type GenerateRequest, type GenerateResult, type ImageProvider, type InputImage, type Size } from './types.ts';
 import { L, locale } from '../shared/i18n.ts';
@@ -42,14 +42,15 @@ function isFile(path: string): boolean {
 }
 
 /** Codex CLI: CANVAAAAS_CODEX, затем PATH, затем известные места; null — не установлен */
-export function findCodex(env: NodeJS.ProcessEnv = process.env): string | null {
-  const exe = process.platform === 'win32' ? 'codex.exe' : 'codex';
+export function findCodex(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | null {
   const home = homedir();
+  const dirs = (env.PATH ?? env.Path ?? '').split(delimiter).filter(Boolean);
+  if (platform === 'win32') return findCodexWindows(env, dirs);
   const candidates = [
     env.CANVAAAAS_CODEX,
-    ...(env.PATH ?? '').split(delimiter).filter(Boolean).map((dir) => join(dir, exe)),
+    ...dirs.map((dir) => join(dir, 'codex')),
     // Приложение, открытое из Finder, получает урезанный PATH: Homebrew, npm и ~/.local в него не попадают
-    ...(process.platform === 'darwin'
+    ...(platform === 'darwin'
       ? [
           '/opt/homebrew/bin/codex',
           '/usr/local/bin/codex',
@@ -64,6 +65,112 @@ export function findCodex(env: NodeJS.ProcessEnv = process.env): string | null {
   return candidates.find((p): p is string => !!p && isFile(p)) ?? null;
 }
 
+/**
+ * На Windows в PATH от npm и pnpm лежит обёртка codex.cmd, а её без оболочки не запустить — ищем codex.exe за ней.
+ * Ещё — установщик Codex: %LOCALAPPDATA%\Programs\OpenAI\Codex и версии в <CODEX_HOME>\packages\standalone.
+ * Codex из приложения Codex (WindowsApps) недоступен: папка закрыта.
+ */
+function findCodexWindows(env: NodeJS.ProcessEnv, dirs: string[]): string | null {
+  const home = homedir();
+  const local = env.LOCALAPPDATA ?? join(home, 'AppData', 'Local');
+  const roaming = env.APPDATA ?? join(home, 'AppData', 'Roaming');
+  const candidates = [
+    env.CANVAAAAS_CODEX,
+    ...dirs.flatMap((dir) => [join(dir, 'codex.exe'), join(dir, 'codex.cmd')]),
+    // Свежая версия установщика — рядом с ней её codex-resources
+    ...standaloneReleases(codexHomeDir(env)).map((dir) => join(dir, 'bin', 'codex.exe')),
+    join(local, 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe'),
+    // Папка npm по умолчанию: в PATH приложения её может не быть
+    join(roaming, 'npm', 'codex.cmd'),
+  ];
+  for (const path of candidates) {
+    if (!path) continue;
+    const found = /\.(cmd|bat)$/i.test(path) ? codexBehindShim(path) : isFile(path) ? path : null;
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Версии установщика Codex, новые первыми */
+function standaloneReleases(codexHome: string): string[] {
+  const root = join(codexHome, 'packages', 'standalone', 'releases');
+  let names: string[];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return [];
+  }
+  const parts = (name: string) => name.split(/[^0-9]+/).filter(Boolean).map(Number);
+  const newer = (a: string, b: string) => {
+    const [x, y] = [parts(a), parts(b)];
+    for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (y[i] ?? 0) - (x[i] ?? 0);
+    return 0;
+  };
+  return names.sort(newer).map((name) => join(root, name));
+}
+
+/** Пакет Codex под Windows: имя в npm и папка в vendor/ */
+const WINDOWS_TARGETS: Record<string, { pkg: string; triple: string }> = {
+  x64: { pkg: 'codex-win32-x64', triple: 'x86_64-pc-windows-msvc' },
+  arm64: { pkg: 'codex-win32-arm64', triple: 'aarch64-pc-windows-msvc' },
+};
+
+/**
+ * codex.exe за обёрткой npm или pnpm: в codex.cmd — путь к bin/codex.js пакета @openai/codex, а сам codex.exe —
+ * в пакете под платформу (@openai/codex-win32-x64: у npm — внутри пакета, у pnpm — рядом с ним),
+ * в старых версиях — в самом пакете. null — обёртки нет или exe не нашёлся
+ */
+export function codexBehindShim(shim: string, arch: string = process.arch): string | null {
+  let text: string;
+  try {
+    text = readFileSync(shim, 'utf8');
+  } catch {
+    return null;
+  }
+  // "%dp0%\node_modules\@openai\codex\bin\codex.js" (npm) или "%~dp0\…\codex.js" (pnpm)
+  const ref = /"([^"]*codex\.js)"/i.exec(text)?.[1];
+  if (!ref) return null;
+  const relative = /^%~?dp0%?/i.test(ref);
+  const script = relative ? join(dirname(shim), ...ref.replace(/^%~?dp0%?/i, '').split(/[\\/]+/).filter(Boolean)) : ref;
+  let root: string;
+  try {
+    root = realpathSync(dirname(dirname(script)));
+  } catch {
+    return null;
+  }
+  const arches = [arch, ...Object.keys(WINDOWS_TARGETS).filter((a) => a !== arch)];
+  const candidates = arches.flatMap((a) => {
+    const target = WINDOWS_TARGETS[a];
+    if (!target) return [];
+    const { pkg, triple } = target;
+    return [
+      join(root, 'node_modules', '@openai', pkg, 'vendor', triple, 'bin', 'codex.exe'),
+      join(dirname(root), pkg, 'vendor', triple, 'bin', 'codex.exe'),
+      join(root, 'vendor', triple, 'bin', 'codex.exe'),
+      join(root, 'vendor', triple, 'codex', 'codex.exe'),
+    ];
+  });
+  return candidates.find(isFile) ?? null;
+}
+
+/**
+ * Папки Codex на Windows — в начало PATH: codex exec, запущенный не из своей обёртки, иначе не находит
+ * помощника песочницы из codex-resources рядом с bin (openai/codex#28278). Ключ PATH на Windows бывает «Path»
+ */
+export function withCodexDirs(env: NodeJS.ProcessEnv, bin: string, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  if (platform !== 'win32') return env;
+  const binDir = dirname(bin);
+  const dirs = [binDir, join(dirname(binDir), 'codex-resources'), join(dirname(binDir), 'codex-path')].filter((dir) => {
+    try {
+      return statSync(dir).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+  return { ...env, [key]: [...dirs, env[key]].filter(Boolean).join(delimiter) };
+}
+
 export function codexHomeDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.CODEX_HOME || join(homedir(), '.codex');
 }
@@ -71,7 +178,17 @@ export function codexHomeDir(env: NodeJS.ProcessEnv = process.env): string {
 function requireCodex(path: string | undefined): string {
   const bin = path ?? findCodex();
   if (!bin) {
-    throw new ProviderError(L('Не найден Codex CLI, через который идёт ChatGPT по подписке. Установите приложение ChatGPT (в нём есть Codex) или Codex CLI.', 'Codex CLI, which runs ChatGPT on your subscription, was not found. Install the ChatGPT app (it includes Codex) or Codex CLI.'));
+    throw new ProviderError(
+      process.platform === 'win32'
+        ? L(
+            'Не найден Codex CLI, через который идёт ChatGPT по подписке. Установите его (npm install -g @openai/codex) и войдите в ChatGPT: codex login.',
+            'Codex CLI, which runs ChatGPT on your subscription, was not found. Install it (npm install -g @openai/codex) and sign in to ChatGPT: codex login.',
+          )
+        : L(
+            'Не найден Codex CLI, через который идёт ChatGPT по подписке. Установите приложение ChatGPT (в нём есть Codex) или Codex CLI.',
+            'Codex CLI, which runs ChatGPT on your subscription, was not found. Install the ChatGPT app (it includes Codex) or Codex CLI.',
+          ),
+    );
   }
   return bin;
 }
@@ -170,7 +287,7 @@ function runCodex(bin: string, args: string[], input: string, opts: { cwd: strin
       resolve({ ...run, aborted: true });
       return;
     }
-    const child = spawn(bin, args, { cwd: opts.cwd, env: opts.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(bin, args, { cwd: opts.cwd, env: withCodexDirs(opts.env, bin), stdio: ['pipe', 'pipe', 'pipe'] });
     let killTimer: NodeJS.Timeout | undefined;
     const kill = () => {
       child.kill('SIGTERM');

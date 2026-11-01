@@ -44,7 +44,7 @@ canvaaaas needs at least one image model. Open **Settings** (⌘, on macOS, Ctrl
 
 **Nano Banana 2 / Nano Banana Pro.** Create an API key at [laozhang.ai](https://laozhang.ai) and paste it into Settings. The key is stored in the macOS Keychain or, on Windows, encrypted for your user account; it is only ever sent to laozhang.ai. Each generation is billed by laozhang.ai.
 
-**ChatGPT Images.** No key: images are drawn by Codex signed in to your ChatGPT account, and generations count toward your ChatGPT plan limits. Install the [ChatGPT desktop app](https://chatgpt.com/download) (it includes Codex) or [Codex CLI](https://github.com/openai/codex) and sign in (`codex login`). Settings shows where canvaaaas found Codex. The Director and the critic also run through Codex.
+**ChatGPT Images.** No key: images are drawn by Codex signed in to your ChatGPT account, and generations count toward your ChatGPT plan limits. On macOS, install the [ChatGPT desktop app](https://chatgpt.com/download) (it includes Codex) or [Codex CLI](https://github.com/openai/codex). On Windows, install Codex CLI — `npm install -g @openai/codex` or the installer from its page — and sign in with `codex login`. Settings shows where canvaaaas found Codex. The Director and the critic also run through Codex.
 
 **Object selection.** The first time you use the Wand, canvaaaas offers to download the SAM 2.1 model (272 MB, once). It runs on your computer, offline and free.
 

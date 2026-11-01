@@ -44,7 +44,7 @@ canvaaaas нужна хотя бы одна модель картинок. От�
 
 **Nano Banana 2 и Nano Banana Pro.** Создайте ключ API на [laozhang.ai](https://laozhang.ai) и вставьте его в настройки. Ключ хранится в Связке ключей macOS или, на Windows, зашифрованным для вашей учётной записи; уходит он только в laozhang.ai. Каждую генерацию оплачиваете в laozhang.ai.
 
-**ChatGPT Images.** Ключ не нужен: картинки рисует Codex, вошедший в ваш аккаунт ChatGPT, и генерации идут в счёт лимитов подписки. Установите [приложение ChatGPT](https://chatgpt.com/download) (в нём есть Codex) или [Codex CLI](https://github.com/openai/codex) и войдите (`codex login`). Где canvaaaas нашёл Codex — видно в настройках. Директор и критик тоже работают через Codex.
+**ChatGPT Images.** Ключ не нужен: картинки рисует Codex, вошедший в ваш аккаунт ChatGPT, и генерации идут в счёт лимитов подписки. На macOS установите [приложение ChatGPT](https://chatgpt.com/download) (в нём есть Codex) или [Codex CLI](https://github.com/openai/codex). На Windows — Codex CLI: `npm install -g @openai/codex` или установщиком с его страницы, и войдите командой `codex login`. Где canvaaaas нашёл Codex — видно в настройках. Директор и критик тоже работают через Codex.
 
 **Выделение объектов.** При первом щелчке «Палочкой» canvaaaas предложит скачать модель SAM 2.1 (272 МБ, один раз). Она работает на компьютере, без интернета и бесплатно.
 
