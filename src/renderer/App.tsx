@@ -230,8 +230,8 @@ const SKETCH_COLORS = ['#ff3b30', '#1e88ff', '#22b14c', '#111111', '#ffffff'];
 
 /** label — в списке моделей, short — в сводке над кнопкой генерации, note — подпись в списке (у Nano Banana перед ней — чей ключ) */
 const MODELS: { id: ModelChoice; label: string; short: string; note?: string }[] = [
-  { id: 'flash', label: 'Nano Banana 2', short: 'Banana 2' },
-  { id: 'pro', label: 'Nano Banana Pro', short: 'Banana Pro', note: L('вдвое дольше', 'twice as slow') },
+  { id: 'flash', label: 'Nano Banana 2.1', short: 'Banana 2.1' },
+  { id: 'pro', label: 'Nano Banana Pro', short: 'Banana Pro', note: L('дороже', 'pricier') },
   { id: 'chatgpt', label: 'ChatGPT Images', short: 'ChatGPT', note: L('подписка ChatGPT', 'ChatGPT subscription') },
 ];
 const modelInfo = (id: ModelChoice) => MODELS.find((m) => m.id === id) ?? MODELS[0]!;

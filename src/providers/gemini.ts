@@ -6,13 +6,16 @@ import { ProviderError, type GenerateRequest, type GenerateResult, type ImagePro
 import { GEMINI_SERVICE_NAMES, type GeminiService } from '../shared/api.ts';
 import { L } from '../shared/i18n.ts';
 
+// Стабильные названия: preview-названия (gemini-3.1-flash-image-preview, gemini-3-pro-image-preview) Google отключил
+// 25 июня 2026, laozhang.ai их ещё принимал. На место Nano Banana 2 Google советует 2.1
 export const GEMINI_MODELS = {
-  flash: 'gemini-3.1-flash-image-preview', // Nano Banana 2
-  pro: 'gemini-3-pro-image-preview', // Nano Banana Pro
+  flash: 'gemini-nano-banana-2.1', // Nano Banana 2.1
+  pro: 'gemini-3-pro-image', // Nano Banana Pro
 } as const;
 export type GeminiModel = keyof typeof GEMINI_MODELS;
 
-// Размеры ответа на 1K по документации Gemini; 2K и 4K — ровно вдвое и вчетверо больше
+// Размеры ответа на 1K по документации Gemini (у Nano Banana 2.1 те же, таблицы для неё Google не даёт — проверено
+// генерацией); 2K и 4K — ровно вдвое и вчетверо больше. У 2.1 есть ещё 1:4, 4:1, 1:8, 8:1, их размеры неизвестны
 const SIZES_1K: Record<string, [number, number]> = {
   '1:1': [1024, 1024],
   '2:3': [848, 1264],

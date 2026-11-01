@@ -63,7 +63,7 @@ describe('Nano Banana', () => {
     expect(res.text).toBe('готово');
     expect(p.id).toBe('google-gemini');
     const [req] = seen;
-    expect(req!.url).toBe('/v1beta/models/gemini-3-pro-image-preview:generateContent');
+    expect(req!.url).toBe('/v1beta/models/gemini-3-pro-image:generateContent');
     expect(req!.headers['x-goog-api-key']).toBe('AIza-test-key');
     expect(req!.headers.authorization).toBeUndefined();
     expect(req!.body.generationConfig).toEqual({ responseModalities: ['IMAGE'], imageConfig: { aspectRatio: '4:3', imageSize: '2K' } });
@@ -74,7 +74,7 @@ describe('Nano Banana', () => {
     const p = geminiImage({ service: 'laozhang', apiKey: async () => 'sk-test-key', baseUrl });
     await p.generate(request);
     const [req] = seen;
-    expect(req!.url).toBe('/v1beta/models/gemini-3.1-flash-image-preview:generateContent');
+    expect(req!.url).toBe('/v1beta/models/gemini-nano-banana-2.1:generateContent');
     expect(req!.headers.authorization).toBe('Bearer sk-test-key');
     expect(req!.headers['x-goog-api-key']).toBeUndefined();
     expect(p.id).toBe('laozhang-gemini');

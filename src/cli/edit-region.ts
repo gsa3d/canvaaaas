@@ -23,7 +23,7 @@ const HELP = L(`Правка области большой картинки че
   --out <файл.png>      куда сохранить результат (обязательно)
   --style <текст>       общий стиль документа
   --variants <N>        сколько вариантов (по умолчанию 2)
-  --model flash|pro     Nano Banana 2 или Nano Banana Pro (по умолчанию flash)
+  --model flash|pro     Nano Banana 2.1 или Nano Banana Pro (по умолчанию flash)
   --size auto|1K|2K|4K  разрешение ответа Nano Banana (по умолчанию auto); ChatGPT выбирает его сам
   --context <доля>      запас контекста вокруг выделения (по умолчанию 0.3)
   --context-min <px>    минимальный запас контекста (по умолчанию 128)
@@ -43,7 +43,7 @@ const HELP = L(`Правка области большой картинки че
   --out <file.png>      where to save the result (required)
   --style <text>        document style
   --variants <N>        number of variants (default 2)
-  --model flash|pro     Nano Banana 2 or Nano Banana Pro (default flash)
+  --model flash|pro     Nano Banana 2.1 or Nano Banana Pro (default flash)
   --size auto|1K|2K|4K  Nano Banana output resolution (default auto); ChatGPT picks its own
   --context <ratio>     context margin around the selection (default 0.3)
   --context-min <px>    minimum context margin (default 128)

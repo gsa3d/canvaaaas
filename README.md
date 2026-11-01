@@ -6,7 +6,7 @@ A desktop editor for large illustrations, one piece at a time. Select an area, d
 
 - **Big images.** 8000×6000 and larger: tiled canvas, all pixel work happens in the app, not in a browser canvas.
 - **Precise edits.** The model sees a crop around your selection, its answer is pasted back through your mask with a soft edge. Models that don't accept masks still edit only what you selected.
-- **Two image models.** Nano Banana 2 and Nano Banana Pro (Gemini image) with a Gemini API key from Google or a [laozhang.ai](https://laozhang.ai) key, or ChatGPT Images on your ChatGPT subscription through Codex — no API key.
+- **Two image models.** Nano Banana 2.1 and Nano Banana Pro (Gemini image) with a Gemini API key from Google or a [laozhang.ai](https://laozhang.ai) key, or ChatGPT Images on your ChatGPT subscription through Codex — no API key.
 - **Layers and versions.** Every result is a version of a layer: switch between them, compare, hide, regroup, merge, edit a layer mask with a brush.
 - **Object selection.** The Wand selects objects with SAM 2.1, which runs locally on your computer.
 - **Director and critic.** Optionally, ChatGPT writes out a detailed task from your words and the picture, and the edit goes in steps: after each, a critic says what to fix.
@@ -42,7 +42,7 @@ Run the installer. It installs canvaaaas for your user only, no administrator ri
 
 canvaaaas needs at least one image model. Open **Settings** (⌘, on macOS, Ctrl+, on Windows).
 
-**Nano Banana 2 / Nano Banana Pro.** Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/apikey) and paste it into Settings; generations are billed by Google. The Gemini API is not [available in every country](https://ai.google.dev/available_regions) — there, pick **laozhang.ai** under Nano Banana in Settings and use a [laozhang.ai](https://laozhang.ai) key instead: a proxy to the same models with its own billing. Each key is stored in the macOS Keychain or, on Windows, encrypted for your user account, and is only ever sent to its own service.
+**Nano Banana 2.1 / Nano Banana Pro.** Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/apikey) and paste it into Settings; generations are billed by Google. The Gemini API is not [available in every country](https://ai.google.dev/available_regions) — there, pick **laozhang.ai** under Nano Banana in Settings and use a [laozhang.ai](https://laozhang.ai) key instead: a proxy to the same models with its own billing. Each key is stored in the macOS Keychain or, on Windows, encrypted for your user account, and is only ever sent to its own service.
 
 **ChatGPT Images.** No key: images are drawn by Codex signed in to your ChatGPT account, and generations count toward your ChatGPT plan limits. On macOS, install the [ChatGPT desktop app](https://chatgpt.com/download) (it includes Codex) or [Codex CLI](https://github.com/openai/codex). On Windows, install Codex CLI — `npm install -g @openai/codex` or the installer from its page — and sign in with `codex login`. Settings shows where canvaaaas found Codex. The Director and the critic also run through Codex.
 
@@ -70,7 +70,7 @@ Useful keys: ⌘Z / ⇧⌘Z undo and redo, ⌘D deselect, ⌘J layer via copy, �
 
 - Describe the result, not the problem: not "fix the broken rails", but "the rails on the bridge continue the track from the left, without a gap, with the same sleepers".
 - Select only the place that should change, with a small margin. When the crop is much larger than the model's output, it loses detail — the resolution hint in the edit panel warns about it.
-- For edits that need reasoning (perspective, matching details), try Nano Banana Pro: it is slower and pricier, but thinks better.
+- For edits that need reasoning (perspective, matching details), try Nano Banana Pro: it is pricier, but often reasons better.
 
 ### Saving
 
