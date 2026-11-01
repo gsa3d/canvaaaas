@@ -7,7 +7,7 @@ import { alignMask, objectMaskRequest } from '../src/core/object-mask.ts';
 import { area, overlap, trim } from '../src/core/objects.ts';
 import { Prefs } from '../src/core/prefs.ts';
 import type { Bitmap } from '../src/core/segment.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { mockProvider } from '../src/providers/mock.ts';
 import { Session } from '../src/server/session.ts';
 
@@ -50,7 +50,7 @@ function treeMask(): Bitmap {
 describe('Маска по объекту', () => {
   /** Слой «дерево» с версией: ответ модели на весь R, видно его по выделению selected (растушёвка 24) */
   async function setup(selected: Uint8Array) {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(W, H, BASE);
     const doc = s.doc!;
     const alpha = featherAlpha(selected, R.width, R.height, 24);

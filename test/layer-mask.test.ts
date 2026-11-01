@@ -2,7 +2,7 @@ import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
 import { CanvasDocument } from '../src/core/document.ts';
 import { featherAlpha } from '../src/core/mask.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { Session } from '../src/server/session.ts';
 
 const W = 900;
@@ -65,7 +65,7 @@ describe('Маска слоя', () => {
   });
 
   it('ластиком по маске с растушёвкой: где маска стала 0, пиксели равны холсту под слоем; ⌘Z сразу после мазка отменяет его', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(W, H, [10, 20, 30]);
     const doc = s.doc!;
     // Нижний слой на всю ширину, сверху — правимый
@@ -99,7 +99,7 @@ describe('Маска слоя', () => {
   });
 
   it('мазок ложится прямо в прозрачность версии: мягкость 0 — чёткий край, мягкая кисть — плавный; ⌘Z возвращает как было', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(W, H, [10, 20, 30]);
     const doc = s.doc!;
     doc.addPatch(accepted(leftHalf(), 24));
@@ -131,7 +131,7 @@ describe('Маска слоя', () => {
   });
 
   it('после правки рукой «Расширить» растушёвывает добавленное, «Ещё варианты» — с растушёвкой вклейки', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(W, H, [10, 20, 30]);
     const doc = s.doc!;
     doc.addPatch(accepted(leftHalf(), 24));
@@ -151,7 +151,7 @@ describe('Маска слоя', () => {
   }, 20_000);
 
   it('кисть маски текущей версии за краем слоя растит и слой: его выделение и притушение — по тому, что видно; ⌘Z возвращает', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(W, H, [10, 20, 30]);
     const doc = s.doc!;
     // Слой — левая половина куска, у него две версии с ответом модели на весь кусок; видна «a»
@@ -174,7 +174,7 @@ describe('Маска слоя', () => {
   });
 
   it('миниатюра маски — прозрачность версии на весь кусок: белое видно, чёрное скрыто', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(W, H, [10, 20, 30]);
     s.doc!.addPatch(accepted(leftHalf(), 0));
     const png = await s.maskThumbPng('a', 40);

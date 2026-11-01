@@ -11,7 +11,7 @@ import { Prefs } from '../core/prefs.ts';
 import { RecentFiles } from '../core/recent.ts';
 import { Segmenter } from '../core/segment.ts';
 import { modelFiles, modelInstalled } from '../core/segment-model.ts';
-import { encryptedFileStore, keychainStore, withEnv } from '../core/secrets.ts';
+import { encryptedFileStore, keychainStore, keysFrom } from '../core/secrets.ts';
 import { COMMAND_EVENT, type AppCommand } from '../shared/api.ts';
 import { startServer } from '../server/app.ts';
 import { Session, type Host } from '../server/session.ts';
@@ -157,11 +157,11 @@ function buildMenu(win: BrowserWindow, session: Session): void {
 }
 
 app.whenReady().then(async () => {
-  // Ключ: на macOS — Связка ключей, на Windows — файл, зашифрованный системой для текущего пользователя
-  const keys = withEnv(
+  // Ключи: на macOS — Связка ключей, на Windows — файлы, зашифрованные системой для текущего пользователя
+  const keys = keysFrom((place) =>
     process.platform === 'darwin'
-      ? keychainStore()
-      : encryptedFileStore(join(app.getPath('userData'), 'laozhang-key.bin'), {
+      ? keychainStore(place.keychain)
+      : encryptedFileStore(join(app.getPath('userData'), place.file), {
           available: () => safeStorage.isEncryptionAvailable(),
           encrypt: (text) => safeStorage.encryptString(text),
           decrypt: (data) => safeStorage.decryptString(data),
@@ -174,7 +174,7 @@ app.whenReady().then(async () => {
   const prefs = await Prefs.load(smokeDir ?? app.getPath('userData'));
   // Язык системы — первый в её списке; CANVAAAAS_LANG=en|ru — проверить другой
   const systemLang = langOf(process.env.CANVAAAAS_LANG || app.getPreferredSystemLanguages()[0] || app.getLocale());
-  const session = new Session(process.env.CANVAAAAS_PROVIDER === 'mock' ? 'mock' : 'laozhang', keys, { recent, prefs, systemLang });
+  const session = new Session(process.env.CANVAAAAS_PROVIDER === 'mock' ? 'mock' : 'live', keys, { recent, prefs, systemLang });
   await session.init();
   const server = await startServer({ session, port: 0, staticDir: join(app.getAppPath(), 'dist', 'renderer') });
 

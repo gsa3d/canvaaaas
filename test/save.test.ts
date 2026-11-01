@@ -5,7 +5,7 @@ import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { inspectImage } from '../src/core/image-file.ts';
 import { RECENT_LIMIT, RecentFiles } from '../src/core/recent.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { Session, type Host } from '../src/server/session.ts';
 
 const W = 1200;
@@ -46,7 +46,7 @@ function fakeHost(answers: { save?: string | null; ask?: number[] } = {}) {
 }
 
 async function session(host?: Host): Promise<Session> {
-  return new Session('mock', envOnlyStore(), { host, recent: await RecentFiles.load(join(dir, `data-${Math.random()}`)) });
+  return new Session('mock', noKeys(), { host, recent: await RecentFiles.load(join(dir, `data-${Math.random()}`)) });
 }
 
 /** Правка прямо в документ — как будто вариант приняли */

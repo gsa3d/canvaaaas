@@ -4,7 +4,7 @@ import { applyShapes } from '../src/core/mask-shapes.ts';
 import { overlap, trim } from '../src/core/objects.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
 import { LOW, cleanLogits, levels, rasterize, type Bitmap, type Candidate } from '../src/core/segment.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { Session } from '../src/server/session.ts';
 import type { MaskShape } from '../src/shared/api.ts';
 
@@ -143,7 +143,7 @@ describe('Маски из логитов сетки', () => {
 
 describe('Объекты в сессии', () => {
   async function session() {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(400, 300, [255, 255, 255]);
     return s;
   }

@@ -6,7 +6,7 @@ A desktop editor for large illustrations, one piece at a time. Select an area, d
 
 - **Big images.** 8000×6000 and larger: tiled canvas, all pixel work happens in the app, not in a browser canvas.
 - **Precise edits.** The model sees a crop around your selection, its answer is pasted back through your mask with a soft edge. Models that don't accept masks still edit only what you selected.
-- **Two image models.** Nano Banana 2 and Nano Banana Pro (Gemini image) with a [laozhang.ai](https://laozhang.ai) API key, or ChatGPT Images on your ChatGPT subscription through Codex — no API key.
+- **Two image models.** Nano Banana 2 and Nano Banana Pro (Gemini image) with a Gemini API key from Google or a [laozhang.ai](https://laozhang.ai) key, or ChatGPT Images on your ChatGPT subscription through Codex — no API key.
 - **Layers and versions.** Every result is a version of a layer: switch between them, compare, hide, regroup, merge, edit a layer mask with a brush.
 - **Object selection.** The Wand selects objects with SAM 2.1, which runs locally on your computer.
 - **Director and critic.** Optionally, ChatGPT writes out a detailed task from your words and the picture, and the edit goes in steps: after each, a critic says what to fix.
@@ -42,7 +42,7 @@ Run the installer. It installs canvaaaas for your user only, no administrator ri
 
 canvaaaas needs at least one image model. Open **Settings** (⌘, on macOS, Ctrl+, on Windows).
 
-**Nano Banana 2 / Nano Banana Pro.** Create an API key at [laozhang.ai](https://laozhang.ai) and paste it into Settings. The key is stored in the macOS Keychain or, on Windows, encrypted for your user account; it is only ever sent to laozhang.ai. Each generation is billed by laozhang.ai.
+**Nano Banana 2 / Nano Banana Pro.** Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/apikey) and paste it into Settings; generations are billed by Google. The Gemini API is not [available in every country](https://ai.google.dev/available_regions) — there, pick **laozhang.ai** under Nano Banana in Settings and use a [laozhang.ai](https://laozhang.ai) key instead: a proxy to the same models with its own billing. Each key is stored in the macOS Keychain or, on Windows, encrypted for your user account, and is only ever sent to its own service.
 
 **ChatGPT Images.** No key: images are drawn by Codex signed in to your ChatGPT account, and generations count toward your ChatGPT plan limits. On macOS, install the [ChatGPT desktop app](https://chatgpt.com/download) (it includes Codex) or [Codex CLI](https://github.com/openai/codex). On Windows, install Codex CLI — `npm install -g @openai/codex` or the installer from its page — and sign in with `codex login`. Settings shows where canvaaaas found Codex. The Director and the critic also run through Codex.
 
@@ -79,7 +79,7 @@ The canvas inside canvaaaas is 8-bit sRGB without transparency. If the original 
 ## Privacy and costs
 
 - canvaaaas runs on your computer. Its built-in server listens only on 127.0.0.1.
-- Only the crop around your selection (with your sketch and references) is sent to the model you chose: laozhang.ai for Nano Banana, OpenAI through Codex for ChatGPT Images.
+- Only the crop around your selection (with your sketch and references) is sent to the model you chose: Google or laozhang.ai for Nano Banana, OpenAI through Codex for ChatGPT Images.
 - Every generation costs money or subscription quota. The counter in the top bar shows generations for this session and today; all calls are logged to `generations.jsonl` in the app data folder (`~/Library/Application Support/canvaaaas` on macOS, `%APPDATA%\canvaaaas` on Windows).
 
 ## Build from source
@@ -102,7 +102,7 @@ Development in the browser, with a mock model that costs nothing:
 CANVAAAAS_PROVIDER=mock npm run dev
 ```
 
-Then open http://127.0.0.1:5173. `CANVAAAAS_LANG=en` or `ru` overrides the system language, `CANVAAAAS_OPEN=path/to/image.png` opens a picture on start.
+Then open http://127.0.0.1:5173. `CANVAAAAS_LANG=en` or `ru` overrides the system language, `CANVAAAAS_OPEN=path/to/image.png` opens a picture on start, `GEMINI_API_KEY` and `LAOZHANG_API_KEY` take precedence over the saved keys.
 
 ```bash
 npm run typecheck
@@ -118,7 +118,7 @@ npm test
 npm run edit-region -- --image big.png --mask mask.png --prompt "add a boat with a red sail" --variants 2 --out result.png
 ```
 
-The mask is a PNG of the same size: white is what to redraw, black is what to keep. Run it without arguments for all options.
+The mask is a PNG of the same size: white is what to redraw, black is what to keep. Nano Banana goes through the Gemini API if its key is set, otherwise through laozhang.ai; `--provider google`, `laozhang` or `chatgpt` picks one. Run it without arguments for all options.
 
 ## License
 

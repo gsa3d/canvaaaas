@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CanvasDocument } from '../src/core/document.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { Session } from '../src/server/session.ts';
 
 const W = 300;
@@ -23,7 +23,7 @@ function addLayer(doc: CanvasDocument, id: string, x: number, y: number, size: n
 }
 
 async function setup() {
-  const s = new Session('mock', envOnlyStore());
+  const s = new Session('mock', noKeys());
   await s.newDocument(W, H, [250, 250, 250]);
   return { s, doc: s.doc! };
 }

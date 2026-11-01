@@ -1,7 +1,7 @@
 // Порядок слоёв: слой перетаскивают выше или ниже — холст пересобирается, части и заплатка фона едут с ним, ⌘Z возвращает.
 import { describe, expect, it } from 'vitest';
 import type { CanvasDocument } from '../src/core/document.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { Session } from '../src/server/session.ts';
 
 const W = 300;
@@ -22,7 +22,7 @@ const BLUE = [30, 30, 220];
 const GREEN = [30, 200, 30];
 
 async function setup() {
-  const s = new Session('mock', envOnlyStore());
+  const s = new Session('mock', noKeys());
   await s.newDocument(W, H, [250, 250, 250]);
   const doc = s.doc!;
   addLayer(doc, 'a', 40, 40, 100, RED);

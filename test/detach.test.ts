@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CanvasDocument } from '../src/core/document.ts';
 import { dilate } from '../src/core/objects.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { Session } from '../src/server/session.ts';
 import type { MaskShape } from '../src/shared/api.ts';
 
@@ -12,7 +12,7 @@ const RED = [220, 30, 30];
 
 /** Белый холст с красным квадратом 60×60 в (100, 100) — и в исходнике, и на холсте */
 async function session() {
-  const s = new Session('mock', envOnlyStore());
+  const s = new Session('mock', noKeys());
   await s.newDocument(W, H, [255, 255, 255]);
   const doc = s.doc!;
   for (const buf of [doc.base, doc.composite]) {

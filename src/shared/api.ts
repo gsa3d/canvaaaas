@@ -32,9 +32,14 @@ export interface SketchStroke {
   erase?: boolean;
 }
 
-/** flash и pro — Nano Banana через laozhang.ai по ключу; chatgpt — ChatGPT Images по подписке через Codex CLI */
+/** flash и pro — Nano Banana по ключу (Gemini API или laozhang.ai); chatgpt — ChatGPT Images по подписке через Codex CLI */
 export type ModelChoice = 'flash' | 'pro' | 'chatgpt';
 export const MODEL_CHOICES: readonly ModelChoice[] = ['flash', 'pro', 'chatgpt'];
+
+/** Куда Nano Banana шлёт запросы: в Gemini API у Google или в прокси laozhang.ai, у каждого свой ключ */
+export type GeminiService = 'google' | 'laozhang';
+export const GEMINI_SERVICES: readonly GeminiService[] = ['google', 'laozhang'];
+export const GEMINI_SERVICE_NAMES: Record<GeminiService, string> = { google: 'Gemini API', laozhang: 'laozhang.ai' };
 export type SizeChoice = 'auto' | '1K' | '2K' | '4K';
 
 export interface DocDto {
@@ -282,10 +287,12 @@ export interface ModelOutputsDto {
 }
 
 export interface StateDto {
-  provider: 'laozhang' | 'mock';
+  provider: 'live' | 'mock';
   models: Record<ModelChoice, ModelOutputsDto>;
-  /** Есть ли ключ laozhang.ai (само значение интерфейс никогда не получает) */
+  /** Есть ли ключ сервиса, через который сейчас идёт Nano Banana (само значение интерфейс никогда не получает) */
   hasKey: boolean;
+  /** Через что идёт Nano Banana и у каких сервисов ключ сохранён */
+  gemini: { service: GeminiService; keys: Record<GeminiService, boolean> };
   /** Codex CLI, через который идёт ChatGPT по подписке: путь или null, если не найден */
   codex: string | null;
   doc: DocDto | null;

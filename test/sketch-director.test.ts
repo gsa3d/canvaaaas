@@ -3,7 +3,7 @@ import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
 import { buildPrompt, directorImages, prepareEdit, retarget } from '../src/core/edit-region.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { checkSketch, drawSketch } from '../src/core/sketch.ts';
 import { directorPrompt, parseDirector, type PromptDirector } from '../src/providers/director.ts';
 import { mockProvider } from '../src/providers/mock.ts';
@@ -107,7 +107,7 @@ describe('Директор', () => {
   });
 
   it('директор — один раз на задачу: та же задача берёт его текст, поправленная зовёт заново; слой и проект его помнят', { timeout: 60_000 }, async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(900, 700, [40, 60, 80]);
     const sketch: SketchStroke[] = [{ points: [[350, 260], [420, 300]], size: 12, color: '#ff3b30' }];
     const id = s.createJob({ shapes: [{ kind: 'rect', x: 300, y: 200, width: 240, height: 180 }], prompt: 'лодка', variants: 1, model: 'flash', size: 'auto', sketch, director: true });
@@ -148,7 +148,7 @@ describe('Директор', () => {
   });
 
   it('ошибка директора — ошибка задачи с понятной причиной, генерации не тратятся; без директора повтор идёт', { timeout: 30_000 }, async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(600, 400, [200, 200, 200]);
     const failing: PromptDirector = {
       id: 'failing',

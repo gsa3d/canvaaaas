@@ -1,18 +1,31 @@
-// Ключ laozhang.ai. Значение ключа нигде не выводится и не попадает в тексты ошибок.
+// Ключи Nano Banana: Gemini API (Google) и laozhang.ai, у каждого свой. Значение ключа нигде не выводится
+// и не попадает в тексты ошибок.
 // macOS — Связка ключей через /usr/bin/security (ключ идёт через stdin, не в аргументах процесса);
 // Windows — файл, зашифрованный средствами системы (Electron safeStorage);
-// переменная окружения LAOZHANG_API_KEY, если задана, главнее всего.
+// переменная окружения (GEMINI_API_KEY, LAOZHANG_API_KEY), если задана, главнее всего.
 import { execFile, spawn } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { promisify } from 'node:util';
+import { GEMINI_SERVICE_NAMES, type GeminiService } from '../shared/api.ts';
 import { L } from '../shared/i18n.ts';
 
 const execFileAsync = promisify(execFile);
 const SECURITY = '/usr/bin/security';
 
-export const KEYCHAIN_SERVICE = 'canvaaaas-laozhang';
 export const KEYCHAIN_ACCOUNT = 'api_key';
+
+/** Где лежит ключ сервиса: запись Связки ключей, файл в папке данных приложения, переменная окружения */
+export interface KeyPlace {
+  keychain: string;
+  file: string;
+  env: string;
+}
+
+export const KEY_PLACES: Record<GeminiService, KeyPlace> = {
+  google: { keychain: 'canvaaaas-google', file: 'google-key.bin', env: 'GEMINI_API_KEY' },
+  laozhang: { keychain: 'canvaaaas-laozhang', file: 'laozhang-key.bin', env: 'LAOZHANG_API_KEY' },
+};
 
 export interface KeyStore {
   /** Ключ или null, если его нет */
@@ -21,13 +34,16 @@ export interface KeyStore {
   clear(): Promise<void>;
 }
 
+/** Ключи всех сервисов Nano Banana */
+export type Keys = Record<GeminiService, KeyStore>;
+
 export function validateKey(raw: string): string {
   const key = raw.trim();
   if (key.length < 10 || key.length > 400 || /\s/.test(key)) throw new Error(L('Это не похоже на ключ: без пробелов, от 10 символов', 'This does not look like a key: no spaces, at least 10 characters'));
   return key;
 }
 
-export function keychainStore(service = KEYCHAIN_SERVICE): KeyStore {
+export function keychainStore(service: string): KeyStore {
   return {
     async get() {
       try {
@@ -85,37 +101,50 @@ export function encryptedFileStore(file: string, crypto: Encryptor): KeyStore {
 }
 
 /** Только переменная окружения — для разработки там, где нет ни Связки, ни Electron */
-export function envOnlyStore(): KeyStore {
+export function envOnlyStore(env: string): KeyStore {
   return {
     get: async () => null,
     set: async () => {
-      throw new Error(L('Здесь ключ задаётся переменной окружения LAOZHANG_API_KEY', 'Here the key is set by the LAOZHANG_API_KEY environment variable'));
+      throw new Error(L(`Здесь ключ задаётся переменной окружения ${env}`, `Here the key is set by the ${env} environment variable`));
     },
     clear: async () => undefined,
   };
 }
 
-/** Переменная окружения LAOZHANG_API_KEY главнее сохранённого ключа */
-export function withEnv(store: KeyStore): KeyStore {
+/** Переменная окружения главнее сохранённого ключа */
+export function withEnv(store: KeyStore, env: string): KeyStore {
   return {
-    get: async () => process.env.LAOZHANG_API_KEY?.trim() || store.get(),
+    get: async () => process.env[env]?.trim() || store.get(),
     set: (key) => store.set(key),
     clear: () => store.clear(),
   };
 }
 
-/** Хранилище по умолчанию вне Electron: Связка ключей на macOS, иначе только переменная окружения */
-export function defaultKeyStore(): KeyStore {
-  return withEnv(process.platform === 'darwin' ? keychainStore() : envOnlyStore());
+/** Ключи всех сервисов: хранилище каждого — по его месту, переменная окружения главнее */
+export function keysFrom(store: (place: KeyPlace) => KeyStore): Keys {
+  const of = (service: GeminiService) => withEnv(store(KEY_PLACES[service]), KEY_PLACES[service].env);
+  return { google: of('google'), laozhang: of('laozhang') };
 }
 
-/** Для CLI: ключ или понятная ошибка */
-export async function getLaozhangKey(): Promise<string> {
-  const key = await defaultKeyStore().get();
+/** Хранилище по умолчанию вне Electron: Связка ключей на macOS, иначе только переменная окружения */
+export function defaultKeys(): Keys {
+  return keysFrom((place) => (process.platform === 'darwin' ? keychainStore(place.keychain) : envOnlyStore(place.env)));
+}
+
+/** Без ключей и без переменных окружения — для тестов */
+export function noKeys(): Keys {
+  return { google: envOnlyStore(KEY_PLACES.google.env), laozhang: envOnlyStore(KEY_PLACES.laozhang.env) };
+}
+
+/** Для CLI: ключ сервиса или понятная ошибка */
+export async function getKey(service: GeminiService): Promise<string> {
+  const key = await defaultKeys()[service].get();
   if (key) return key;
+  const name = GEMINI_SERVICE_NAMES[service];
+  const { keychain, env } = KEY_PLACES[service];
   throw new Error(
     process.platform === 'darwin'
-      ? L(`Нет ключа laozhang.ai. Добавьте его в приложении или командой: security add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w`, `No laozhang.ai key. Add it in the app or with: security add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w`)
-      : L('Нет ключа laozhang.ai. Задайте переменную окружения LAOZHANG_API_KEY', 'No laozhang.ai key. Set the LAOZHANG_API_KEY environment variable'),
+      ? L(`Нет ключа ${name}. Добавьте его в приложении или командой: security add-generic-password -U -s ${keychain} -a ${KEYCHAIN_ACCOUNT} -w`, `No ${name} key. Add it in the app or with: security add-generic-password -U -s ${keychain} -a ${KEYCHAIN_ACCOUNT} -w`)
+      : L(`Нет ключа ${name}. Задайте переменную окружения ${env}`, `No ${name} key. Set the ${env} environment variable`),
   );
 }

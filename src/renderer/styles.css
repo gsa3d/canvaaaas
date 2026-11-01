@@ -2184,3 +2184,9 @@ input.object-name {
 .modal .seg {
   align-self: flex-start;
 }
+
+.modal a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

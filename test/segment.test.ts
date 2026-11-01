@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { overlap, area } from '../src/core/objects.ts';
 import type { Bitmap } from '../src/core/segment.ts';
 import { modelInstalled } from '../src/core/segment-model.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { Session } from '../src/server/session.ts';
 import { OUTSIDE_LAYER } from '../src/shared/api.ts';
 
@@ -36,7 +36,7 @@ const iou = (a: Bitmap, b: Bitmap) => {
 
 describe.skipIf(!modelInstalled())('SAM', () => {
   it('щелчок выделяет круг; добавить то, что уже выделено, или вычесть то, чего нет, — выделение не меняется', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(W, H, [235, 232, 225]);
     const doc = s.doc!;
     // Исходник — круг радиусом 80: пишем прямо в исходник и холст
@@ -62,7 +62,7 @@ describe.skipIf(!modelInstalled())('SAM', () => {
   }, 60_000);
 
   it('палочка ищет у хозяина точки: в слое — внутри него, по другому слою — входит в него, по фону — мимо слоёв', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(W, H, [235, 232, 225]);
     const doc = s.doc!;
     paint({ composite: doc.base, width: W }, 80);

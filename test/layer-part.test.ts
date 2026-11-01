@@ -6,7 +6,7 @@ import { applyLayer, layerOver, type MaskedLayer } from '../src/core/edit-region
 import { featherAlpha } from '../src/core/mask.ts';
 import { clipBitmap, clipScaled, unionBitmap } from '../src/core/objects.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import type { MockProvider } from '../src/providers/mock.ts';
 import { Session } from '../src/server/session.ts';
 import type { MaskShape } from '../src/shared/api.ts';
@@ -66,7 +66,7 @@ describe('Правка части слоя', () => {
   });
 
   it('правка в слое меняет только выделенное, остальной слой — от прежней версии; «Ещё варианты» перерисовывают только её', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(400, 300, [255, 255, 255]);
     const doc = s.doc!;
     const id = await s.saveObject([{ kind: 'rect', x: 100, y: 80, width: 200, height: 140 }]);
@@ -125,7 +125,7 @@ describe('Правка части слоя', () => {
     const RED = [220, 30, 30];
     const page = Buffer.alloc(W * H * 3, 255);
     for (let y = 80; y < 220; y++) for (let x = 100; x < 300; x++) page.set(RED, (y * W + x) * 3);
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.openDocument(await sharp(page, { raw: { width: W, height: H, channels: 3 } }).png().toBuffer(), 'a.png');
     const doc = s.doc!;
     // Вырезанный красный квадрат: в фоне под ним белая дыра, его «исх» — красный
@@ -196,7 +196,7 @@ describe('Правка части слоя', () => {
     const H = 300;
     const page = Buffer.alloc(W * H * 3, 255);
     for (let y = 60; y < 240; y++) for (let x = 144; x < 156; x++) page.set([90, 60, 30], (y * W + x) * 3);
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.openDocument(await sharp(page, { raw: { width: W, height: H, channels: 3 } }).png().toBuffer(), 'a.png');
     const doc = s.doc!;
     const id = await s.cutObject([{ kind: 'rect', x: 144, y: 60, width: 12, height: 180 }]);
@@ -208,7 +208,7 @@ describe('Правка части слоя', () => {
   }, 10_000);
 
   it('выделение за краем слоя — слой растёт; без слоя — новый слой', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(400, 300, [255, 255, 255]);
     const doc = s.doc!;
     const id = await s.saveObject([{ kind: 'rect', x: 100, y: 80, width: 100, height: 100 }]);
@@ -224,7 +224,7 @@ describe('Правка части слоя', () => {
   }, 10_000);
 
   it('в скрытый слой правка не идёт', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(400, 300, [255, 255, 255]);
     const id = await s.saveObject([{ kind: 'rect', x: 100, y: 80, width: 100, height: 100 }]);
     s.createJob({ shapes: [{ kind: 'rect', x: 100, y: 80, width: 10, height: 10 }], object: id, prompt: 'x', variants: 1, model: 'flash', size: 'auto' });

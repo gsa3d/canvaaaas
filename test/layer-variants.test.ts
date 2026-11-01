@@ -9,8 +9,8 @@ import { applyLayer, prepareEdit } from '../src/core/edit-region.ts';
 import { adviseSize } from '../src/core/frame.ts';
 import { featherAlpha } from '../src/core/mask.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
-import { laozhangGemini } from '../src/providers/laozhang-gemini.ts';
+import { noKeys } from '../src/core/secrets.ts';
+import { geminiImage } from '../src/providers/gemini.ts';
 import { mockProvider } from '../src/providers/mock.ts';
 import { Session } from '../src/server/session.ts';
 
@@ -86,14 +86,14 @@ describe('Удаление и замена слоя', () => {
   });
 
   it('удалить скрытый слой проекта .caaa — несохранённое изменение, хотя холст тот же', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(320, 240, BASE);
     s.doc!.addPatch(solid('a', 10, 10, 100, [200, 0, 0]));
     s.doc!.togglePatch('a');
     const path = join(dir, 'hidden.caaa');
     await writeFile(path, await encodeProject(s.doc!));
 
-    const t = new Session('mock', envOnlyStore());
+    const t = new Session('mock', noKeys());
     await t.openPath(path);
     const key = t.doc!.contentKey;
     await t.removePatch('a');
@@ -149,7 +149,7 @@ describe('Версии слоя', () => {
 
   /** Слой «шар» с версией «красный шар» на холсте и над ним слой «верх», задевающий угол выделения */
   async function setup() {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(W, H, BASE);
     const doc = s.doc!;
     const mask = new Uint8Array(sel.width * sel.height).fill(255);
@@ -221,7 +221,7 @@ describe('Версии слоя', () => {
 
 describe('Подсказка о разрешении', () => {
   const canvas = { width: 8000, height: 6000 };
-  const gemini = laozhangGemini({ apiKey: async () => 'test' });
+  const gemini = geminiImage({ service: 'google', apiKey: async () => 'test' });
 
   it('совпадает с тем, что потом выберет prepareEdit', async () => {
     const provider = mockProvider();

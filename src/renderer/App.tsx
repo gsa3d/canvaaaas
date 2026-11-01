@@ -57,11 +57,14 @@ import { layerName } from '../core/objects.ts';
 import {
   canvasPresets,
   COMMAND_EVENT,
+  GEMINI_SERVICE_NAMES,
+  GEMINI_SERVICES,
   MAX_REFERENCES,
   OUTSIDE_LAYER,
   shapesBBox,
   type AppCommand,
   type DocDto,
+  type GeminiService,
   type GroupDto,
   type JobDto,
   type MaskEditResult,
@@ -225,11 +228,11 @@ const SELECTING: Tool[] = ['object', 'rect', 'lasso', 'brush'];
 /** Цвета наброска под рукой; любой другой — из палитры */
 const SKETCH_COLORS = ['#ff3b30', '#1e88ff', '#22b14c', '#111111', '#ffffff'];
 
-/** label — в списке моделей, short — в сводке над кнопкой генерации, via — откуда она */
-const MODELS: { id: ModelChoice; label: string; short: string; via: string }[] = [
-  { id: 'flash', label: 'Nano Banana 2', short: 'Banana 2', via: L('ключ laozhang.ai', 'laozhang.ai key') },
-  { id: 'pro', label: 'Nano Banana Pro', short: 'Banana Pro', via: L('ключ laozhang.ai, вдвое дольше', 'laozhang.ai key, twice as slow') },
-  { id: 'chatgpt', label: 'ChatGPT Images', short: 'ChatGPT', via: L('подписка ChatGPT', 'ChatGPT subscription') },
+/** label — в списке моделей, short — в сводке над кнопкой генерации, note — подпись в списке (у Nano Banana перед ней — чей ключ) */
+const MODELS: { id: ModelChoice; label: string; short: string; note?: string }[] = [
+  { id: 'flash', label: 'Nano Banana 2', short: 'Banana 2' },
+  { id: 'pro', label: 'Nano Banana Pro', short: 'Banana Pro', note: L('вдвое дольше', 'twice as slow') },
+  { id: 'chatgpt', label: 'ChatGPT Images', short: 'ChatGPT', note: L('подписка ChatGPT', 'ChatGPT subscription') },
 ];
 const modelInfo = (id: ModelChoice) => MODELS.find((m) => m.id === id) ?? MODELS[0]!;
 
@@ -239,8 +242,10 @@ const SIZES: SizeChoice[] = ['auto', '1K', '2K', '4K'];
 const COUNTS = [1, 2, 3, 4];
 const isCount = (v: unknown) => COUNTS.includes(v as number);
 
-/** Nano Banana идёт через laozhang.ai по ключу, ChatGPT — по подписке через Codex, ключ ему не нужен */
+/** Nano Banana идёт по ключу (Gemini API или laozhang.ai), ChatGPT — по подписке через Codex, ключ ему не нужен */
 const needsKey = (model: ModelChoice) => model !== 'chatgpt';
+const keyName = (service: GeminiService) => L(`ключ ${GEMINI_SERVICE_NAMES[service]}`, `${GEMINI_SERVICE_NAMES[service]} key`);
+const keyNeeded = (service: GeminiService) => L(`нужен ключ ${GEMINI_SERVICE_NAMES[service]}`, `${GEMINI_SERVICE_NAMES[service]} key needed`);
 
 /** Что сейчас с задачей: директор расписывает её до генерации */
 function jobStatus(job: JobDto): string {
@@ -1789,7 +1794,7 @@ export function App() {
             >
               {state && !state.hasKey && needsKey(redoPatch?.model ?? model) && (
                 <p class="compose-key">
-                  {L('Нужен ключ laozhang.ai', 'laozhang.ai key needed')}
+                  {L(`Нужен ключ ${GEMINI_SERVICE_NAMES[state.gemini.service]}`, `${GEMINI_SERVICE_NAMES[state.gemini.service]} key needed`)}
                   <button class="link" onClick={() => setDialog('settings')}>
                     {L('Настройки', 'Settings')}
                   </button>
@@ -1861,6 +1866,7 @@ export function App() {
                   advice={redoPatch ? null : sizeAdvice}
                   locked={!!redoPatch}
                   hasKey={!!state?.hasKey}
+                  service={state?.gemini.service ?? 'google'}
                   onModel={setModel}
                   onSize={setSize}
                 />
@@ -1888,7 +1894,7 @@ export function App() {
 
       {dialog === 'settings' && state && (
         <SettingsDialog
-          hasKey={state.hasKey}
+          gemini={state.gemini}
           codex={state.codex}
           onClose={() => setDialog(null)}
           onSaved={(text) => {
@@ -3118,6 +3124,7 @@ function ModelPicker(props: {
   advice: SizeAdvice | string | null;
   locked: boolean;
   hasKey: boolean;
+  service: GeminiService;
   onModel: (model: ModelChoice) => void;
   onSize: (size: SizeChoice) => void;
 }) {
@@ -3153,7 +3160,7 @@ function ModelPicker(props: {
               <span class="radio-dot" />
               <span class="radio-text">
                 {m.label}
-                <small>{needsKey(m.id) && !props.hasKey ? L('нужен ключ laozhang.ai', 'laozhang.ai key needed') : m.via}</small>
+                <small>{!needsKey(m.id) ? m.note : props.hasKey ? [keyName(props.service), m.note].filter(Boolean).join(', ') : keyNeeded(props.service)}</small>
               </span>
             </button>
           ))}
@@ -3355,7 +3362,7 @@ function StyleDialog(props: { style: string; onClose: () => void; onSave: (style
 }
 
 function SettingsDialog(props: {
-  hasKey: boolean;
+  gemini: StateDto['gemini'];
   codex: string | null;
   onClose: () => void;
   onSaved: (text: string) => void;
@@ -3365,6 +3372,13 @@ function SettingsDialog(props: {
   const [saving, setSaving] = useState(false);
   const [language, setLanguage] = useState<{ choice: LangChoice; system: Lang } | null>(null);
   const mac = navigator.userAgent.includes('Mac');
+  const { service } = props.gemini;
+  const saved = props.gemini.keys[service];
+  const name = GEMINI_SERVICE_NAMES[service];
+  const chooseService = (next: GeminiService) => {
+    setValue('');
+    post('/api/settings/gemini', { service: next }).catch(props.onError);
+  };
   useEffect(() => {
     fetch('/api/lang')
       .then((r) => r.json() as Promise<{ choice: LangChoice; system: Lang }>)
@@ -3405,14 +3419,40 @@ function SettingsDialog(props: {
             onChange={(choice) => void chooseLang(choice)}
           />
         )}
-        <h3>{L('Ключ laozhang.ai', 'laozhang.ai key')}</h3>
+        <h3>
+          Nano Banana
+          <Help>
+            {L(
+              'Gemini API — у Google, ключ создаётся в Google AI Studio, генерации оплачиваются Google. Он работает не во всех странах (в России — нет); тогда — laozhang.ai, посредник с той же моделью и своей оплатой.',
+              'Gemini API is Google’s own: create a key in Google AI Studio, generations are billed by Google. It is not available in every country; then use laozhang.ai, a proxy to the same model with its own billing.',
+            )}
+          </Help>
+        </h3>
+        <Seg
+          label="Nano Banana"
+          value={service}
+          options={GEMINI_SERVICES.map((s) => ({ value: s, text: GEMINI_SERVICE_NAMES[s], title: props.gemini.keys[s] ? L('Ключ сохранён', 'Key saved') : L('Ключа нет', 'No key') }))}
+          onChange={chooseService}
+        />
         <p>
-          {props.hasKey ? L('Ключ сохранён.', 'Key saved.') : L('Нужен для Nano Banana. Он есть в личном кабинете laozhang.ai.', 'Needed for Nano Banana. You can find it in your laozhang.ai dashboard.')}
+          {saved ? (
+            L('Ключ сохранён.', 'Key saved.')
+          ) : service === 'google' ? (
+            <>
+              {L('Ключ создаётся в ', 'Create a key in ')}
+              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">
+                Google AI Studio
+              </a>
+              .
+            </>
+          ) : (
+            L('Ключ есть в личном кабинете laozhang.ai.', 'You can find the key in your laozhang.ai dashboard.')
+          )}
         </p>
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            void run(() => post('/api/settings/key', { key: value }), L('Ключ сохранён', 'Key saved'));
+            void run(() => post('/api/settings/key', { key: value, service }), L('Ключ сохранён', 'Key saved'));
           }}
         >
           <input
@@ -3420,11 +3460,11 @@ function SettingsDialog(props: {
             autoFocus
             autoComplete="off"
             spellcheck={false}
-            placeholder={props.hasKey ? L('Новый ключ', 'New key') : L('Ключ', 'Key')}
+            placeholder={saved ? L(`Новый ключ ${name}`, `New ${name} key`) : L(`Ключ ${name}`, `${name} key`)}
             value={value}
             onInput={(e) => setValue(e.currentTarget.value)}
           />
-          <p class="hint">{mac ? L('Хранится в Связке ключей macOS', 'Stored in the macOS Keychain') : L('Хранится на этом компьютере зашифрованным', 'Stored encrypted on this computer')} {L('и уходит только в laozhang.ai.', 'and is sent only to laozhang.ai.')}</p>
+          <p class="hint">{mac ? L('Хранится в Связке ключей macOS', 'Stored in the macOS Keychain') : L('Хранится на этом компьютере зашифрованным', 'Stored encrypted on this computer')} {service === 'google' ? L('и уходит только в Google.', 'and is sent only to Google.') : L('и уходит только в laozhang.ai.', 'and is sent only to laozhang.ai.')}</p>
           <div class="row">
             <button class="primary" type="submit" disabled={!value.trim() || saving}>
               {L('Сохранить ключ', 'Save key')}
@@ -3432,12 +3472,12 @@ function SettingsDialog(props: {
             <button type="button" onClick={props.onClose}>
               {L('Закрыть', 'Close')}
             </button>
-            {props.hasKey && (
+            {saved && (
               <button
                 type="button"
                 class="danger"
                 disabled={saving}
-                onClick={() => void run(() => post('/api/settings/key/clear'), L('Ключ удалён', 'Key deleted'))}
+                onClick={() => void run(() => post('/api/settings/key/clear', { service }), L('Ключ удалён', 'Key deleted'))}
               >
                 {L('Удалить ключ', 'Delete key')}
               </button>

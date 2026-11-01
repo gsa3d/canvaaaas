@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CanvasDocument } from '../src/core/document.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { Session } from '../src/server/session.ts';
 
 const W = 300;
@@ -27,7 +27,7 @@ const stack = (doc: CanvasDocument) => doc.objects.map((o) => (o.group ? `${o.id
 
 /** Красный и синий квадраты перекрываются в (110, 110), зелёный — отдельно */
 async function setup() {
-  const s = new Session('mock', envOnlyStore());
+  const s = new Session('mock', noKeys());
   await s.newDocument(W, H, BG as [number, number, number]);
   const doc = s.doc!;
   addLayer(doc, 'a', 40, 40, 100, RED);

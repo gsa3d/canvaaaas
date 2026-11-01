@@ -1,7 +1,9 @@
-// Nano Banana (Gemini image) через прокси laozhang.ai — тот же запрос, что делает портал
-// (imagegen/ajax.php): Google-формат generateContent, ключ в Authorization: Bearer.
+// Nano Banana (Gemini image): запрос Google generateContent — в Gemini API у Google по его ключу
+// (заголовок x-goog-api-key) или в прокси laozhang.ai, тот же запрос, что делает портал (imagegen/ajax.php),
+// ключ в Authorization: Bearer.
 import { Agent, fetch } from 'undici';
 import { ProviderError, type GenerateRequest, type GenerateResult, type ImageProvider, type Size } from './types.ts';
+import { GEMINI_SERVICE_NAMES, type GeminiService } from '../shared/api.ts';
 import { L } from '../shared/i18n.ts';
 
 export const GEMINI_MODELS = {
@@ -25,9 +27,13 @@ const SIZES_1K: Record<string, [number, number]> = {
 };
 const SIZE_FACTOR: Record<string, number> = { '1K': 1, '2K': 2, '4K': 4 };
 
-const DEFAULT_BASE_URL = 'https://api.laozhang.ai/v1beta/models';
+const SERVICES: Record<GeminiService, { baseUrl: string; auth: (key: string) => Record<string, string> }> = {
+  google: { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/models', auth: (key) => ({ 'x-goog-api-key': key }) },
+  laozhang: { baseUrl: 'https://api.laozhang.ai/v1beta/models', auth: (key) => ({ Authorization: `Bearer ${key}` }) },
+};
 
-export interface LaozhangGeminiOptions {
+export interface GeminiImageOptions {
+  service: GeminiService;
   model?: GeminiModel;
   /** Ключ запрашивается при каждом вызове и нигде не сохраняется */
   apiKey: () => Promise<string>;
@@ -37,6 +43,8 @@ export interface LaozhangGeminiOptions {
 
 interface GeminiPart {
   text?: string;
+  /** Промежуточная картинка, которую модель рисовала, пока думала, — не ответ */
+  thought?: boolean;
   inlineData?: { mimeType?: string; data?: string };
 }
 
@@ -46,15 +54,17 @@ interface GeminiResponse {
   error?: { message?: string; status?: string };
 }
 
-export function laozhangGemini(opts: LaozhangGeminiOptions): ImageProvider {
+export function geminiImage(opts: GeminiImageOptions): ImageProvider {
   const model = GEMINI_MODELS[opts.model ?? 'flash'];
-  const baseUrl = opts.baseUrl ?? DEFAULT_BASE_URL;
+  const service = SERVICES[opts.service];
+  const name = GEMINI_SERVICE_NAMES[opts.service];
+  const baseUrl = opts.baseUrl ?? service.baseUrl;
   const timeoutMs = opts.timeoutMs ?? 600_000;
   // 4K генерируется 4–5 минут, а встроенный fetch Node рвёт запрос через 300 с ожидания заголовков
   const dispatcher = new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs, connectTimeout: 15_000 });
 
   return {
-    id: 'laozhang-gemini',
+    id: `${opts.service}-gemini`,
     model,
     aspectRatios: Object.keys(SIZES_1K),
     imageSizes: Object.keys(SIZE_FACTOR),
@@ -93,10 +103,7 @@ export function laozhangGemini(opts: LaozhangGeminiOptions): ImageProvider {
       try {
         res = await fetch(`${baseUrl}/${model}:generateContent`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${await opts.apiKey()}`,
-          },
+          headers: { 'Content-Type': 'application/json', ...service.auth(await opts.apiKey()) },
           body: JSON.stringify(body),
           signal: AbortSignal.any(signals),
           dispatcher,
@@ -107,7 +114,7 @@ export function laozhangGemini(opts: LaozhangGeminiOptions): ImageProvider {
         const cause = err instanceof Error && err.cause instanceof Error ? err.cause : undefined;
         const code = cause && 'code' in cause ? ` ${String(cause.code)}` : '';
         const reason = cause ? `${cause.message}${code}` : err instanceof Error ? err.message : String(err);
-        throw new ProviderError(L(`Нет связи с laozhang.ai: ${reason}`, `Cannot reach laozhang.ai: ${reason}`), { retryable: true });
+        throw new ProviderError(L(`Нет связи с ${name}: ${reason}`, `Cannot reach ${name}: ${reason}`), { retryable: true });
       }
 
       const raw = await res.text();
@@ -120,8 +127,8 @@ export function laozhangGemini(opts: LaozhangGeminiOptions): ImageProvider {
 
       const candidate = data.candidates?.[0];
       const parts = candidate?.content?.parts ?? [];
-      const imagePart = parts.find((p) => p.inlineData?.data);
-      const text = parts.map((p) => p.text ?? '').join('').trim() || undefined;
+      const imagePart = parts.find((p) => p.inlineData?.data && !p.thought);
+      const text = parts.filter((p) => !p.thought).map((p) => p.text ?? '').join('').trim() || undefined;
 
       if (!res.ok || !imagePart?.inlineData?.data) {
         const why =
@@ -130,7 +137,10 @@ export function laozhangGemini(opts: LaozhangGeminiOptions): ImageProvider {
           (data.promptFeedback?.blockReason && L(`запрос заблокирован: ${data.promptFeedback.blockReason}`, `request blocked: ${data.promptFeedback.blockReason}`)) ??
           (candidate?.finishReason && L(`модель не вернула картинку (finishReason ${candidate.finishReason})`, `the model returned no image (finishReason ${candidate.finishReason})`)) ??
           (raw.slice(0, 300) || L('пустой ответ', 'empty response'));
-        throw new ProviderError(`laozhang.ai, HTTP ${res.status}: ${why}${text ? ` — «${text}»` : ''}`, {
+        // Gemini API не работает в части стран (в России тоже) — ответ 400 FAILED_PRECONDITION
+        const region = opts.service === 'google' && /location is not supported/i.test(why);
+        const hint = region ? L(' Gemini API не работает в вашей стране: выберите laozhang.ai в настройках.', ' Gemini API is not available in your country: choose laozhang.ai in Settings.') : '';
+        throw new ProviderError(`${name}, HTTP ${res.status}: ${why}${text ? L(` — «${text}»`, ` — “${text}”`) : ''}${hint}`, {
           status: res.status,
           retryable: res.status === 429 || res.status >= 500,
         });

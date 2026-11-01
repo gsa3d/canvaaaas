@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { CanvasDocument } from '../src/core/document.ts';
 import { area, overlap, trim } from '../src/core/objects.ts';
 import type { Bitmap } from '../src/core/segment.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { mockProvider } from '../src/providers/mock.ts';
 import type { GenerateRequest, GenerateResult, ImageProvider } from '../src/providers/types.ts';
 import { Session } from '../src/server/session.ts';
@@ -49,7 +49,7 @@ function sameModel(delays: number[] = []): ImageProvider {
 }
 
 async function setup(model: ImageProvider = sameModel()) {
-  const s = new Session('mock', envOnlyStore());
+  const s = new Session('mock', noKeys());
   await s.newDocument(W, H, BG as [number, number, number]);
   const doc = s.doc!;
   for (const buf of [doc.base, doc.composite]) {
@@ -57,7 +57,7 @@ async function setup(model: ImageProvider = sameModel()) {
   }
   doc.rev++;
   const inner = s as unknown as { providers: Map<string, ImageProvider>; mockMask: ImageProvider };
-  inner.providers.set('flash', model);
+  inner.providers.set('flash:google', model);
   inner.mockMask = mockProvider({ mode: 'mask' });
   return { s, doc };
 }

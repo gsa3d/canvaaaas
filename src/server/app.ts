@@ -10,6 +10,7 @@ import {
   type CreateJobRequest,
   type DetachRequest,
   type EdgeRequest,
+  type GeminiService,
   type MaskShape,
   MODEL_CHOICES,
   type MoreVariantsRequest,
@@ -215,12 +216,19 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   // Ключ приходит из окна приложения и уходит в хранилище; обратно его не отдаёт ни один запрос
   route('POST', '/api/settings/key', async (req, res) => {
-    const { key } = await readJson<{ key: string }>(req);
-    await session.setKey(String(key ?? ''));
+    const { key, service } = await readJson<{ key: string; service: GeminiService }>(req);
+    await session.setKey(service, String(key ?? ''));
     json(res, { ok: true });
   });
-  route('POST', '/api/settings/key/clear', async (_req, res) => {
-    await session.clearKey();
+  route('POST', '/api/settings/key/clear', async (req, res) => {
+    const { service } = await readJson<{ service: GeminiService }>(req);
+    await session.clearKey(service);
+    json(res, { ok: true });
+  });
+  // Через что идёт Nano Banana: Gemini API или laozhang.ai
+  route('POST', '/api/settings/gemini', async (req, res) => {
+    const { service } = await readJson<{ service: GeminiService }>(req);
+    await session.setGeminiService(service);
     json(res, { ok: true });
   });
 

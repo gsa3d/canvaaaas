@@ -5,9 +5,9 @@ import { basename, dirname, extname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { prepareEdit, runVariants, type Guide } from '../core/edit-region.ts';
 import { readLedger, withLedger } from '../core/ledger.ts';
-import { getLaozhangKey } from '../core/secrets.ts';
+import { defaultKeys, getKey } from '../core/secrets.ts';
 import { chatgptCodex } from '../providers/chatgpt-codex.ts';
-import { laozhangGemini, type GeminiModel } from '../providers/laozhang-gemini.ts';
+import { geminiImage, type GeminiModel } from '../providers/gemini.ts';
 import { mockProvider } from '../providers/mock.ts';
 import type { ImageProvider } from '../providers/types.ts';
 import { L, setLang } from '../shared/i18n.ts';
@@ -30,8 +30,9 @@ const HELP = L(`Правка области большой картинки че
   --feather <px>        растушёвка внутрь маски (по умолчанию 24)
   --guide pair|overlay|blank  как показать модели область (по умолчанию pair)
   --work <папка>        куда сложить промежуточные файлы (по умолчанию <out>.work)
-  --provider laozhang|chatgpt|mock
-                        laozhang — Nano Banana по ключу (по умолчанию); chatgpt — ChatGPT Images
+  --provider google|laozhang|chatgpt|mock
+                        google — Nano Banana через Gemini API, laozhang — через laozhang.ai (по умолчанию —
+                        Gemini API, если есть его ключ, иначе laozhang.ai); chatgpt — ChatGPT Images
                         по подписке через Codex CLI, вошедший в ChatGPT; mock — без сети, для проверки
   --dry-run             только посчитать кусок и сохранить то, что уйдёт в модель
 `, `Edit a region of a large image with Nano Banana or ChatGPT Images.
@@ -49,8 +50,9 @@ const HELP = L(`Правка области большой картинки че
   --feather <px>        feather inside the mask (default 24)
   --guide pair|overlay|blank  how to show the region to the model (default pair)
   --work <dir>          where to put intermediate files (default <out>.work)
-  --provider laozhang|chatgpt|mock
-                        laozhang — Nano Banana with an API key (default); chatgpt — ChatGPT Images
+  --provider google|laozhang|chatgpt|mock
+                        google — Nano Banana through the Gemini API, laozhang — through laozhang.ai (default:
+                        the Gemini API if its key is set, otherwise laozhang.ai); chatgpt — ChatGPT Images
                         on your ChatGPT subscription via a signed-in Codex CLI; mock — offline, for testing
   --dry-run             only compute the crop and save what would be sent to the model
 `);
@@ -76,7 +78,7 @@ async function main(): Promise<void> {
       feather: { type: 'string', default: '24' },
       guide: { type: 'string', default: 'pair' },
       work: { type: 'string' },
-      provider: { type: 'string', default: 'laozhang' },
+      provider: { type: 'string' },
       'dry-run': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
@@ -91,12 +93,13 @@ async function main(): Promise<void> {
   const variants = Number(a.variants);
   if (!Number.isInteger(variants) || variants < 1 || variants > 8) fail(L('--variants: от 1 до 8', '--variants: 1 to 8'));
 
+  const kind = a.provider ?? ((await defaultKeys().google.get()) ? 'google' : 'laozhang');
   let provider: ImageProvider;
-  if (a.provider === 'mock') provider = mockProvider();
-  else if (a.provider === 'laozhang')
-    provider = withLedger(laozhangGemini({ model: a.model as GeminiModel, apiKey: getLaozhangKey }), 'edit-region');
-  else if (a.provider === 'chatgpt') provider = withLedger(chatgptCodex(), 'edit-region');
-  else fail(L('--provider: laozhang, chatgpt или mock', '--provider: laozhang, chatgpt or mock'));
+  if (kind === 'mock') provider = mockProvider();
+  else if (kind === 'google' || kind === 'laozhang')
+    provider = withLedger(geminiImage({ service: kind, model: a.model as GeminiModel, apiKey: () => getKey(kind) }), 'edit-region');
+  else if (kind === 'chatgpt') provider = withLedger(chatgptCodex(), 'edit-region');
+  else fail(L('--provider: google, laozhang, chatgpt или mock', '--provider: google, laozhang, chatgpt or mock'));
 
   const outExt = extname(a.out) || '.png';
   const outBase = join(dirname(a.out), basename(a.out, outExt));
@@ -113,7 +116,7 @@ async function main(): Promise<void> {
     context: Number(a.context),
     contextMin: Number(a['context-min']),
     feather: Number(a.feather),
-    imageSize: a.provider === 'chatgpt' ? 'auto' : a.size,
+    imageSize: kind === 'chatgpt' ? 'auto' : a.size,
     guide: a.guide as Guide,
   });
   const { rect } = prep.frame;

@@ -8,8 +8,8 @@ import { parseArgs } from 'node:util';
 import sharp from 'sharp';
 import { withLedger } from '../src/core/ledger.ts';
 import { renderMask, type MaskShape } from '../src/core/mask-shapes.ts';
-import { getLaozhangKey } from '../src/core/secrets.ts';
-import { laozhangGemini, type GeminiModel } from '../src/providers/laozhang-gemini.ts';
+import { getKey } from '../src/core/secrets.ts';
+import { geminiImage, type GeminiModel } from '../src/providers/gemini.ts';
 
 const [command, ...rest] = process.argv.slice(2);
 const { values: a } = parseArgs({
@@ -36,7 +36,7 @@ function nums(s: string): number[] {
 
 async function base(): Promise<void> {
   if (!a.prompt || !a.out) throw new Error('base: нужны --prompt и --out');
-  const provider = withLedger(laozhangGemini({ model: a.model as GeminiModel, apiKey: getLaozhangKey }), 'recon-base');
+  const provider = withLedger(geminiImage({ service: 'laozhang', model: a.model as GeminiModel, apiKey: () => getKey('laozhang') }), 'recon-base');
   const res = await provider.generate({ prompt: a.prompt, images: [], aspectRatio: a.ratio, imageSize: a.size });
   await mkdir(dirname(a.out), { recursive: true });
   const png = await sharp(res.image).png().toBuffer();

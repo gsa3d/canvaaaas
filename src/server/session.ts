@@ -41,22 +41,25 @@ import { applyShapes, applyShapesRegion, type MaskLookup } from '../core/mask-sh
 import { changeEdge } from '../core/lines.ts';
 import { area, descendants, dilate, layerName, overlap, removeObject, trim, unionBitmap } from '../core/objects.ts';
 import type { Bitmap } from '../core/segment.ts';
-import type { KeyStore } from '../core/secrets.ts';
+import type { Keys } from '../core/secrets.ts';
 import { alignMask, objectMaskRequest, readObjectMask } from '../core/object-mask.ts';
 import { checkSketch } from '../core/sketch.ts';
 import { chatgptCodex, chatgptDirector, findCodex } from '../providers/chatgpt-codex.ts';
 import { mockDirector, type PromptDirector } from '../providers/director.ts';
-import { laozhangGemini } from '../providers/laozhang-gemini.ts';
+import { geminiImage } from '../providers/gemini.ts';
 import { mockProvider } from '../providers/mock.ts';
 import type { ImageProvider, InputImage } from '../providers/types.ts';
 import { maskPng, Segmentation, type Scope } from './segmentation.ts';
 import {
+  GEMINI_SERVICE_NAMES,
+  GEMINI_SERVICES,
   MAX_REFERENCES,
   OUTSIDE_LAYER,
   shapesBBox,
   type CreateJobRequest,
   type DetachRequest,
   type EdgeRequest,
+  type GeminiService,
   type MaskResult,
   type JobDto,
   type MaskEditResult,
@@ -252,14 +255,17 @@ function stem(name: string): string {
 }
 
 export class Session {
-  readonly providerKind: 'laozhang' | 'mock';
-  private readonly keys: KeyStore;
-  private hasKey = false;
+  /** live — настоящие модели, mock — подставная */
+  readonly providerKind: 'live' | 'mock';
+  private readonly keys: Keys;
+  /** У каких сервисов Nano Banana ключ сохранён */
+  private saved: Record<GeminiService, boolean> = { google: false, laozhang: false };
   /** Codex CLI для ChatGPT по подписке; ищется заново при каждой генерации, здесь — для настроек */
   private codex: string | null = null;
   doc: CanvasDocument | null = null;
   private jobs: Job[] = [];
-  private readonly providers = new Map<ModelChoice, ImageProvider>();
+  /** Провайдеры по модели, у Nano Banana — и по сервису */
+  private readonly providers = new Map<string, ImageProvider>();
   private mockMask: ImageProvider | undefined;
   private directorImpl: PromptDirector | null = null;
   private generations = 0;
@@ -303,7 +309,7 @@ export class Session {
   /** Какие ответы умеет каждая модель — не меняется */
   private outputs: StateDto['models'] | undefined;
 
-  constructor(providerKind: 'laozhang' | 'mock', keys: KeyStore, opts: SessionOptions = {}) {
+  constructor(providerKind: 'live' | 'mock', keys: Keys, opts: SessionOptions = {}) {
     this.providerKind = providerKind;
     this.keys = keys;
     this.host = opts.host ?? null;
@@ -315,9 +321,9 @@ export class Session {
   }
 
   async init(): Promise<void> {
-    this.hasKey = (await this.keys.get()) !== null;
+    await this.readKeys();
     this.codex = findCodex();
-    if (this.providerKind !== 'laozhang') return;
+    if (this.providerKind !== 'live') return;
     const today = new Date().toISOString().slice(0, 10);
     this.todayAtStart = (await readLedger()).filter((e) => e.at.startsWith(today) && !e.kind).length;
   }
@@ -336,15 +342,17 @@ export class Session {
   }
 
   private provider(model: ModelChoice): ImageProvider {
-    let p = this.providers.get(model);
+    const service = this.geminiService();
+    const key = model === 'chatgpt' ? model : `${model}:${service}`;
+    let p = this.providers.get(key);
     if (!p) {
       p =
         this.providerKind === 'mock'
           ? mockProvider({ mode: 'blob', delayMs: 1500 })
           : model === 'chatgpt'
             ? withLedger(chatgptCodex(), 'ui')
-            : withLedger(laozhangGemini({ model, apiKey: () => this.apiKey() }), 'ui');
-      this.providers.set(model, p);
+            : withLedger(geminiImage({ service, model, apiKey: () => this.apiKey(service) }), 'ui');
+      this.providers.set(key, p);
     }
     return p;
   }
@@ -361,21 +369,44 @@ export class Session {
     return this.directorImpl;
   }
 
-  private async apiKey(): Promise<string> {
-    const key = await this.keys.get();
-    if (!key) throw new Error(L('Нет ключа laozhang.ai: добавьте его в настройках (⌘,)', 'No laozhang.ai key: add it in Settings (⌘,)'));
-    return key;
+  /**
+   * Через что идёт Nano Banana: выбор в настройках, а без выбора — Gemini API,
+   * если только ключ не сохранён у одного laozhang.ai (так было до выбора)
+   */
+  geminiService(): GeminiService {
+    const choice = this.preferences().gemini;
+    if (GEMINI_SERVICES.includes(choice as GeminiService)) return choice as GeminiService;
+    return this.saved.laozhang && !this.saved.google ? 'laozhang' : 'google';
   }
 
-  async setKey(key: string): Promise<void> {
-    await this.keys.set(key);
-    this.hasKey = (await this.keys.get()) !== null;
+  async setGeminiService(service: GeminiService): Promise<void> {
+    if (!GEMINI_SERVICES.includes(service)) throw new Error(L('Нет такого сервиса', 'No such service'));
+    await this.setPreference('gemini', service);
     this.changed();
   }
 
-  async clearKey(): Promise<void> {
-    await this.keys.clear();
-    this.hasKey = (await this.keys.get()) !== null;
+  private async readKeys(): Promise<void> {
+    for (const service of GEMINI_SERVICES) this.saved[service] = (await this.keys[service].get()) !== null;
+  }
+
+  private async apiKey(service: GeminiService): Promise<string> {
+    const key = await this.keys[service].get();
+    const name = GEMINI_SERVICE_NAMES[service];
+    if (!key) throw new Error(L(`Нет ключа ${name}: добавьте его в настройках (⌘,)`, `No ${name} key: add it in Settings (⌘,)`));
+    return key;
+  }
+
+  async setKey(service: GeminiService, key: string): Promise<void> {
+    if (!GEMINI_SERVICES.includes(service)) throw new Error(L('Нет такого сервиса', 'No such service'));
+    await this.keys[service].set(key);
+    await this.readKeys();
+    this.changed();
+  }
+
+  async clearKey(service: GeminiService): Promise<void> {
+    if (!GEMINI_SERVICES.includes(service)) throw new Error(L('Нет такого сервиса', 'No such service'));
+    await this.keys[service].clear();
+    await this.readKeys();
     this.changed();
   }
 
@@ -396,7 +427,8 @@ export class Session {
     return {
       provider: this.providerKind,
       models: this.modelOutputs(),
-      hasKey: this.hasKey || this.providerKind === 'mock',
+      hasKey: this.saved[this.geminiService()] || this.providerKind === 'mock',
+      gemini: { service: this.geminiService(), keys: { ...this.saved } },
       codex: this.codex,
       doc: doc && {
         id: doc.id,

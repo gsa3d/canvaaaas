@@ -3,7 +3,7 @@
 import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
 import { blendFrame, buildPrompt, criticImages, prepareEdit, revise } from '../src/core/edit-region.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { criticPrompt, mockDirector, parseCritic, type PromptDirector } from '../src/providers/director.ts';
 import { mockProvider } from '../src/providers/mock.ts';
 import type { ImageProvider } from '../src/providers/types.ts';
@@ -23,11 +23,11 @@ const BG: [number, number, number] = [40, 60, 80];
 
 /** Сеанс с подставной моделью без задержки и подставным директором-критиком, чьи вызовы видно */
 async function session(opts: { doneAt?: number; delayMs?: number } = {}) {
-  const s = new Session('mock', envOnlyStore());
+  const s = new Session('mock', noKeys());
   await s.newDocument(900, 700, BG);
   const provider = mockProvider({ mode: 'blob', delayMs: opts.delayMs });
   const director = mockDirector({ doneAt: opts.doneAt });
-  (s as unknown as { providers: Map<string, ImageProvider> }).providers.set('flash', provider);
+  (s as unknown as { providers: Map<string, ImageProvider> }).providers.set('flash:google', provider);
   (s as unknown as { directorImpl: PromptDirector }).directorImpl = director;
   const create = (variants: number) => s.createJob({ shapes: [AREA], prompt: 'лодка', variants, model: 'flash', size: 'auto', director: true });
   return { s, provider, director, create };

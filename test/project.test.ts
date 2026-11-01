@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { featherAlpha } from '../src/core/mask.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
 import { RecentFiles } from '../src/core/recent.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { Session, type Host } from '../src/server/session.ts';
 
 const W = 900;
@@ -48,7 +48,7 @@ function fakeHost(answers: { save?: string[]; ask?: number[] }) {
 }
 
 async function session(host?: Host): Promise<Session> {
-  return new Session('mock', envOnlyStore(), { host, recent: await RecentFiles.load(join(dir, `data-${Math.random()}`)) });
+  return new Session('mock', noKeys(), { host, recent: await RecentFiles.load(join(dir, `data-${Math.random()}`)) });
 }
 
 beforeAll(async () => {
@@ -186,7 +186,7 @@ describe('Проект .caaa', () => {
 
 describe('Проект 1 — в слои с версиями', () => {
   it('каждая правка — слоем с ней одной текущей версией, скрытая — скрытым слоем; холст тот же', async () => {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.openDocument(await sharp(pattern(W, H), { raw: { width: W, height: H, channels: 3 } }).png().toBuffer(), 'a.png');
     const doc = s.doc!;
     doc.addPatch({ ...patch('p1', 100, 100, 300, 200, 12), prompt: 'кот на крыше' });

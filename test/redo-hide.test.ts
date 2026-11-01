@@ -7,7 +7,7 @@ import { applyLayer, prepareEdit, retarget } from '../src/core/edit-region.ts';
 import { featherAlpha, featherAlphaRegion } from '../src/core/mask.ts';
 import { applyShapes, applyShapesRegion } from '../src/core/mask-shapes.ts';
 import { encodeProject, openProject } from '../src/core/project.ts';
-import { envOnlyStore } from '../src/core/secrets.ts';
+import { noKeys } from '../src/core/secrets.ts';
 import { mockProvider } from '../src/providers/mock.ts';
 import { Session } from '../src/server/session.ts';
 
@@ -160,7 +160,7 @@ describe('Скрыть то, что под маской', () => {
 
 describe('Повтор с поправкой', () => {
   async function setup(hide: boolean) {
-    const s = new Session('mock', envOnlyStore());
+    const s = new Session('mock', noKeys());
     await s.newDocument(W, H, BASE);
     const id = s.createJob({ shapes: [{ kind: 'rect', x: 300, y: 200, width: 240, height: 180 }], prompt: 'кот', variants: 1, model: 'flash', size: 'auto', hide });
     const job = () => s.state().jobs.find((j) => j.id === id)!;

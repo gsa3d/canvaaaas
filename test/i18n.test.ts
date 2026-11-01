@@ -1,9 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { decimal, L, lang, langOf, plural, resolveLang, setLang } from '../src/shared/i18n.ts';
 import { Session } from '../src/server/session.ts';
-import type { KeyStore } from '../src/core/secrets.ts';
-
-const keys: KeyStore = { get: async () => null, set: async () => undefined, clear: async () => undefined };
+import { noKeys } from '../src/core/secrets.ts';
 
 describe('язык интерфейса', () => {
   afterEach(() => setLang('ru'));
@@ -36,7 +34,7 @@ describe('язык интерфейса', () => {
   });
 
   it('язык из настроек главнее системного и меняется сразу', async () => {
-    const s = new Session('mock', keys, { systemLang: 'ru' });
+    const s = new Session('mock', noKeys(), { systemLang: 'ru' });
     expect(s.language()).toEqual({ lang: 'ru', choice: 'system', system: 'ru' });
     await s.setLanguage('en');
     expect(lang()).toBe('en');
