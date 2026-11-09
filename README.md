@@ -50,13 +50,13 @@ canvaaaas needs at least one image model. Open **Settings** (⌘, on macOS, Ctrl
 
 ## How to use
 
-1. **Open** an image (⌘O): PNG, JPEG, WebP, TIFF or a canvaaaas project (`.caaa`). Or create a **New canvas** (⌘N).
+1. **Open** an image (⌘O): PNG, JPEG, WebP, TIFF, a Photoshop file (`.psd`, `.psb`) or a canvaaaas project (`.caaa`). Or create a **New canvas** (⌘N).
 2. **Select** what to change: the Wand (W) picks an object under the click, or use the Rectangle (R), Lasso (L) or Brush (B). Shift adds to the selection, Alt subtracts. The dashed frame shows the crop the model will see.
 3. **Describe the result** in the edit panel — what should be there, not what to fix. Optionally add a **Sketch** (S), **References** (drag, paste or pick up to three images) and a document **Style**.
 4. Pick the model, resolution and number of variants, then **Generate** (⌘↵). The button says where the result will go and how many generations it costs.
 5. Each result becomes a **version** of a layer. Switch versions in the strip under the canvas (← →), hover a version to preview it, press F to zoom to the crop.
 6. Fix the edges: click the mask thumbnail next to a layer to hide or bring back parts with the brush, or use **Mask → By edit** to grow the mask over what the model drew beyond the selection. **Revise task** and **More** generate new versions of the same layer.
-7. **Save** (⌘S). A `.caaa` project keeps all layers and versions. Saving to an image merges what is visible; **Export Image** (⇧⌘E) writes a copy and keeps the project as is.
+7. **Save** (⌘S). A `.caaa` project keeps all layers and versions. Saving to an image merges what is visible; **Export Image** (⇧⌘E) writes a copy and keeps the project as is. **Export to PSD** writes a Photoshop file with layers and groups.
 
 More options in the edit panel:
 
@@ -75,6 +75,12 @@ Useful keys: ⌘Z / ⇧⌘Z undo and redo, ⌘D deselect, ⌘J layer via copy, �
 ### Saving
 
 The canvas inside canvaaaas is 8-bit sRGB without transparency. If the original file is different — has transparency, 16 bits per channel, a Display P3 or Adobe RGB profile, CMYK, or is a TIFF that may hold Photoshop layers — **Save** will not overwrite it and asks for a new file name instead. PNG and WebP are overwritten losslessly; JPEG is re-encoded at quality 95 on every save, so for long work keep a PNG or `.caaa` copy.
+
+### Photoshop files
+
+Opening a `.psd` or `.psb` (RGB or Grayscale, 8 or 16 bits) brings in layers with pixels and smart objects, with their names, order, visibility and groups. Layer opacity, raster masks and clipping masks are baked into the layer's transparency, and in Multiply layers white becomes transparent. Text, vector shapes, fill and adjustment layers and layer effects are skipped, other blend modes become Normal, and a message after opening says what was skipped. The original file is never changed: **Save** goes to `.caaa` or an image.
+
+**Export to PSD** writes each layer as what is visible of it (its current version), so versions and masks are not exported separately. A file over 2 GB or 30000 pixels is written as `.psb`.
 
 ## Privacy and costs
 

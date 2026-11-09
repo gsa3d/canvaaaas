@@ -76,6 +76,7 @@ interface Manifest {
     under?: string;
     edit?: boolean;
     freed?: boolean;
+    imported?: boolean;
     /** Откуда слой вырезали: рамка и маска дыры */
     hole?: { rect: Rect; mask: Part };
     mask: Part;
@@ -184,6 +185,7 @@ export async function encodeProject(doc: CanvasDocument, density?: number): Prom
     under: o.under,
     edit: o.edit || undefined,
     freed: o.freed || undefined,
+    imported: o.imported || undefined,
     mask: part(images[first + i]!),
     group: o.group,
   }));
@@ -257,6 +259,7 @@ export async function openProject(data: Buffer, name: string): Promise<{ doc: Ca
       under: o.kind === 'fill' && typeof o.under === 'string' ? o.under : undefined,
       edit: o.edit === true || undefined,
       freed: o.freed === true || undefined,
+      imported: o.imported === true || undefined,
       hole: holes[i] ? { rect: o.hole!.rect, mask: new Uint8Array(holes[i]!) } : undefined,
       group: typeof o.group === 'string' ? o.group : undefined,
     }),

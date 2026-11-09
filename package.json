@@ -39,6 +39,7 @@
     "@fontsource-variable/golos-text": "^5.3.0",
     "@tabler/icons-preact": "^3.49.0",
     "@types/node": "^26.6.5",
+    "ag-psd": "^34.1.0",
     "electron": "^45.0.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",

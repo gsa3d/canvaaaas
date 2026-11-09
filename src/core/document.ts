@@ -100,6 +100,8 @@ export interface DocObject {
   hole?: { rect: Rect; mask: Uint8Array };
   /** Группа, в которой лежит слой (layer-tree.ts) */
   group?: string;
+  /** Слой пришёл из PSD: у него свои пиксели, а под ним не его копия, поэтому скрыть его можно без вопроса о фоне */
+  imported?: boolean;
 }
 
 /**

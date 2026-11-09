@@ -594,6 +594,9 @@ button.swatch.active,
 
 .busy {
   top: 45%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   background: var(--paper);
 }
 

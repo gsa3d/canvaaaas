@@ -3,13 +3,16 @@
 // без новой генерации.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir, totalmem } from 'node:os';
 import { basename, dirname, extname, join } from 'node:path';
 import sharp from 'sharp';
 import { CanvasDocument, TILE_SIZE, type DocGroup, type DocObject, type NewPatch, type Patch } from '../core/document.ts';
 import { buildTree, flatten, groupNodes, insertTop, layersOf, locate, moveNode, ungroupNode } from '../core/layer-tree.ts';
 import { encodeImage, formatOf, inspectImage, writeFileAtomic, type ImageFile, type ImageFormat } from '../core/image-file.ts';
 import { encodeProject, isProject, isProjectPath, openProject, PROJECT_EXTENSION } from '../core/project.ts';
+import { exportPsd, importPsd, isPsd, isPsdPath, PsdCancelled, type PsdImport } from '../core/psd.ts';
+import type { PsdSummary } from '../core/psd-read.ts';
 import type { Prefs } from '../core/prefs.ts';
 import type { RecentFiles } from '../core/recent.ts';
 import {
@@ -75,7 +78,7 @@ import {
   type SketchStroke,
   type StateDto,
 } from '../shared/api.ts';
-import { L, lang, LANG_CHOICES, resolveLang, setLang, type Lang, type LangChoice } from '../shared/i18n.ts';
+import { decimal, L, lang, LANG_CHOICES, plural, resolveLang, setLang, type Lang, type LangChoice } from '../shared/i18n.ts';
 
 const MAX_RUNNING_JOBS = 2;
 const MAX_VARIANTS_PER_JOB = 8;
@@ -92,6 +95,21 @@ const LIFT_GROW = 2;
 /** Подсветка слоя под курсором — не больше этого по большей стороне, как у объекта под курсором */
 const HOVER_LAYER_MAX = 1600;
 const LIFT_FEATHER = 2;
+/** Импорт PSD спрашивает, если документ займёт больше этой доли памяти компьютера */
+const PSD_MEMORY_SHARE = 0.7;
+
+/** Итог импорта PSD одной строкой: что пришло, что пропущено и что выглядит иначе */
+function importNote({ layers, summary: s }: PsdImport): string {
+  const parts = [`${layers} ${plural(layers, ['слой', 'слоя', 'слоёв'], ['layer', 'layers'])}`];
+  const skipped = s.text + s.vector + s.adjustment;
+  if (skipped) {
+    const kinds = [s.text && L('текст', 'text'), s.vector && L('вектор', 'vector'), s.adjustment && L('коррекция', 'adjustments')].filter(Boolean).join(', ');
+    parts.push(L(`пропущено ${skipped}: ${kinds}`, `skipped ${skipped}: ${kinds}`));
+  }
+  if (s.blend) parts.push(L(`режим наложения заменён у ${s.blend}`, `blend mode replaced on ${s.blend}`));
+  if (s.profile) parts.push(L(`профиль ${s.profile} прочитан как sRGB`, `${s.profile} profile read as sRGB`));
+  return `PSD: ${parts.join(', ')}`;
+}
 
 /**
  * Насколько шире слоя модель дорисовывает фон под ним: растушёвка вклейки и ещё запас, иначе на контуре слоя дорисованное
@@ -230,8 +248,8 @@ function message(err: unknown): string {
 export interface Host {
   /** Путь к картинке или проекту или null, если пользователь передумал */
   chooseOpen(): Promise<string | null>;
-  /** message — пояснение над окном сохранения (на macOS); project: false — только картинки, без .caaa */
-  chooseSave(defaultPath: string, opts?: { message?: string; project?: boolean }): Promise<string | null>;
+  /** message — пояснение над окном сохранения (на macOS); project: false — только картинки, без .caaa; psd — только PSD и PSB */
+  chooseSave(defaultPath: string, opts?: { message?: string; project?: boolean; psd?: boolean }): Promise<string | null>;
   /** Номер нажатой кнопки; последняя кнопка — отмена */
   ask(question: { message: string; detail?: string; buttons: string[] }): Promise<number>;
 }
@@ -296,6 +314,10 @@ export class Session {
   private flattened = false;
   /** Что сервер сейчас делает с файлом: «Открываю…», «Сохраняю…» */
   private activity: string | null = null;
+  /** Идёт импорт или экспорт PSD: его можно отменить */
+  private psdWork: AbortController | null = null;
+  /** Итог импорта PSD для окна */
+  private notice: { id: number; text: string } | null = null;
   /** Открытый вопрос «Сохранить изменения?»: второй ⌘Q не должен открыть второй */
   private asking: Promise<boolean> | null = null;
   /** Правки масок слоёв, отмена и повтор идут строго по очереди: ⌘Z сразу после мазка отменяет этот мазок */
@@ -523,6 +545,7 @@ export class Session {
         versions: doc!.patches.filter((p) => p.object === o.id && !p.lifted).map((p) => p.id),
         layer: liftedLayer(doc!, o.id)?.id,
         freed: o.freed || doc!.objects.some((f) => f.kind === 'fill' && f.under === o.id) || undefined,
+        imported: o.imported,
       })),
       groups: (doc?.groups ?? []).map((g) => ({ id: g.id, name: g.name, hidden: g.hidden, group: g.group })),
       segment: this.segmentation.state(),
@@ -538,6 +561,8 @@ export class Session {
         openedAt: e.openedAt,
       })),
       activity: this.activity,
+      cancelable: this.psdWork !== null,
+      notice: this.notice,
       nativeFiles: this.host !== null,
     };
   }
@@ -578,7 +603,11 @@ export class Session {
     if (!(await this.confirmClose())) return false;
     this.setActivity(L(`Открываю ${basename(path)}…`, `Opening ${basename(path)}…`));
     try {
-      if (isProjectPath(path)) {
+      if (isPsdPath(path)) {
+        const doc = await this.openPsd(path, basename(path));
+        if (!doc) return false;
+        await this.remember(doc, path);
+      } else if (isProjectPath(path)) {
         const info = await stat(path);
         const { doc, density } = await openProject(await readFile(path), basename(path));
         this.replaceDoc(doc, { path, format: PROJECT_EXTENSION, density, size: info.size, mtimeMs: info.mtimeMs }, density);
@@ -642,6 +671,18 @@ export class Session {
   /** Картинка или проект, загруженные из браузера (сервер для разработки): пути к файлу нет, «Сохранить» их не перезапишет */
   async openDocument(input: Buffer, name: string): Promise<boolean> {
     if (!(await this.confirmClose())) return false;
+    if (isPsd(input)) {
+      // Разбор читает файл кусками, поэтому загруженному нужно полежать на диске
+      const dir = await mkdtemp(join(tmpdir(), 'canvaaaas-psd-'));
+      const path = join(dir, 'upload.psd');
+      try {
+        await writeFile(path, input);
+        return (await this.openPsd(path, name)) !== null;
+      } finally {
+        this.setActivity(null);
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
     if (isProject(input)) {
       const { doc, density } = await openProject(input, name);
       this.replaceDoc(doc, null, density);
@@ -655,6 +696,61 @@ export class Session {
     if (!(await this.confirmClose())) return false;
     this.replaceDoc(CanvasDocument.blank(width, height, color, L(`Холст ${width}×${height}`, `Canvas ${width}×${height}`)), null, density);
     return true;
+  }
+
+  /**
+   * Документ из PSD: файла у него нет, поэтому «Сохранить» идёт в .caaa или картинку и исходный PSD не трогает. null —
+   * передумали или отменили; открытый документ при этом остаётся
+   */
+  private async openPsd(path: string, name: string): Promise<CanvasDocument | null> {
+    const work = (this.psdWork = new AbortController());
+    this.changed();
+    try {
+      const result = await importPsd(path, name, {
+        signal: work.signal,
+        confirm: (s) => this.confirmPsdMemory(s, name),
+        progress: (done, total) => this.setActivity(L(`Открываю ${name}: слой ${done} из ${total}`, `Opening ${name}: layer ${done} of ${total}`)),
+      });
+      if (!result) return null;
+      this.replaceDoc(result.doc, null, result.density);
+      this.showNotice(importNote(result));
+      return result.doc;
+    } catch (err) {
+      if (err instanceof PsdCancelled) return null;
+      throw err;
+    } finally {
+      this.psdWork = null;
+    }
+  }
+
+  /** Сколько памяти займёт документ, известно до чтения пикселей: если много, лучше спросить, чем зависнуть */
+  private async confirmPsdMemory(s: PsdSummary, name: string): Promise<'all' | 'visible' | null> {
+    const total = totalmem();
+    if (!this.host || s.bytes <= total * PSD_MEMORY_SHARE) return 'all';
+    const gb = (n: number) => decimal(n / 2 ** 30, 1);
+    const canSkip = s.hidden > 0;
+    const answer = await this.host.ask({
+      message: L(`«${name}» займёт ${gb(s.bytes)} ГБ памяти`, `“${name}” needs ${gb(s.bytes)} GB of memory`),
+      detail: L(`В компьютере ${gb(total)} ГБ: программа может сильно замедлиться.`, `This computer has ${gb(total)} GB: the app may slow down a lot.`),
+      buttons: [...(canSkip ? [L(`Без скрытых слоёв (${gb(s.visibleBytes)} ГБ)`, `Without Hidden Layers (${gb(s.visibleBytes)} GB)`)] : []), L('Открыть всё', 'Open Everything'), L('Отмена', 'Cancel')],
+    });
+    if (canSkip && answer === 0) return 'visible';
+    return answer === (canSkip ? 1 : 0) ? 'all' : null;
+  }
+
+  private showNotice(text: string): void {
+    const notice = { id: (this.notice?.id ?? 0) + 1, text };
+    this.notice = notice;
+    this.changed();
+    // Окно могло бы показать его снова после перезагрузки
+    setTimeout(() => {
+      if (this.notice === notice) this.notice = null;
+    }, 15000).unref();
+  }
+
+  /** Отменить импорт или экспорт PSD */
+  cancelFileWork(): void {
+    this.psdWork?.abort();
   }
 
   private replaceDoc(doc: CanvasDocument, file: OpenFile | null, density: number | undefined): void {
@@ -805,6 +901,61 @@ export class Session {
       this.setActivity(null);
     }
     return path;
+  }
+
+  /** «Экспортировать в PSD…»: копия со слоями и группами; документ остаётся связан со своим файлом */
+  async exportPsd(): Promise<string | null> {
+    const doc = this.requireDoc();
+    const host = this.requireHost();
+    const dir = this.saveDir();
+    const name = `${stem(doc.name)}.psd`;
+    const path = await host.chooseSave(dir ? join(dir, name) : name, { psd: true });
+    if (!path) return null;
+    return this.writePsd(isPsdPath(path) ? path : `${path}.psd`);
+  }
+
+  /** PSD по этому пути; не поместился в 2 ГБ — рядом PSB. Итоговый путь или null, если передумали или отменили */
+  async writePsd(path: string): Promise<string | null> {
+    const doc = this.requireDoc();
+    const name = basename(path);
+    const work = (this.psdWork = new AbortController());
+    this.setActivity(L(`Экспортирую ${name}…`, `Exporting ${name}…`));
+    try {
+      return await exportPsd(doc, path, {
+        density: this.density,
+        signal: work.signal,
+        progress: (done, total) => this.setActivity(L(`Экспортирую ${name}: слой ${done} из ${total}`, `Exporting ${name}: layer ${done} of ${total}`)),
+        allowPsb: (target) => this.allowPsb(target),
+      });
+    } catch (err) {
+      if (err instanceof PsdCancelled) return null;
+      throw err;
+    } finally {
+      this.psdWork = null;
+      this.setActivity(null);
+    }
+  }
+
+  /** PSD не поместился, и PSB с таким именем уже есть: окно сохранения про него не спрашивало */
+  private async allowPsb(target: string): Promise<boolean> {
+    if (!this.host || !existsSync(target)) return true;
+    const answer = await this.host.ask({
+      message: L(`Файл не помещается в PSD. Заменить ${basename(target)}?`, `The file does not fit in a PSD. Replace ${basename(target)}?`),
+      buttons: [L('Заменить', 'Replace'), L('Отмена', 'Cancel')],
+    });
+    return answer === 0;
+  }
+
+  /** PSD для скачивания (сервер для разработки, где нет окна сохранения) */
+  async exportPsdBytes(): Promise<Buffer> {
+    const dir = await mkdtemp(join(tmpdir(), 'canvaaaas-psd-'));
+    try {
+      const path = await this.writePsd(join(dir, 'export.psd'));
+      if (!path) throw new Error(L('Экспорт отменён', 'Export cancelled'));
+      return await readFile(path);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 
   private async write(path: string, format: SaveFormat, chromaSubsampling?: string): Promise<void> {

@@ -7,6 +7,7 @@ import { dirname, extname, join } from 'node:path';
 import { app, BrowserWindow, dialog, Menu, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
 import { encodeImage, formatOf, IMAGE_EXTENSIONS } from '../core/image-file.ts';
 import { isProjectPath, PROJECT_EXTENSION } from '../core/project.ts';
+import { isPsdPath, PSD_EXTENSIONS } from '../core/psd.ts';
 import { Prefs } from '../core/prefs.ts';
 import { RecentFiles } from '../core/recent.ts';
 import { Segmenter } from '../core/segment.ts';
@@ -33,7 +34,7 @@ app.on('open-file', (event, path) => {
 
 /** На Windows файл приходит в аргументах запуска */
 function fileArg(argv: string[]): string | undefined {
-  return argv.slice(1).find((a) => !a.startsWith('-') && (isProjectPath(a) || formatOf(a)) && existsSync(a));
+  return argv.slice(1).find((a) => !a.startsWith('-') && (isProjectPath(a) || isPsdPath(a) || formatOf(a)) && existsSync(a));
 }
 
 // Меню на языке интерфейса. Пункты шлют команду в окно; их сочетания клавиш только показываются
@@ -99,6 +100,7 @@ function buildMenu(win: BrowserWindow, session: Session): void {
         { ...item(L('Сохранить', 'Save'), 'save', 'CmdOrCtrl+S'), enabled: hasDoc },
         { ...item(L('Сохранить как…', 'Save As…'), 'save-as', 'CmdOrCtrl+Shift+S'), enabled: hasDoc },
         { ...item(L('Экспортировать картинку…', 'Export Image…'), 'export', 'CmdOrCtrl+Shift+E'), enabled: hasDoc },
+        { ...item(L('Экспортировать в PSD…', 'Export to PSD…'), 'export-psd'), enabled: hasDoc },
         ...(mac ? [] : [{ type: 'separator' } as const, settings, { type: 'separator' } as const, { role: 'quit', label: L('Выход', 'Exit') } as const]),
       ],
     },
@@ -255,6 +257,7 @@ app.whenReady().then(async () => {
     };
     let files = false;
     let project = false;
+    let psd = false;
     let close = false;
     try {
       const path = join(smokeDir, 'smoke.png');
@@ -265,6 +268,10 @@ app.whenReady().then(async () => {
       const saved = await session.saveAs();
       await session.openPath(saved!);
       project = saved?.endsWith(`.${PROJECT_EXTENSION}`) === true && session.doc?.patches.length === 1 && !session.dirty;
+      // Поток PSD собирается отдельным файлом рядом с main.mjs: проверяется, что он есть и работает и туда, и обратно
+      const exported = await session.writePsd(join(smokeDir, 'smoke.psd'));
+      await session.openPath(exported!);
+      psd = session.doc?.objects.length === 1 && session.doc.patches.length === 1;
       patch('b');
       win.close();
       await new Promise((r) => setTimeout(r, 300));
@@ -282,10 +289,10 @@ app.whenReady().then(async () => {
         (err: unknown) => L(`ошибка: ${err instanceof Error ? err.message : String(err)}`, `error: ${err instanceof Error ? err.message : String(err)}`),
       );
     }
-    const ok = check.ui && check.api && files && project && close;
+    const ok = check.ui && check.api && files && project && psd && close;
     console.log(
       L(`SMOKE ${ok ? 'OK' : 'FAIL'}: ${server.url}, интерфейс ${check.ui}, API ${check.api}, открытие и сохранение ${files}, `, `SMOKE ${ok ? 'OK' : 'FAIL'}: ${server.url}, UI ${check.ui}, API ${check.api}, open and save ${files}, `) +
-        L(`проект .caaa ${project}, вопрос при закрытии ${close}, ключ ${check.key ? 'есть' : 'нет'}, выделение объектов ${sam}`, `.caaa project ${project}, prompt on close ${close}, key ${check.key ? 'yes' : 'no'}, object selection ${sam}`),
+        L(`проект .caaa ${project}, PSD ${psd}, вопрос при закрытии ${close}, ключ ${check.key ? 'есть' : 'нет'}, выделение объектов ${sam}`, `.caaa project ${project}, PSD ${psd}, prompt on close ${close}, key ${check.key ? 'yes' : 'no'}, object selection ${sam}`),
     );
     app.exit(ok ? 0 : 1);
     return;
@@ -322,16 +329,16 @@ function nativeHost(win: BrowserWindow): Host {
     async chooseOpen() {
       const res = await dialog.showOpenDialog(win, {
         properties: ['openFile'],
-        filters: [{ name: L('Картинки и проекты canvaaaas', 'Images and canvaaaas projects'), extensions: [...IMAGE_EXTENSIONS, PROJECT_EXTENSION] }],
+        filters: [{ name: L('Картинки, PSD и проекты canvaaaas', 'Images, PSD and canvaaaas projects'), extensions: [...IMAGE_EXTENSIONS, ...PSD_EXTENSIONS, PROJECT_EXTENSION] }],
       });
       return res.canceled ? null : (res.filePaths[0] ?? null);
     },
-    async chooseSave(defaultPath, { message, project = true } = {}) {
+    async chooseSave(defaultPath, { message, project = true, psd = false } = {}) {
       // Первым — фильтр расширения из имени по умолчанию: Windows ставит выбранным первый
       const ext = extname(defaultPath).slice(1).toLowerCase();
-      const filters = [...(project ? [projectFilter()] : []), ...IMAGE_FILTERS].sort(
-        (a, b) => Number(b.extensions.includes(ext)) - Number(a.extensions.includes(ext)),
-      );
+      const filters = psd
+        ? [{ name: 'Photoshop', extensions: PSD_EXTENSIONS }]
+        : [...(project ? [projectFilter()] : []), ...IMAGE_FILTERS].sort((a, b) => Number(b.extensions.includes(ext)) - Number(a.extensions.includes(ext)));
       const res = await dialog.showSaveDialog(win, {
         defaultPath,
         message,

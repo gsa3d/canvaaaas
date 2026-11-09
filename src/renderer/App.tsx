@@ -369,10 +369,10 @@ export function App() {
   const activeObj = active ? objects.find((o) => o.id === active) : undefined;
   const activeGrp = activeGroup ? groups.find((g) => g.id === activeGroup) : undefined;
 
-  const notify = (text: string, error = true) => {
+  const notify = (text: string, error = true, ms = error ? 8000 : 4000) => {
     setToast({ text, error });
     window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), error ? 8000 : 4000);
+    toastTimer.current = window.setTimeout(() => setToast(null), ms);
   };
   const fail = (err: unknown) => notify(err instanceof Error ? err.message : String(err));
 
@@ -1068,7 +1068,7 @@ export function App() {
 
   // Без окон выбора файла (интерфейс в браузере для разработки) «Сохранить как» — скачивание:
   // документ со слоями — проектом .caaa, без слоёв — PNG
-  const download = (ext: 'png' | 'caaa') => {
+  const download = (ext: 'png' | 'caaa' | 'psd') => {
     const a = document.createElement('a');
     a.href = `/api/doc/export.${ext}`;
     a.download = '';
@@ -1084,15 +1084,16 @@ export function App() {
 
   const openRecent = (id: string) => post(`/api/recent/${id}/open`).catch(fail);
 
-  const save = async (how: 'save' | 'save-as' | 'export') => {
+  const save = async (how: 'save' | 'save-as' | 'export' | 'export-psd') => {
     if (!doc) return;
     if (!state?.nativeFiles && (how !== 'save' || !doc.path || doc.saveBlocker)) {
-      download(how !== 'export' && layers.length ? 'caaa' : 'png');
+      download(how === 'export-psd' ? 'psd' : how !== 'export' && layers.length ? 'caaa' : 'png');
       return;
     }
     try {
       const { path } = await post<{ path: string | null }>(`/api/doc/${how}`);
-      if (path) notify(L(`${how === 'export' ? 'Экспортировано' : 'Сохранено'}: ${fileName(path)}`, `${how === 'export' ? 'Exported' : 'Saved'}: ${fileName(path)}`), false);
+      const exported = how === 'export' || how === 'export-psd';
+      if (path) notify(L(`${exported ? 'Экспортировано' : 'Сохранено'}: ${fileName(path)}`, `${exported ? 'Exported' : 'Saved'}: ${fileName(path)}`), false);
     } catch (err) {
       fail(err);
     }
@@ -1134,6 +1135,7 @@ export function App() {
       case 'save':
       case 'save-as':
       case 'export':
+      case 'export-psd':
         void save(command);
         break;
       case 'undo':
@@ -1360,6 +1362,12 @@ export function App() {
       setBusy(null);
     }
   };
+
+  // Итог импорта PSD: сервер показывает его один раз, а окно узнаёт о нём из состояния
+  const notice = state?.notice;
+  useEffect(() => {
+    if (notice) notify(notice.text, false, 8000);
+  }, [notice?.id]);
 
   const saveStyle = (style: string) => post('/api/doc/style', { style }).then(() => setDialog(null), fail);
 
@@ -1699,7 +1707,16 @@ export function App() {
         {doc && tool === 'object' && segment && !maskLayer && segment.status !== 'ready' && <SegmentBanner segment={segment} onError={fail} />}
         {comparing && <div class="stage-banner">{L('Исходник', 'Original')}</div>}
         {!doc && state && <StartScreen recent={state.recent} onOpen={openDialog} onOpenRecent={openRecent} onError={fail} />}
-        {(busy ?? state?.activity) && <div class="busy">{busy ?? state?.activity}</div>}
+        {(busy ?? state?.activity) && (
+          <div class="busy">
+            {busy ?? state?.activity}
+            {state?.cancelable && (
+              <button class="link" onClick={() => post('/api/doc/cancel').catch(fail)}>
+                {L('Отменить', 'Cancel')}
+              </button>
+            )}
+          </div>
+        )}
         {toast && <div class={toast.error ? 'toast error' : 'toast'}>{toast.text}</div>}
       </main>
 
@@ -1939,7 +1956,7 @@ export function App() {
       <input
         ref={fileRef}
         type="file"
-        accept=".caaa,image/png,image/jpeg,image/webp,image/tiff"
+        accept=".caaa,.psd,.psb,image/png,image/jpeg,image/webp,image/tiff"
         hidden
         onChange={(e) => {
           const file = e.currentTarget.files?.[0];
@@ -2306,7 +2323,7 @@ function LayersPanel(props: {
     const busy = props.jobs.some((j) => (j.object === o.id || j.fillFor === o.id) && busyJob(j));
     const failed = props.jobs.some((j) => j.object === o.id && j.status === 'error');
     // Копия без фона: скрой её — под ней то же самое
-    const needsFill = o.kind !== 'fill' && !o.freed && !o.current && !o.hidden;
+    const needsFill = o.kind !== 'fill' && !o.freed && !o.imported && !o.current && !o.hidden;
     const filling = props.jobs.some((j) => j.fillFor === o.id && busyJob(j));
     // Что от слоя видно: у этой версии и маска; у исходника слоя из генерации маски нет
     const shown = o.kind !== 'fill' ? patches.get(o.current ?? o.layer ?? '') : undefined;

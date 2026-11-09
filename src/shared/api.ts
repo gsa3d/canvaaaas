@@ -187,6 +187,8 @@ export interface ObjectDto {
   layer?: string;
   /** Под слоем его самого больше нет (вырезан или дорисован фон): сдвиг и скрытие не открывают то же самое */
   freed?: boolean;
+  /** Пришёл из PSD: под ним не его копия */
+  imported?: boolean;
   /** Скрыт (с частями) */
   hidden?: boolean;
   /** Виден на холсте: не скрыт ни он, ни то, частью чего он является, ни его группы */
@@ -307,6 +309,10 @@ export interface StateDto {
   recent: RecentDto[];
   /** Что сервер сейчас делает с файлом: «Открываю…», «Сохраняю…» */
   activity: string | null;
+  /** То, что сервер делает с файлом, можно отменить (импорт и экспорт PSD) */
+  cancelable: boolean;
+  /** Что вышло у импорта PSD: что пришло и что пропущено */
+  notice: { id: number; text: string } | null;
   /** Есть окна выбора файла (в приложении); без них картинка загружается из браузера */
   nativeFiles: boolean;
 }
@@ -425,6 +431,7 @@ export type AppCommand =
   | 'save'
   | 'save-as'
   | 'export'
+  | 'export-psd'
   | 'undo'
   | 'redo'
   | 'deselect'
